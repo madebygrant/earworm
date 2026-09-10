@@ -13,32 +13,104 @@ use crate::ytdlp;
 
 pub fn run(mut cfg: Config, tx: Sender<Msg>, cancel: Arc<AtomicBool>, cmds: Receiver<Cmd>) {
     let mut tracks = Vec::new();
-    let result =
-        ask_url(&mut cfg, &tx).and_then(|()| pipeline(&cfg, &tx, &cancel, &mut tracks));
+    let result = match ask_url(&mut cfg, &tx) {
+        Ok(true) => pipeline(&cfg, &tx, &cancel, &mut tracks),
+        /* Cancelling the first question cancels the tool: no run started, so
+           there is nothing to stay open for and no failure worth reporting. */
+        Ok(false) => {
+            let _ = tx.send(Msg::Quit);
+            return;
+        }
+        Err(err) => Err(err),
+    };
     let _ = tx.send(Msg::Done(result.map_err(|e| e.to_string())));
     serve(&cfg, &tx, &mut tracks, cmds, &cancel);
 }
 
 /// The URL can arrive from a prompt rather than the command line, so running
 /// earworm bare still gets somewhere. Always asks, even under --no-fix: there
-/// is nothing to do without one.
-fn ask_url(cfg: &mut Config, tx: &Sender<Msg>) -> Result<()> {
+/// is nothing to do without one. `Ok(false)` means the user cancelled.
+fn ask_url(cfg: &mut Config, tx: &Sender<Msg>) -> Result<bool> {
     if !cfg.url.is_empty() {
-        return Ok(());
+        return Ok(true);
     }
     let asker = Asker {
         tx: tx.clone(),
         enabled: true,
     };
     let _ = tx.send(Msg::Stage("waiting for a playlist URL".into()));
-    let url = asker
-        .input("YouTube playlist URL", "")
-        .context("cancelled")?;
-    if url.is_empty() {
-        bail!("no playlist URL given");
+
+    /* Asks again rather than failing: a mistyped link is the likely case, and
+       handing back the text means fixing it instead of retyping it. */
+    let mut header = "YouTube playlist URL".to_string();
+    let mut typed = String::new();
+    loop {
+        let Some(answer) = asker.input_or_quit(&header, &typed) else {
+            return Ok(false);
+        };
+        if let Some(url) = youtube_url(&answer) {
+            cfg.url = url;
+            return Ok(true);
+        }
+        header = if answer.trim().is_empty() {
+            "Paste a YouTube link".into()
+        } else {
+            "Not a YouTube link".into()
+        };
+        typed = answer;
     }
-    cfg.url = url;
-    Ok(())
+}
+
+const HOSTS: [&str; 5] = [
+    "youtube.com",
+    "www.youtube.com",
+    "m.youtube.com",
+    "music.youtube.com",
+    "youtu.be",
+];
+
+/// Normalises a pasted link, or `None` if it is not one earworm can download.
+/// The host is matched after the scheme and any credentials, so a lookalike
+/// path like `evil.com/youtube.com/watch?v=x` cannot pass as YouTube.
+fn youtube_url(input: &str) -> Option<String> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // A pasted link often arrives without one, and yt-dlp wants it.
+    let full = if trimmed.contains("://") {
+        trimmed.to_string()
+    } else {
+        format!("https://{trimmed}")
+    };
+
+    let rest = full.split_once("://")?.1;
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let host = authority
+        .rsplit('@')
+        .next()?
+        .split(':')
+        .next()?
+        .to_ascii_lowercase();
+    if !HOSTS.contains(&host.as_str()) {
+        return None;
+    }
+
+    let (route, query) = path.split_once('?').unwrap_or((path, ""));
+    let has = |key: &str| {
+        query
+            .split('&')
+            .any(|p| p.starts_with(key) && p.len() > key.len())
+    };
+    /* Bare youtube.com is a valid URL and a useless one, so the link has to
+       name something: a video, a playlist, or a channel to walk. */
+    let ok = match route.trim_end_matches('/') {
+        "" => false,
+        "watch" => has("v="),
+        "playlist" => has("list="),
+        other => host == "youtu.be" || !other.is_empty(),
+    };
+    ok.then_some(full)
 }
 
 fn pipeline(
@@ -412,7 +484,69 @@ fn label(title: &str, artist: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{Pick, cover_options};
+
+    #[test]
+    fn accepts_the_shapes_a_youtube_link_actually_comes_in() {
+        for link in [
+            "https://www.youtube.com/playlist?list=PLabc",
+            "https://youtube.com/watch?v=dQw4w9WgXcQ",
+            "https://music.youtube.com/playlist?list=OLAK5uy_x",
+            "https://m.youtube.com/watch?v=abc&list=PLx",
+            "https://youtu.be/dQw4w9WgXcQ",
+            "https://www.youtube.com/shorts/abc123",
+            "https://www.youtube.com/@someartist",
+            "  https://youtu.be/abc  ",
+        ] {
+            assert!(youtube_url(link).is_some(), "rejected {link}");
+        }
+    }
+
+    #[test]
+    fn a_missing_scheme_is_added_rather_than_rejected() {
+        assert_eq!(
+            youtube_url("youtube.com/watch?v=abc").as_deref(),
+            Some("https://youtube.com/watch?v=abc")
+        );
+        assert_eq!(
+            youtube_url("http://youtu.be/abc").as_deref(),
+            Some("http://youtu.be/abc"),
+            "an explicit scheme is left alone"
+        );
+    }
+
+    #[test]
+    fn rejects_empty_and_non_youtube_input() {
+        for link in [
+            "",
+            "   ",
+            "hello",
+            "https://vimeo.com/12345",
+            "https://youtube.com",
+            "https://youtube.com/",
+            "https://www.youtube.com/watch",
+            "https://www.youtube.com/watch?v=",
+            "https://www.youtube.com/playlist?list=",
+            "https://www.youtube.com/playlist?v=abc",
+        ] {
+            assert!(youtube_url(link).is_none(), "accepted {link:?}");
+        }
+    }
+
+    /* A host that merely mentions youtube.com must not pass: the whole point
+       of parsing the authority is that a path cannot impersonate one. */
+    #[test]
+    fn rejects_hosts_that_only_look_like_youtube() {
+        for link in [
+            "https://evil.com/youtube.com/watch?v=abc",
+            "https://youtube.com.evil.com/watch?v=abc",
+            "https://notyoutube.com/watch?v=abc",
+            "https://youtube.com@evil.com/watch?v=abc",
+            "https://evil.com/?next=https://youtube.com/watch?v=abc",
+        ] {
+            assert!(youtube_url(link).is_none(), "accepted {link}");
+        }
+    }
+    use super::{Pick, cover_options, youtube_url};
     use crate::lookup::Artwork;
 
     fn art(label: &str, url: &str) -> Artwork {

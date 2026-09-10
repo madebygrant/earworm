@@ -118,7 +118,16 @@ pub enum Prompt {
     Input {
         header: String,
         value: String,
+        /// What Esc does here, since it is the only key whose effect changes
+        /// between prompts: every other one leaves the track alone.
+        escape: Escape,
     },
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum Escape {
+    Skip,
+    Quit,
 }
 
 pub enum Reply {
@@ -149,6 +158,8 @@ pub enum Msg {
     Log(String),
     Ask(Prompt, Sender<Reply>),
     Done(Result<String, String>),
+    /// Nothing to report and nothing to look at, so close the UI outright.
+    Quit,
 }
 
 /// Prompts are answered by the UI thread, so a question blocks only the worker.
@@ -182,12 +193,23 @@ impl Asker {
     /// None means the user cancelled. An empty string is a real answer the
     /// caller has to judge, so clearing a field cannot look like an escape.
     pub fn input(&self, header: &str, value: &str) -> Option<String> {
+        self.prompt(header, value, Escape::Skip)
+    }
+
+    /// For a question with no run behind it yet, where cancelling ends the
+    /// tool rather than leaving something as it was.
+    pub fn input_or_quit(&self, header: &str, value: &str) -> Option<String> {
+        self.prompt(header, value, Escape::Quit)
+    }
+
+    fn prompt(&self, header: &str, value: &str, escape: Escape) -> Option<String> {
         if !self.enabled {
             return None;
         }
         match self.ask(Prompt::Input {
             header: header.into(),
             value: value.into(),
+            escape,
         }) {
             Reply::Text(t) => Some(t.trim().to_string()),
             _ => None,
@@ -286,6 +308,7 @@ impl App {
                 self.stage = if result.is_ok() { "finished" } else { "failed" }.into();
                 self.done = Some(result);
             }
+            Msg::Quit => self.quit = true,
         }
     }
 

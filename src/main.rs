@@ -13,14 +13,15 @@ use std::sync::mpsc::{self, TryRecvError};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 
 use app::{App, Cmd, Prompt, Reply};
 use config::{Cli, Config};
 
 fn main() -> Result<()> {
-    let cfg: Config = Cli::parse().into();
+    let matches = Cli::command().get_matches();
+    let cfg = Config::build(Cli::from_arg_matches(&matches)?, &matches)?;
     let settings = cfg.describe();
     let (tx, rx) = mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel();
@@ -70,7 +71,8 @@ fn run(
                    before Done means it died. Without this the UI would keep
                    drawing a run that had already stopped. */
                 Err(TryRecvError::Disconnected) => {
-                    if app.done.is_none() {
+                    // A worker that asked to quit has already said its piece.
+                    if app.done.is_none() && !app.quit {
                         app.done = Some(Err("worker stopped unexpectedly".into()));
                         app.quit = true;
                     }

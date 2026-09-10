@@ -51,6 +51,12 @@ earworm URL -- --cookies-from-browser firefox   # extra args go to yt-dlp
 Files land in `<dir>/<playlist name>/NN - Title.opus`, alongside `cover.jpg`
 and `<playlist name>.m3u8`.
 
+Run without a URL and earworm asks for one. It accepts `youtube.com`,
+`youtu.be`, and the `m.` and `music.` subdomains, with or without the
+`https://`, and the link has to name a video, playlist or channel. Anything
+else is handed back for editing rather than rejected outright. Esc at that
+prompt quits.
+
 ### Flags
 
 | Flag | Effect |
@@ -61,9 +67,43 @@ and `<playlist name>.m3u8`.
 | `-C`, `--no-cover` | don't write `cover.jpg` |
 | `-M`, `--no-m3u8` | don't write the playlist file |
 | `-F`, `--no-fix` | never prompt; unresolved tracks keep parsed tags |
+| `--config PATH` | read this config file instead of the default one |
+| `--no-config` | ignore the config file entirely |
 
 `-L -F` is the fast path: download and tag from titles, no network lookups, no
 questions.
+
+## Configuration
+
+`~/.config/earworm/config.toml` (or `$XDG_CONFIG_HOME/earworm/config.toml`)
+holds the settings you'd otherwise retype every run. Every key is optional.
+
+```toml
+dir = "~/Music/playlists"
+
+parse = true       # split artist and title out of the video title
+lookup = true      # confirm against AcoustID and Deezer
+cover = true       # write cover.jpg beside the tracks
+m3u8 = true        # write the playlist file
+fix = true         # prompt when a track can't be resolved
+
+extra = ["--sleep-requests", "1"]   # always passed to yt-dlp
+acoustid_key = "..."                # or use ACOUSTID_API_KEY
+```
+
+Command-line flags win over the file, and the file wins over the defaults
+shown above. Since every flag is a negation, the command line can only switch
+a feature off. To run with something the file disables, edit the file.
+
+`extra` from the file comes before anything after `--` on the command line, so
+a repeated yt-dlp option takes its command-line value.
+
+`ACOUSTID_API_KEY` overrides `acoustid_key`, which is handy for using a
+different key for one run. A key in the file is stored in plain text, so
+`chmod 600 ~/.config/earworm/config.toml` if the machine has other users.
+
+An unknown key is a startup error rather than a silent no-op, so a typo tells
+you instead of quietly ignoring the setting.
 
 ### Keys
 
