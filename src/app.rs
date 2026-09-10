@@ -110,10 +110,42 @@ impl Track {
     }
 }
 
+/// One already-downloaded playlist folder, read from its manifest alone so the
+/// library opens with no network and no yt-dlp.
+#[derive(Clone)]
+pub struct Shelf {
+    pub path: PathBuf,
+    pub name: String,
+    pub url: String,
+    pub tracks: usize,
+    /// Entries whose file has since been deleted. Not the same as a track that
+    /// left the playlist, which needs a listing to know about.
+    pub missing: usize,
+    pub synced: Option<u64>,
+}
+
+/// Which screen has the keys. The library is a screen and not a prompt because
+/// its rows stay open: opening one and pressing Esc comes back to it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum View {
+    Tracks,
+    Library,
+}
+
 /// Work the UI asks of the worker once the run itself has finished.
 pub enum Cmd {
     Edit(usize),
     Cover(usize),
+    /// Load a library row from its manifest, with no network behind it. The
+    /// folder and not the row: the worker re-reads the library, and a row
+    /// position would then name whatever had moved into it.
+    Open(PathBuf),
+    /// Sync the playlist that is open, from the URL its manifest recorded.
+    SyncOne,
+    ResyncAll,
+    /// Ask for a URL and sync it, which is the only way into a new playlist
+    /// once the library screen has replaced the opening question.
+    Url,
     /// Every failed track at once: one at a time would mean one yt-dlp run
     /// each, and the failures usually share a cause.
     Retry,
@@ -192,8 +224,18 @@ pub enum Msg {
         path: PathBuf,
     },
     Log(String),
+    /// The playlists on disk. Re-sent after every sync, which is what changes
+    /// the counts, and `show` is false then: the run's own tracks are what the
+    /// user is looking at and must not be replaced under them.
+    Library { shelves: Vec<Shelf>, show: bool },
     Ask(Prompt, Sender<Reply>),
-    Done(Result<String, String>),
+    /// A run has settled. `stage` is the header word for a success, since not
+    /// everything that settles has run: opening a folder from the library
+    /// downloads nothing and "finished" would be a claim about work.
+    Done {
+        result: Result<String, String>,
+        stage: &'static str,
+    },
     /// Sent once a bulk action has finished, so a cancelled one leaves the
     /// selection intact rather than making the user rebuild it.
     Unmark,
@@ -229,11 +271,6 @@ impl Asker {
         self.pick(header, "", options, Escape::Skip)
     }
 
-    /// For a menu with no run behind it yet, where backing out ends the tool.
-    pub fn choose_or_quit(&self, header: &str, options: Vec<String>) -> Option<usize> {
-        self.pick(header, "", options, Escape::Quit)
-    }
-
     /// A menu that reports something before it asks, and that backing out of
     /// leaves the session where it was rather than skipping or quitting.
     pub fn choose_noted(&self, header: &str, note: &str, options: Vec<String>) -> Option<usize> {
@@ -267,10 +304,10 @@ impl Asker {
         self.prompt(header, value, Escape::Skip)
     }
 
-    /// For a question with no run behind it yet, where cancelling ends the
-    /// tool rather than leaving something as it was.
-    pub fn input_or_quit(&self, header: &str, value: &str) -> Option<String> {
-        self.prompt(header, value, Escape::Quit)
+    /// For a question whose cancel means something other than "leave this
+    /// track alone": ending the tool, or going back to the screen behind it.
+    pub fn input_with(&self, header: &str, value: &str, escape: Escape) -> Option<String> {
+        self.prompt(header, value, escape)
     }
 
     fn prompt(&self, header: &str, value: &str, escape: Escape) -> Option<String> {
@@ -288,6 +325,10 @@ impl Asker {
     }
 }
 
+fn matched(track: &Track, needle: &str) -> bool {
+    track.name.to_lowercase().contains(needle) || track.status.label().contains(needle)
+}
+
 pub struct App {
     pub cmds: Option<Sender<Cmd>>,
     pub settings: String,
@@ -300,7 +341,18 @@ pub struct App {
     pub playlist: String,
     pub tracks: Vec<Track>,
     pub logs: Vec<String>,
+    pub view: View,
+    pub library: Vec<Shelf>,
+    /// Cursor in the library, kept apart from the track cursor so coming back
+    /// to the library lands on the row you left from.
+    pub shelf: usize,
     pub cursor: usize,
+    /// Narrows what the track list shows. A view over `tracks` and nothing
+    /// more: `cursor` stays a position in `tracks` and `marked` stays a set of
+    /// track indices, so no command means anything different under a filter.
+    pub filter: String,
+    /// The filter box has the keys, so `q` types a letter rather than quitting.
+    pub typing_filter: bool,
     /// Track indices, not row positions, so a bulk action means the same
     /// thing to the worker as it does on screen.
     pub marked: HashSet<usize>,
@@ -330,7 +382,12 @@ impl App {
             playlist: String::new(),
             tracks: Vec::new(),
             logs: Vec::new(),
+            view: View::Tracks,
+            library: Vec::new(),
+            shelf: 0,
             cursor: 0,
+            filter: String::new(),
+            typing_filter: false,
             marked: HashSet::new(),
             busy: false,
             follow: true,
@@ -397,6 +454,13 @@ impl App {
                 }
             }
             Msg::Log(line) => self.logs.push(line),
+            Msg::Library { shelves, show } => {
+                self.library = shelves;
+                self.shelf = self.shelf.min(self.library.len().saturating_sub(1));
+                if show {
+                    self.view = View::Library;
+                }
+            }
             Msg::Ask(prompt, reply) => {
                 if let Prompt::Input { value, .. } = &prompt {
                     self.input = value.clone();
@@ -404,8 +468,8 @@ impl App {
                 self.choice = 0;
                 self.prompt = Some((prompt, reply));
             }
-            Msg::Done(result) => {
-                self.stage = if result.is_ok() { "finished" } else { "failed" }.into();
+            Msg::Done { result, stage } => {
+                self.stage = if result.is_ok() { stage } else { "failed" }.into();
                 self.resting = self.stage.clone();
                 self.flash_until = None;
                 self.done = Some(result);
@@ -419,9 +483,20 @@ impl App {
                 self.playlist.clear();
                 self.cursor = 0;
                 self.follow = true;
+                /* A filter from the last playlist would hide most of the next
+                   one, which reads as a broken run rather than a filter. */
+                self.filter.clear();
+                self.typing_filter = false;
+                // Whatever is starting has tracks, and they are the point.
+                self.view = View::Tracks;
             }
             Msg::Quit => self.quit = true,
         }
+        /* Any message can change what the filter shows: `Update` carries a new
+           name, and it and `Progress` change the status word. A cursor left on
+           a row that has stopped matching is a selection nobody can see, and
+           every command reads as dead until the next keypress moves it. */
+        self.snap();
     }
 
     /// Commands are only offered once the pipeline is done: the worker is busy
@@ -449,10 +524,12 @@ impl App {
         let Some(status) = self.tracks.get(self.cursor).map(|t| t.status) else {
             return;
         };
+        /* Only what is on screen: `/` then `m` is how you mark one artist's
+           bad rows, and reaching past the filter would mark the whole run. */
         let same: Vec<usize> = self
             .tracks
             .iter()
-            .filter(|t| t.status == status)
+            .filter(|t| t.status == status && self.shows(t))
             .map(|t| t.index)
             .collect();
         // Already all marked, so the same key takes them back off again.
@@ -475,7 +552,34 @@ impl App {
     }
 
     pub fn can_command(&self) -> bool {
-        self.done.is_some() && self.prompt.is_none() && !self.busy && !self.tracks.is_empty()
+        self.view == View::Tracks
+            && self.done.is_some()
+            && self.prompt.is_none()
+            && !self.busy
+            && !self.tracks.is_empty()
+    }
+
+    /// Library keys, which unlike the track ones need no finished run behind
+    /// them: a bare start with playlists on disk lands here having synced
+    /// nothing.
+    pub fn selected_shelf(&self) -> Option<&Shelf> {
+        self.library.get(self.shelf)
+    }
+
+    /* Not gated on the library having rows: `n` is the way out of an empty
+       one, and `Cmd::Open` is guarded by there being a row to open. */
+    pub fn can_browse(&self) -> bool {
+        self.view == View::Library && self.prompt.is_none() && !self.busy
+    }
+
+    /// Esc in the track view. Goes back to the library when there is one, and
+    /// otherwise means what it always did.
+    pub fn leave_tracks(&mut self) {
+        if self.library.is_empty() || self.busy {
+            self.quit = true;
+        } else {
+            self.view = View::Library;
+        }
     }
 
     pub fn send(&mut self, cmd: Cmd) {
@@ -486,8 +590,104 @@ impl App {
         }
     }
 
+    /// Filtered out means not selected: otherwise `e` would edit a track that
+    /// is not on screen.
     pub fn selected(&self) -> Option<usize> {
-        self.tracks.get(self.cursor).map(|t| t.index)
+        self.tracks
+            .get(self.cursor)
+            .filter(|t| self.shows(t))
+            .map(|t| t.index)
+    }
+
+    /// Whether a row survives the filter, matched against the name and the
+    /// status word: the artist or title you are looking for, or `/failed`.
+    pub fn shows(&self, track: &Track) -> bool {
+        self.filter.is_empty() || matched(track, &self.filter.to_lowercase())
+    }
+
+    /// Positions in `tracks` the list is showing, in order.
+    pub fn rows(&self) -> Vec<usize> {
+        if self.filter.is_empty() {
+            return (0..self.tracks.len()).collect();
+        }
+        // Lowercased once for the pass, not once per row.
+        let needle = self.filter.to_lowercase();
+        self.tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| matched(t, &needle))
+            .map(|(pos, _)| pos)
+            .collect()
+    }
+
+    /// How many rows are showing, for the header. Counted rather than
+    /// collected, since the positions themselves are not wanted.
+    pub fn shown(&self) -> usize {
+        if self.filter.is_empty() {
+            return self.tracks.len();
+        }
+        let needle = self.filter.to_lowercase();
+        self.tracks.iter().filter(|t| matched(t, &needle)).count()
+    }
+
+    /// Which drawn row the cursor is on, given the view `rows` describes. Takes
+    /// it rather than recomputing, so the caller's view and the highlight can
+    /// never be answers to two different questions.
+    pub fn row_of_cursor(&self, rows: &[usize]) -> Option<usize> {
+        rows.iter().position(|pos| *pos == self.cursor)
+    }
+
+    /// Puts the cursor back on a row that shows. Called after every change to
+    /// the filter, since a cursor on a hidden track is a selection nobody can
+    /// see and every command would still act on it.
+    pub fn snap(&mut self) {
+        // Nothing is hidden, so the cursor is already on a row that shows.
+        if self.filter.is_empty() {
+            return;
+        }
+        let rows = self.rows();
+        if rows.is_empty() || rows.contains(&self.cursor) {
+            return;
+        }
+        self.cursor = rows
+            .iter()
+            .copied()
+            .min_by_key(|pos| pos.abs_diff(self.cursor))
+            .unwrap_or(self.cursor);
+    }
+
+    /// One row down or up through what is showing.
+    pub fn step(&mut self, down: bool) {
+        self.follow = false;
+        let rows = self.rows();
+        let Some(at) = rows.iter().position(|pos| *pos == self.cursor) else {
+            self.snap();
+            return;
+        };
+        let next = if down {
+            (at + 1).min(rows.len().saturating_sub(1))
+        } else {
+            at.saturating_sub(1)
+        };
+        self.cursor = rows[next];
+    }
+
+    /// Stops following, like a step does: `g` and `G` are someone taking the
+    /// cursor somewhere, and the next progress message would otherwise drag it
+    /// straight back to the active track.
+    pub fn jump(&mut self, last: bool) {
+        self.follow = false;
+        let rows = self.rows();
+        let at = if last { rows.last() } else { rows.first() };
+        if let Some(pos) = at {
+            self.cursor = *pos;
+        }
+    }
+
+    pub fn clear_filter(&mut self) {
+        self.filter.clear();
+        self.typing_filter = false;
+        self.snap();
     }
 
     fn track_mut(&mut self, index: usize) -> Option<&mut Track> {
@@ -498,7 +698,11 @@ impl App {
         if !self.follow {
             return;
         }
-        if let Some(pos) = self.tracks.iter().position(|t| t.index == index) {
+        if let Some(pos) = self
+            .tracks
+            .iter()
+            .position(|t| t.index == index && self.shows(t))
+        {
             self.cursor = pos;
         }
     }
@@ -605,7 +809,10 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(tx, String::new());
         app.apply(Msg::Stage("identifying".into()));
-        app.apply(Msg::Done(Ok("12 tracks".into())));
+        app.apply(Msg::Done {
+            result: Ok("12 tracks".into()),
+            stage: "finished",
+        });
         assert_eq!(app.stage, "finished");
 
         app.apply(Msg::Flash("failed: cannot write tags".into()));
@@ -624,7 +831,10 @@ mod tests {
     fn a_flash_never_reverts_to_a_commands_progress_message() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(tx, String::new());
-        app.apply(Msg::Done(Ok("12 tracks".into())));
+        app.apply(Msg::Done {
+            result: Ok("12 tracks".into()),
+            stage: "finished",
+        });
         app.apply(Msg::Stage("looking for artwork".into()));
         app.apply(Msg::Flash("cancelled".into()));
 
@@ -645,8 +855,8 @@ mod tests {
         let asker = Asker { tx, enabled: false };
         // Disabled, so these only prove which Escape each entry point picks.
         assert!(asker.choose("h", vec![]).is_none());
-        assert!(asker.choose_or_quit("h", vec![]).is_none());
         assert!(asker.choose_noted("h", "n", vec![]).is_none());
+        assert!(asker.input_with("h", "", Escape::Quit).is_none());
     }
 
     #[test]
@@ -674,6 +884,274 @@ mod tests {
         drop(rx);
         app.send(Cmd::Retry);
         assert!(app.can_command(), "nothing was queued, so nothing is pending");
+    }
+
+    /// Tracks with names to filter on, statuses in order Ok, Failed, Ok...
+    fn named(names: &[&str]) -> App {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.tracks = names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let mut track = Track::new(
+                    i + 1,
+                    "id".into(),
+                    (*name).into(),
+                    PathBuf::from("/tmp/x.opus"),
+                );
+                track.status = if i % 2 == 0 { Status::Ok } else { Status::Failed };
+                track
+            })
+            .collect();
+        app
+    }
+
+    /* The cursor stays a position in `tracks` while the list shows a subset,
+       so every movement has to step over what is hidden. A cursor left on a
+       hidden row is a selection nobody can see that every command still acts
+       on. */
+    #[test]
+    fn moving_under_a_filter_only_lands_on_rows_that_show() {
+        let mut app = named(&["Aphex Twin - Xtal", "Boards of Canada - Roygbiv", "Aphex Twin - Avril"]);
+        app.filter = "aphex".into();
+        assert_eq!(app.rows(), [0, 2]);
+
+        app.cursor = 0;
+        app.step(true);
+        assert_eq!(app.cursor, 2, "j landed on the hidden middle row");
+        assert_eq!(app.selected(), Some(3));
+        app.step(true);
+        assert_eq!(app.cursor, 2, "j ran off the end of the filtered list");
+        app.step(false);
+        assert_eq!(app.cursor, 0);
+
+        app.jump(true);
+        assert_eq!(app.cursor, 2, "G left the filtered list");
+        app.jump(false);
+        assert_eq!(app.cursor, 0);
+    }
+
+    /* Every other way of moving the cursor by hand stops the run dragging it
+       back, and `g`/`G` reading as "jump, then get pulled to wherever the
+       download is" makes the keys look broken during a run. */
+    #[test]
+    fn jumping_to_an_end_stops_following_the_active_track() {
+        let mut app = named(&["One", "Two", "Three"]);
+        assert!(app.follow, "a run follows by default");
+
+        app.jump(true);
+        assert_eq!(app.cursor, 2);
+        assert!(!app.follow, "G kept following");
+
+        app.apply(Msg::Progress { index: 1, percent: 40 });
+        assert_eq!(app.cursor, 2, "the run pulled the cursor off the end");
+
+        app.jump(false);
+        assert_eq!(app.cursor, 0);
+        app.apply(Msg::Progress { index: 3, percent: 40 });
+        assert_eq!(app.cursor, 0, "the run pulled the cursor off the top");
+
+        // f puts it back, which is the only way follow turns on again.
+        app.follow = true;
+        app.apply(Msg::Progress { index: 3, percent: 60 });
+        assert_eq!(app.cursor, 2);
+    }
+
+    /* Editing the track you are on is the everyday way to filter it out from
+       under yourself: `Update` carries the new name. Nothing in the key
+       handlers runs then, so without a snap in `apply` the cursor stays on a
+       row that is no longer drawn, no `▌` appears anywhere, and `e`, `c` and
+       `space` all go quiet until the next `j`. */
+    #[test]
+    fn a_message_that_filters_the_cursors_track_out_moves_the_cursor() {
+        let mut app = named(&["Aphex Twin - Xtal", "Boards - Olson", "Aphex Twin - Avril"]);
+        app.filter = "aphex".into();
+        app.cursor = 0;
+        assert_eq!(app.selected(), Some(1));
+
+        app.apply(Msg::Update {
+            index: 1,
+            status: Status::Manual,
+            source: Some("typed".into()),
+            note: None,
+            name: Some("Edited - Fixed".into()),
+        });
+
+        assert_eq!(app.rows(), [2], "only the other match should be left");
+        assert!(
+            app.selected().is_some(),
+            "the cursor is on a row that is not drawn, so every command is dead"
+        );
+        assert_eq!(app.cursor, 2);
+        assert_eq!(app.row_of_cursor(&app.rows()), Some(0), "nothing is highlighted");
+    }
+
+    /* A status change does it too: `/have` stops matching the moment a track
+       starts downloading. */
+    #[test]
+    fn a_status_change_under_a_status_filter_also_moves_the_cursor() {
+        let mut app = named(&["One", "Two", "Three"]);
+        app.filter = "ok".into();
+        assert_eq!(app.rows(), [0, 2]);
+        app.cursor = 0;
+
+        // Track 2, the one the filter already hides, not the cursor's own.
+        app.apply(Msg::Progress { index: 2, percent: 0 });
+        assert_eq!(app.cursor, 0, "an unrelated track moved the cursor");
+
+        app.apply(Msg::Progress { index: 2, percent: 50 });
+        app.apply(Msg::Update {
+            index: 2,
+            status: Status::Ok,
+            source: None,
+            note: None,
+            name: None,
+        });
+        assert_eq!(app.rows(), [0, 1, 2], "the track joined the filter");
+        assert!(app.selected().is_some());
+    }
+
+    /* Narrowing the filter under the cursor must move it, or the highlighted
+       row is off screen and `e` edits a track the user cannot see. */
+    #[test]
+    fn a_cursor_on_a_hidden_row_is_neither_shown_nor_selected() {
+        let mut app = named(&["Aphex Twin - Xtal", "Boards of Canada - Roygbiv"]);
+        app.cursor = 1;
+        app.filter = "aphex".into();
+        assert_eq!(app.selected(), None, "a hidden track was still selectable");
+
+        app.snap();
+        assert_eq!(app.cursor, 0);
+        assert_eq!(app.selected(), Some(1));
+    }
+
+    /* `/` then `m` is how you mark one artist's bad rows. Reaching past the
+       filter would mark the whole run instead, which is the opposite. */
+    #[test]
+    fn marking_by_status_stops_at_the_filter() {
+        let mut app = named(&["Aphex Twin - Xtal", "Aphex Twin - Avril", "Boards - Olson"]);
+        app.tracks[2].status = Status::Ok;
+        app.filter = "aphex".into();
+        app.cursor = 0;
+        app.mark_like_cursor();
+        assert_eq!(app.targets(), [1], "the hidden Ok track was marked too");
+    }
+
+    /* A mark is an explicit choice and a filter is a view, so marks made
+       before one still count: the bar's "N marked" is what says so. */
+    #[test]
+    fn a_filter_does_not_drop_marks_made_before_it() {
+        let mut app = named(&["Aphex Twin - Xtal", "Boards - Olson"]);
+        app.cursor = 1;
+        app.toggle_mark();
+        app.filter = "aphex".into();
+        app.snap();
+        assert_eq!(app.targets(), [2]);
+    }
+
+    #[test]
+    fn a_filter_matches_the_status_word_as_well_as_the_name() {
+        let mut app = named(&["One", "Two", "Three"]);
+        app.filter = "failed".into();
+        assert_eq!(app.rows(), [1]);
+        app.filter = "APHEX".into();
+        assert!(app.rows().is_empty());
+    }
+
+    /* A filter left over from the last playlist hides most of the next one,
+       which reads as a broken run rather than as a filter. */
+    #[test]
+    fn a_new_playlist_starts_unfiltered() {
+        let mut app = named(&["One", "Two"]);
+        app.filter = "one".into();
+        app.typing_filter = true;
+        app.apply(Msg::Restart);
+        assert!(app.filter.is_empty());
+        assert!(!app.typing_filter);
+    }
+
+    fn shelf(name: &str) -> Shelf {
+        Shelf {
+            path: PathBuf::from("/music").join(name),
+            name: name.into(),
+            url: "u".into(),
+            tracks: 3,
+            missing: 0,
+            synced: None,
+        }
+    }
+
+    /* A sync sends the library again to update its counts, and doing that
+       while the user is watching the run it belongs to would swap the screen
+       out from under them. */
+    #[test]
+    fn refreshing_the_library_does_not_take_over_the_screen() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.apply(Msg::Library {
+            shelves: vec![shelf("Focus")],
+            show: true,
+        });
+        assert_eq!(app.view, View::Library);
+
+        app.apply(Msg::Restart);
+        assert_eq!(app.view, View::Tracks, "a starting run stayed hidden");
+        app.apply(Msg::Library {
+            shelves: vec![shelf("Focus"), shelf("Road trip")],
+            show: false,
+        });
+        assert_eq!(app.view, View::Tracks);
+        assert_eq!(app.library.len(), 2, "the new counts were dropped");
+    }
+
+    /* The cursor is an index into a list that a sync can shorten, and a stale
+       one would draw a selection past the end of the rows. */
+    #[test]
+    fn the_library_cursor_stays_inside_a_list_that_shrank() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.apply(Msg::Library {
+            shelves: vec![shelf("A"), shelf("B"), shelf("C")],
+            show: true,
+        });
+        app.shelf = 2;
+        app.apply(Msg::Library {
+            shelves: vec![shelf("A")],
+            show: false,
+        });
+        assert_eq!(app.shelf, 0);
+    }
+
+    #[test]
+    fn escape_leaves_the_tracks_for_the_library_and_the_tool_without_one() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.leave_tracks();
+        assert!(app.quit, "with no library there is nowhere to go back to");
+
+        let mut app = App::new(std::sync::mpsc::channel().0, String::new());
+        app.library = vec![shelf("Focus")];
+        app.leave_tracks();
+        assert_eq!(app.view, View::Library);
+        assert!(!app.quit);
+    }
+
+    /* The two screens move different cursors and offer different keys, so
+       neither set may be live while the other is showing. */
+    #[test]
+    fn each_screen_only_answers_for_its_own_keys() {
+        let mut app = app_with(&[Status::Ok]);
+        app.done = Some(Ok(String::new()));
+        assert!(app.can_command());
+        assert!(!app.can_browse(), "library keys were live over the tracks");
+
+        app.apply(Msg::Library {
+            shelves: vec![shelf("Focus")],
+            show: true,
+        });
+        assert!(app.can_browse());
+        assert!(!app.can_command(), "e would edit a track that is not shown");
     }
 
     #[test]

@@ -17,12 +17,16 @@ use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 
-use app::{App, Cmd, Prompt, Reply};
+use app::{App, Cmd, Prompt, Reply, View};
 use config::{Cli, Config};
 
 fn main() -> Result<()> {
     let matches = Cli::command().get_matches();
     let cfg = Config::build(Cli::from_arg_matches(&matches)?, &matches)?;
+    if cfg.list {
+        list(&cfg);
+        return Ok(());
+    }
     let settings = cfg.describe();
     let (tx, rx) = mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel();
@@ -56,6 +60,30 @@ fn main() -> Result<()> {
         None => {}
     }
     Ok(())
+}
+
+/* Plain stdout and no TUI at all, so it can be piped or grepped. The URL is
+   on the line because it is the one thing a folder cannot tell you by name. */
+fn list(cfg: &Config) {
+    let shelves = worker::library(&cfg.dir);
+    if shelves.is_empty() {
+        println!("no playlists under {}", cfg.dir.display());
+        return;
+    }
+    let widest = shelves.iter().map(|s| s.name.chars().count()).max().unwrap_or(0);
+    for shelf in shelves {
+        let synced = shelf
+            .synced
+            .map_or_else(|| "never synced".to_string(), manifest::ago);
+        let missing = match shelf.missing {
+            0 => String::new(),
+            n => format!(", {n} missing"),
+        };
+        println!(
+            "{:widest$}  {:>4} tracks{:<13}  {synced:<13}  {}",
+            shelf.name, shelf.tracks, missing, shelf.url
+        );
+    }
 }
 
 fn run(
@@ -106,20 +134,30 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         app.show_help = false;
         return;
     }
+    if app.view == View::Library {
+        handle_library_key(app, code, mods);
+        return;
+    }
+    /* The filter box takes every key while it is open, so `q` types a letter
+       instead of ending the session. */
+    if app.typing_filter {
+        handle_filter_key(app, code, mods);
+        return;
+    }
     match code {
         KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.quit = true,
         KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
-        KeyCode::Char('q') | KeyCode::Esc => app.quit = true,
+        KeyCode::Char('q') => app.quit = true,
+        /* Esc unwinds one step at a time: the filter first, since a hidden
+           list is the thing most likely to have prompted the keypress, then
+           the library, then the tool. */
+        KeyCode::Esc if !app.filter.is_empty() => app.clear_filter(),
+        KeyCode::Esc => app.leave_tracks(),
+        KeyCode::Char('/') => app.typing_filter = true,
         KeyCode::Char('f') => app.follow = !app.follow,
         KeyCode::Char('l') => app.show_logs = !app.show_logs,
-        KeyCode::Char('j') | KeyCode::Down => {
-            app.follow = false;
-            app.cursor = (app.cursor + 1).min(app.tracks.len().saturating_sub(1));
-        }
-        KeyCode::Char('k') | KeyCode::Up => {
-            app.follow = false;
-            app.cursor = app.cursor.saturating_sub(1);
-        }
+        KeyCode::Char('j') | KeyCode::Down => app.step(true),
+        KeyCode::Char('k') | KeyCode::Up => app.step(false),
         KeyCode::Char('e') if app.can_command() => {
             if let Some(index) = app.selected() {
                 app.send(Cmd::Edit(index));
@@ -131,6 +169,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             }
         }
         KeyCode::Char('r') if app.can_command() => app.send(Cmd::Retry),
+        KeyCode::Char('S') if app.can_command() => app.send(Cmd::SyncOne),
         KeyCode::Char(' ') => app.toggle_mark(),
         KeyCode::Char('m') => app.mark_like_cursor(),
         KeyCode::Char('s') if app.can_command() => {
@@ -141,8 +180,65 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             let targets = app.targets();
             app.send(Cmd::Artist(targets));
         }
-        KeyCode::Char('g') => app.cursor = 0,
-        KeyCode::Char('G') => app.cursor = app.tracks.len().saturating_sub(1),
+        KeyCode::Char('g') => app.jump(false),
+        KeyCode::Char('G') => app.jump(true),
+        _ => {}
+    }
+}
+
+/* Narrows as you type rather than on Enter, so the list answers each letter.
+   Enter only puts the keys back; the filter itself stays until Esc. */
+fn handle_filter_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    match code {
+        KeyCode::Esc => app.clear_filter(),
+        KeyCode::Enter => app.typing_filter = false,
+        KeyCode::Char('u') if mods.contains(KeyModifiers::CONTROL) => {
+            app.filter.clear();
+            app.snap();
+        }
+        // The same word delete the prompts take, since this is the same typing.
+        KeyCode::Char('w') if mods.contains(KeyModifiers::CONTROL) => {
+            let kept = app.filter.trim_end();
+            let cut = kept.rfind(' ').map_or(0, |i| i + 1);
+            app.filter.truncate(cut);
+            app.snap();
+        }
+        KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.quit = true,
+        KeyCode::Backspace => {
+            app.filter.pop();
+            app.snap();
+        }
+        // Every other control combination would arrive as a bare letter.
+        KeyCode::Char(c) if !mods.contains(KeyModifiers::CONTROL) => {
+            app.filter.push(c);
+            app.snap();
+        }
+        _ => {}
+    }
+}
+
+/* The library moves a different cursor and its rows are folders, so it takes
+   almost none of the track keys. Everything that acts goes through the worker,
+   which owns the folders as it owns every other file. */
+fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    match code {
+        KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.quit = true,
+        KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
+        KeyCode::Char('q') | KeyCode::Esc => app.quit = true,
+        KeyCode::Char('l') => app.show_logs = !app.show_logs,
+        KeyCode::Char('j') | KeyCode::Down => {
+            app.shelf = (app.shelf + 1).min(app.library.len().saturating_sub(1));
+        }
+        KeyCode::Char('k') | KeyCode::Up => app.shelf = app.shelf.saturating_sub(1),
+        KeyCode::Char('g') => app.shelf = 0,
+        KeyCode::Char('G') => app.shelf = app.library.len().saturating_sub(1),
+        KeyCode::Enter if app.can_browse() => {
+            if let Some(folder) = app.selected_shelf().map(|s| s.path.clone()) {
+                app.send(Cmd::Open(folder));
+            }
+        }
+        KeyCode::Char('R') if app.can_browse() => app.send(Cmd::ResyncAll),
+        KeyCode::Char('n') if app.can_browse() => app.send(Cmd::Url),
         _ => {}
     }
 }

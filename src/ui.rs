@@ -7,7 +7,8 @@ use ratatui::widgets::{
     ScrollbarState,
 };
 
-use crate::app::{App, Prompt, Status};
+use crate::app::{App, Prompt, Status, View};
+use crate::manifest;
 
 use crate::theme::{self, AMBER, CREAM, DIM, GOLD, GREEN, RED, RULE, SURFACE};
 
@@ -34,10 +35,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.show_logs && !app.logs.is_empty() {
         let [list, logs] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(8)]).areas(body);
-        draw_tracks(frame, app, list);
+        draw_body(frame, app, list);
         draw_logs(frame, app, logs);
     } else {
-        draw_tracks(frame, app, body);
+        draw_body(frame, app, body);
     }
     draw_rule(frame, footrule);
     draw_status(frame, app, status);
@@ -75,23 +76,45 @@ fn draw_rule(frame: &mut Frame, area: Rect) {
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let mut spans = vec![Span::styled(" earworm", Style::new().fg(GOLD))];
-    if !app.playlist.is_empty() {
+    // The open playlist is not what is on screen while the library is.
+    if !app.playlist.is_empty() && app.view == View::Tracks {
         spans.push(dim("  ·  "));
         spans.push(Span::styled(app.playlist.clone(), Style::new().fg(CREAM)));
     }
     spans.push(dim("  ·  "));
-    spans.push(Span::styled(app.stage.clone(), Style::new().fg(CREAM)));
+    // The stage belongs to the last run, which the library screen is not.
+    let stage = if app.view == View::Library && !app.busy {
+        "library".to_string()
+    } else {
+        app.stage.clone()
+    };
+    spans.push(Span::styled(stage, Style::new().fg(CREAM)));
 
-    if !app.tracks.is_empty() {
+    if app.view == View::Library {
+        let count = app.library.len();
+        let plural = if count == 1 { "playlist" } else { "playlists" };
         spans.push(dim("  ·  "));
         spans.push(Span::styled(
-            format!("{}/{}", app.settled(), app.tracks.len()),
+            format!("{count} {plural}"),
+            Style::new().fg(CREAM),
+        ));
+    } else if !app.tracks.is_empty() {
+        spans.push(dim("  ·  "));
+        /* Under a filter the settled count describes the whole run, which is
+           not what the list is showing, so say how much of it is. */
+        spans.push(Span::styled(
+            if app.filter.is_empty() {
+                format!("{}/{}", app.settled(), app.tracks.len())
+            } else {
+                format!("{} of {}", app.shown(), app.tracks.len())
+            },
             Style::new().fg(CREAM),
         ));
     }
     /* Movement the track rows cannot show: a slow lookup still looks alive,
-       and a bulk action over fifty tracks explains why the keys went quiet. */
-    if app.done.is_none() || app.busy {
+       and a bulk action over fifty tracks explains why the keys went quiet.
+       The library has no run behind it, so an idle one must not appear busy. */
+    if (app.done.is_none() && app.view == View::Tracks) || app.busy {
         spans.push(Span::styled(
             format!("  {}", SPINNER[(app.tick / 2) % SPINNER.len()]),
             Style::new().fg(GOLD),
@@ -115,24 +138,114 @@ fn bar(percent: u16, width: usize) -> (String, String) {
     (done, "─".repeat(rest))
 }
 
+fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
+    match app.view {
+        View::Tracks => draw_tracks(frame, app, area),
+        View::Library => draw_library(frame, app, area),
+    }
+}
+
+/* One row per playlist folder, all of it from the manifests: the counts are
+   what is on disk, and the sync time is the only thing that says whether that
+   still matches the playlist upstream. */
+fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
+    /* Only reachable by emptying --dir while the screen is open: a bare start
+       with no playlists asks for a URL instead of showing this. */
+    if app.library.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(dim(" no playlists here now   n syncs one"))),
+            area,
+        );
+        return;
+    }
+
+    let width = area.width as usize;
+    let longest = app
+        .library
+        .iter()
+        .map(|s| s.name.chars().count())
+        .max()
+        .unwrap_or(0);
+    let name_width = longest.min(width.saturating_sub(28).max(12));
+
+    let items: Vec<ListItem> = app
+        .library
+        .iter()
+        .enumerate()
+        .map(|(row, shelf)| {
+            let name = truncate(&shelf.name, name_width);
+            let pad = name_width.saturating_sub(name.chars().count());
+            let mut spans = vec![
+                Span::styled(
+                    if row == app.shelf { "▌" } else { " " },
+                    Style::new().fg(GREEN),
+                ),
+                Span::styled(format!(" {name}{:pad$}", ""), Style::new().fg(CREAM)),
+                dim(format!("  {:>4} tracks", shelf.tracks)),
+            ];
+            /* Files the manifest lists that are no longer there, which a sync
+               would download again. Worth colour: it is the one thing on this
+               screen that is a problem. */
+            if shelf.missing > 0 {
+                spans.push(Span::styled(
+                    format!("  {} missing", shelf.missing),
+                    Style::new().fg(AMBER),
+                ));
+            }
+            spans.push(dim(match shelf.synced {
+                Some(at) => format!("  synced {}", manifest::ago(at)),
+                None => "  never synced".into(),
+            }));
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+
+    let mut state = ListState::default();
+    state.select(Some(app.shelf.min(app.library.len() - 1)));
+    frame.render_stateful_widget(List::new(items), area, &mut state);
+
+    if app.library.len() > area.height as usize {
+        let mut bar_state = ScrollbarState::new(app.library.len()).position(app.shelf);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .thumb_style(Style::new().fg(DIM))
+                .track_symbol(None),
+            area,
+            &mut bar_state,
+        );
+    }
+}
+
 fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
     let width = area.width as usize;
+    let rows = app.rows();
+    if rows.is_empty() && !app.tracks.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(dim(format!(
+                " nothing matches {}   esc clears it",
+                app.filter
+            )))),
+            area,
+        );
+        return;
+    }
+
     /* One name column for the whole list, so the dim source and note columns
        line up instead of stepping in and out with each title's length. */
-    let longest = app
-        .tracks
+    let longest = rows
         .iter()
-        .map(|t| t.name.chars().count())
+        .map(|pos| app.tracks[*pos].name.chars().count())
         .max()
         .unwrap_or(0);
     let name_width = longest.min(width.saturating_sub(STATUS_WIDTH + 9).max(12));
 
-    let items: Vec<ListItem> = app
-        .tracks
+    let items: Vec<ListItem> = rows
         .iter()
-        .enumerate()
-        .map(|(row, track)| {
-            let selected = row == app.cursor;
+        .map(|pos| {
+            let track = &app.tracks[*pos];
+            let selected = *pos == app.cursor;
             let mut spans = vec![
                 Span::styled(
                     if selected { "▌" } else { " " },
@@ -185,14 +298,14 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
         .collect();
 
     let mut state = ListState::default();
-    if !app.tracks.is_empty() {
-        state.select(Some(app.cursor.min(app.tracks.len() - 1)));
-    }
+    let at = app.row_of_cursor(&rows);
+    state.select(at);
     frame.render_stateful_widget(List::new(items), area, &mut state);
 
     // Only worth the column when the list actually runs off the pane.
-    if app.tracks.len() > area.height as usize {
-        let mut bar_state = ScrollbarState::new(app.tracks.len()).position(app.cursor);
+    if rows.len() > area.height as usize {
+        let mut bar_state =
+            ScrollbarState::new(rows.len()).position(at.unwrap_or(0));
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
@@ -231,11 +344,31 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             Style::new().fg(if app.show_logs { DIM } else { AMBER }),
         ));
     }
-    if !app.marked.is_empty() {
+    if !app.marked.is_empty() && app.view == View::Tracks {
         hints.push((
             format!("   {} marked", app.marked.len()),
             Style::new().fg(GOLD),
         ));
+    }
+    /* The library is the first screen a bare run shows, and a list of folders
+       gives no clue that Enter opens one. The track view has a finished run
+       behind it and a summary worth the same space. */
+    if app.view == View::Library {
+        hints.push(("   enter open".to_string(), Style::new().fg(GOLD)));
+        hints.push(("   R resync all".to_string(), Style::new().fg(DIM)));
+        hints.push(("   n new URL".to_string(), Style::new().fg(DIM)));
+    }
+    /* The box is the only thing on screen that says the list is narrowed, so
+       it holds its place ahead of the tally and the summary. */
+    if app.typing_filter {
+        hints.push((
+            format!("   /{}\u{2588}", app.filter),
+            Style::new().fg(GOLD),
+        ));
+        hints.push(("   enter keeps   esc clears".to_string(), Style::new().fg(DIM)));
+    } else if !app.filter.is_empty() {
+        hints.push((format!("   /{}", app.filter), Style::new().fg(GOLD)));
+        hints.push(("   esc clears".to_string(), Style::new().fg(DIM)));
     }
     hints.push(("   h keys".to_string(), Style::new().fg(DIM)));
     let reserved: usize = hints.iter().map(|(t, _)| t.chars().count()).sum();
@@ -243,11 +376,15 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     /* The hints are the part you cannot recover by looking elsewhere, so both
        the summary and the tally give way before they do. Every status in the
        tally is still readable in the list itself. */
-    let tally: Vec<(Status, String)> = app
-        .counts()
-        .into_iter()
-        .map(|(status, count)| (status, format!("{count} {}  ", status.label())))
-        .collect();
+    // Counted from the tracks, which are not what the library screen lists.
+    let tally: Vec<(Status, String)> = if app.view == View::Library {
+        Vec::new()
+    } else {
+        app.counts()
+            .into_iter()
+            .map(|(status, count)| (status, format!("{count} {}  ", status.label())))
+            .collect()
+    };
     let total: usize = tally.iter().map(|(_, t)| t.chars().count()).sum();
     let budget = width.saturating_sub(reserved);
     // One cell for the ellipsis, and only when something is actually dropped.
@@ -270,7 +407,8 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     }
 
     let room = width.saturating_sub(used + reserved);
-    let (middle, style) = match &app.done {
+    // Also the last run's, and it names a folder that is one row of many here.
+    let (middle, style) = match app.done.as_ref().filter(|_| app.view == View::Tracks) {
         Some(Ok(summary)) => (truncate(summary, room), Style::new().fg(DIM)),
         Some(Err(err)) => (
             truncate(&format!("failed: {err}"), room),
@@ -294,23 +432,46 @@ fn draw_help(frame: &mut Frame, app: &App) {
     let mut rows: Vec<(&str, &str, &str)> = vec![
         ("move", "j k  ↑ ↓", ""),
         ("", "g G", "first, last"),
-        ("view", "f", "follow the active track"),
-        ("", "l", "yt-dlp output"),
-        ("mark", "space", "this track"),
-        ("", "m", "every track like it"),
     ];
-    if app.can_command() {
+    if app.view == View::Library {
         rows.extend([
-            ("act", "e", "edit this track"),
-            ("", "c", "choose cover art"),
-            ("", "r", "retry failures"),
-            ("marked", "s", "swap artist and title"),
-            ("", "A", "set one artist"),
+            ("open", "enter", "read this playlist off disk"),
+            ("sync", "R", "sync every playlist"),
+            ("", "n", "sync a new URL"),
+            ("view", "l", "yt-dlp output"),
+            ("quit", "q  Esc  ^c", ""),
         ]);
     } else {
-        rows.push(("act", "e c r s A", "once the run finishes"));
+        rows.extend([
+            ("view", "f", "follow the active track"),
+            ("", "l", "yt-dlp output"),
+            ("", "/", "filter by name or status"),
+            ("mark", "space", "this track"),
+            ("", "m", "every track like it"),
+        ]);
+        if app.can_command() {
+            rows.extend([
+                ("act", "e", "edit this track"),
+                ("", "c", "choose cover art"),
+                ("", "r", "retry failures"),
+                ("", "S", "sync this playlist"),
+                ("marked", "s", "swap artist and title"),
+                ("", "A", "set one artist"),
+            ]);
+        } else {
+            rows.push(("act", "e c r s S A", "once the run finishes"));
+        }
+        rows.push((
+            "back",
+            "Esc",
+            if app.library.is_empty() {
+                "quit"
+            } else {
+                "the library"
+            },
+        ));
+        rows.push(("quit", "q  ^c", ""));
     }
-    rows.push(("quit", "q  Esc  ^c", ""));
 
     let widest = |pick: fn(&(&str, &str, &str)) -> usize| {
         rows.iter().map(pick).max().unwrap_or(0)
@@ -494,7 +655,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{bar, popup_width, wrap};
-    use crate::app::{App, Status, Track};
+    use crate::app::{App, Msg, Shelf, Status, Track};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
@@ -539,6 +700,234 @@ mod tests {
             }
         }
         tracks
+    }
+
+    fn track_named(index: usize, name: &str) -> Track {
+        let mut track = Track::new(
+            index,
+            "id".into(),
+            name.into(),
+            std::path::PathBuf::from("/tmp/x.opus"),
+        );
+        track.status = Status::Ok;
+        track
+    }
+
+    fn epoch() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+    }
+
+    fn shelves() -> Vec<Shelf> {
+        vec![
+            Shelf {
+                path: std::path::PathBuf::from("/music/Focus"),
+                name: "Focus".into(),
+                url: "u1".into(),
+                tracks: 42,
+                missing: 0,
+                synced: Some(epoch() - 3 * 86_400),
+            },
+            Shelf {
+                path: std::path::PathBuf::from("/music/Road trip"),
+                name: "Road trip".into(),
+                url: "u2".into(),
+                tracks: 9,
+                missing: 2,
+                synced: None,
+            },
+        ]
+    }
+
+    fn library_screen(width: u16) -> Vec<String> {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.apply(Msg::Library {
+            shelves: shelves(),
+            show: true,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..12)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /* Everything on this screen comes from the manifests, and the sync time is
+       the only thing that says whether a folder still matches its playlist. */
+    #[test]
+    fn the_library_lists_each_folder_with_what_is_in_it() {
+        let rows = library_screen(80);
+        assert!(rows[0].contains("2 playlists"), "{:?}", rows[0]);
+        assert!(rows[2].contains("Focus"), "{:?}", rows[2]);
+        assert!(rows[2].contains("42 tracks"), "{:?}", rows[2]);
+        assert!(rows[2].contains("synced 3d ago"), "{:?}", rows[2]);
+        assert!(rows[3].contains("2 missing"), "{:?}", rows[3]);
+        assert!(rows[3].contains("never synced"), "{:?}", rows[3]);
+        // A list of folders gives no clue that Enter opens one.
+        assert!(rows[11].contains("enter open"), "{:?}", rows[11]);
+    }
+
+    /* Only the matching rows, in order, with the marker on the cursor's own
+       track. The marker and the command both come from `pos == cursor`, so
+       they cannot disagree; what this pins down is which rows get drawn. */
+    #[test]
+    fn the_highlighted_row_is_the_track_a_command_would_act_on() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        /* Three matches with the cursor on the middle one, and hidden rows in
+           between, so a drawn row taken from the wrong number picks a
+           different track instead of clamping onto the right one. */
+        for (n, name) in [
+            "Aphex Twin - Xtal",
+            "Boards - Olson",
+            "Aphex Twin - Avril",
+            "Boards - Dayvan",
+            "Aphex Twin - Rhubarb",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let mut track = Track::new(
+                n + 1,
+                "id".into(),
+                (*name).into(),
+                std::path::PathBuf::from("/tmp/x.opus"),
+            );
+            track.status = Status::Ok;
+            app.tracks.push(track);
+        }
+        app.done = Some(Ok("finished".into()));
+        app.filter = "aphex".into();
+        app.cursor = 2;
+
+        let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let rows: Vec<String> = (2..6)
+            .map(|y| {
+                (0..60)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+
+        assert!(rows[0].contains("Xtal"), "{rows:?}");
+        assert!(rows[1].contains("Avril"), "the filtered-out row was drawn");
+        assert!(rows[2].contains("Rhubarb"), "{rows:?}");
+        assert!(rows[3].is_empty(), "more rows than the filter allows");
+
+        let highlighted: Vec<&String> = rows.iter().filter(|r| r.starts_with('▌')).collect();
+        assert_eq!(highlighted.len(), 1, "{rows:?}");
+        assert!(
+            highlighted[0].contains("Avril"),
+            "the highlight is on a different track than the cursor: {highlighted:?}"
+        );
+        assert_eq!(app.selected(), Some(3), "and the command would act elsewhere");
+    }
+
+    /* `row_of_cursor` is what scrolls the pane, and it is the one place the
+       two numberings can be confused. Given the cursor on the first match,
+       feeding the list a `tracks` position instead scrolls to the end and the
+       selected row leaves the screen entirely. */
+    #[test]
+    fn a_filtered_list_scrolls_to_the_row_the_cursor_is_on() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        // Ten rows the filter hides, so a match's position is far from its row.
+        for n in 0..10 {
+            app.tracks.push(track_named(n + 1, &format!("Boards - {n}")));
+        }
+        for n in 0..5 {
+            app.tracks.push(track_named(n + 11, &format!("Aphex Twin - {n}")));
+        }
+        app.done = Some(Ok("finished".into()));
+        app.filter = "aphex".into();
+        app.cursor = 10;
+        assert_eq!(app.row_of_cursor(&app.rows()), Some(0), "the first match is row 0");
+
+        // Body is two lines at this height, so five matches have to scroll.
+        let mut terminal = Terminal::new(TestBackend::new(60, 6)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let screen: String = (2..4)
+            .map(|y| {
+                (0..60)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect();
+        assert!(
+            screen.contains("Aphex Twin - 0"),
+            "the selected row scrolled off screen: {screen:?}"
+        );
+    }
+
+    #[test]
+    fn a_filter_that_matches_nothing_says_so_rather_than_going_blank() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.tracks = spread();
+        app.filter = "nothing here".into();
+        let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let row: String = (0..60).map(|x| buffer[(x, 2)].symbol().to_string()).collect();
+        assert!(row.contains("nothing matches"), "{row:?}");
+    }
+
+    /* Reachable by emptying --dir with the screen open. The pane was blank,
+       and the keys it advertises have to still work or the message is a lie. */
+    #[test]
+    fn an_emptied_library_says_so_and_still_offers_a_way_out() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.apply(Msg::Library {
+            shelves: shelves(),
+            show: true,
+        });
+        app.apply(Msg::Library {
+            shelves: Vec::new(),
+            show: false,
+        });
+        assert!(app.can_browse(), "n would do nothing on an empty library");
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let row: String = (0..80).map(|x| buffer[(x, 2)].symbol().to_string()).collect();
+        assert!(row.contains("no playlists"), "{row:?}");
+    }
+
+    /* The tally counts track statuses, and the library has no tracks: an
+       opened-then-abandoned playlist used to leave its counts on the bar. */
+    #[test]
+    fn the_library_bar_does_not_tally_a_playlist_it_is_not_showing() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.tracks = spread();
+        app.done = Some(Ok("finished".into()));
+        app.apply(Msg::Library {
+            shelves: shelves(),
+            show: true,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let bar: String = (0..80).map(|x| buffer[(x, 11)].symbol().to_string()).collect();
+        assert!(!bar.contains("120 ok"), "{bar:?}");
+        assert!(bar.contains("h keys"), "{bar:?}");
     }
 
     /* The tally is recoverable by looking at the list; the key hints are not,

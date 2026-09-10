@@ -48,6 +48,10 @@ pub struct Cli {
     #[arg(long, conflicts_with = "url")]
     pub resync: bool,
 
+    /// Print the playlists already under --dir and exit
+    #[arg(long, conflicts_with = "url")]
+    pub list: bool,
+
     /// Read this config file instead of the one in ~/.config/earworm
     #[arg(long, value_name = "PATH")]
     pub config: Option<String>,
@@ -113,6 +117,7 @@ pub struct Config {
     pub lookup: bool,
     pub fix: bool,
     pub resync: bool,
+    pub list: bool,
     pub rename: bool,
     pub album: bool,
     pub extra: Vec<String>,
@@ -158,8 +163,9 @@ impl Config {
             cover: off("no_cover", file.cover),
             lookup: off("no_lookup", file.lookup),
             fix: off("no_fix", file.fix),
-            // An action, not a setting, so it has no config key.
+            // Actions, not settings, so they have no config key.
             resync: cli.resync,
+            list: cli.list,
             rename: off("no_rename", file.rename),
             album: off("no_album", file.album),
             extra,

@@ -46,18 +46,20 @@ earworm 'https://youtube.com/playlist?list=...'
 earworm URL --dir ~/Music/new
 earworm URL -- --cookies-from-browser firefox   # extra args go to yt-dlp
 earworm --resync                         # every playlist already downloaded
+earworm --list                           # what is already on disk, then exit
 ```
 
 Tracks land in `<dir>/<playlist name>/`, named `NN - Artist - Title.opus` once
 earworm is confident of the tags, next to a `cover.jpg` (or `.png`) and
 `<playlist name>.m3u8`.
 
-Run without a URL and earworm asks what to do. If you already have playlists
-downloaded it offers to resync them all; otherwise it goes straight to asking
-for a link. It takes `youtube.com`, `youtu.be`
-and the `m.` and `music.` subdomains, with or without the `https://`, and the
-link has to name a video, playlist or channel. Anything else comes back for
-editing rather than being rejected outright. Esc at that prompt quits.
+Run without a URL and earworm opens the library: one row per playlist folder
+already under `--dir`. With nothing downloaded yet it asks for a link instead.
+The link prompt takes `youtube.com`, `youtu.be` and the `m.` and `music.`
+subdomains, with or without the `https://`, and the link has to name a video,
+playlist or channel. Anything else comes back for editing rather than being
+rejected outright. Esc there quits if it is the first thing you saw, and
+otherwise backs out to the screen behind it.
 
 ### Flags
 
@@ -72,6 +74,7 @@ editing rather than being rejected outright. Esc at that prompt quits.
 | `-R`, `--no-rename` | keep yt-dlp's filenames instead of renaming from tags |
 | `-A`, `--no-album` | don't fill an empty album tag with the playlist name |
 | `--resync` | sync every playlist already under `--dir` |
+| `--list` | print the playlists already under `--dir` and exit |
 | `--config PATH` | read this config file instead of the default one |
 | `--no-config` | ignore the config file entirely |
 
@@ -118,15 +121,31 @@ you instead of quietly ignoring the setting.
 | --- | --- |
 | `j` `k` `↑` `↓` | move |
 | `g` `G` | first, last |
-| `f` | follow the active track |
+| `f` | follow the active track (any movement key stops it) |
 | `l` | toggle the yt-dlp output pane |
+| `/` | filter the list by name or status |
 | `e` | edit artist and title (after the run) |
 | `c` | choose cover art (after the run) |
 | `r` | retry every failed track (after the run) |
+| `S` | sync the open playlist against its saved URL |
 | `space` | mark or unmark the track under the cursor |
 | `m` | mark every track sharing that track's status |
 | `s` | swap artist and title on the marked tracks |
 | `A` | set one artist across the marked tracks |
+| `h` `?` | keys and current settings |
+| `Esc` | clear the filter, else back to the library, else quit |
+| `q` `ctrl+c` | quit |
+
+On the library screen the list is folders, so most of those keys have nothing
+to move over:
+
+| Key | Action |
+| --- | --- |
+| `j` `k` `↑` `↓` `g` `G` | move |
+| `enter` | open this playlist from disk |
+| `R` | sync every playlist |
+| `n` | sync a new URL |
+| `l` | toggle the yt-dlp output pane |
 | `h` `?` | keys and current settings |
 | `q` `Esc` `ctrl+c` | quit |
 
@@ -135,7 +154,7 @@ comes back to say why.
 
 ### When a run finishes
 
-A prompt says what happened and offers the two things worth doing next:
+A prompt says what happened and what to do about it:
 
 ```
 ┌ finished ────────────────────────────────────────────────────────┐
@@ -152,6 +171,24 @@ Esc does the same. That leaves the keys below available for fixing tags.
 Another playlist asks for a URL and starts over in the same session; cancelling
 that question comes back here rather than dropping out.
 
+### Narrowing the list
+
+`/` filters as you type, against the track name and the status word, so
+`/sheeran` finds one artist and `/failed` finds the rows worth retrying. `^w`
+takes back a word and `^u` the lot. Enter puts the keys back and leaves the
+filter up; Esc clears it. The header counts what is showing, as `3 of 40`.
+
+The filter is a view and nothing else. Track numbers stay the numbers they
+have, `j` and `k` step over what is hidden, and the track under the cursor is
+always one you can see, so `e` can never reach a row off screen. `m` marks
+only within the filter, which is what makes `/` then `m` worth having: it
+grabs one artist's bad rows and nothing else. Marks you made before filtering
+still count, and the bar keeps saying how many there are.
+
+Fixing a track can push it out of the filter you found it with, since the name
+it matched on has changed. The row goes and the cursor moves to the next one
+still showing.
+
 ### Fixing several tracks at once
 
 `space` marks a track. `m` marks every track sharing the status of the one
@@ -165,6 +202,24 @@ cursor.
 Marks survive a cancelled prompt and clear once an action has written
 something. Bulk edits rename and rewrite the playlist just as a single edit
 does.
+
+### The library
+
+`earworm` with no URL lists what is already on disk: each folder's name, how
+many tracks are in it, how many the manifest lists that are no longer there,
+and how long ago it was last synced. `--list` prints the same thing to stdout,
+with the URL, and exits.
+
+Enter opens a folder without touching the network: the rows come from
+`.earworm`, the tags on the files, and the `.m3u8`, which is what the last sync
+said the playlist held, so a file that has since left it still shows as `gone`.
+Every post-run key then works on those tracks, which makes the library the way
+to fix a tag on something downloaded weeks ago. `S` syncs the open playlist
+against the URL its manifest recorded, `R` syncs all of them, and Esc goes
+back.
+
+Only one playlist is on screen at a time, because a track's number is its
+position in its own playlist and two playlists both have a track 1.
 
 ### Syncing everything at once
 
@@ -209,8 +264,21 @@ more decided than it is. It never writes over a file that already exists.
 Renaming would break the next run's already-downloaded check, which works by
 predicting the filename. So earworm keeps a `.earworm` file in the
 folder mapping each video id to the file it ended up in, which also survives a
-video being retitled on YouTube. Delete a track and it downloads again; delete
-`.earworm` and every renamed track downloads again.
+video being retitled on YouTube. It also records the playlist URL and the time
+of the last sync, which is what the library screen reads. Delete a track and it
+downloads again; delete `.earworm` and every renamed track downloads again.
+
+A pass that only covers part of a playlist, a retry or a folder opened from the
+library, leaves the entries it did not look at alone. Rewriting the manifest
+from just that part would forget files that are on disk under names `scan`
+cannot predict, and the next sync would download them all over again.
+
+The `.m3u8` names its tracks by filename alone, not by full path. It sits in
+the same folder as the tracks, which is where a player resolves those names
+from, so copying the folder to a phone or another machine plays. A playlist
+holding absolute paths was written by an older earworm and works only on the
+machine that wrote it; any sync or tag edit rewrites it, and `earworm --resync`
+does the whole library.
 
 Re-running is cheap either way: earworm skips ids it already has and reads
 its own tags off the disk instead of looking them up again.
@@ -218,7 +286,7 @@ its own tags off the disk instead of looking them up again.
 A file whose video has since left the playlist gets a `gone` row and a line in
 the summary. earworm never deletes it, keeps remembering it in `.earworm` so a
 video that comes back doesn't download twice, and leaves it out of the
-`.m3u8`, which now matches the playlist.
+`.m3u8`, which therefore matches the playlist rather than the folder.
 
 That check needs a listing that asked for the whole playlist and got all of
 it, so earworm stays quiet about departures when yt-dlp didn't finish listing,

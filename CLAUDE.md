@@ -10,18 +10,21 @@ owns the terminal and nothing else; the worker owns every subprocess, network
 call and file write. Nothing that blocks touches the render loop.
 
 - `main.rs` — terminal setup, event loop, key handling, shutdown
-- `app.rs` — `App` state, `Track`, `Status`, `Msg` (worker to UI), `Cmd` (UI to
-  worker), `Asker` (worker asks the UI a question and blocks on the reply),
-  `Escape` (whether Esc on a prompt skips or quits), plus the `marked` set
-  behind `targets()`
+- `app.rs` — `App` state, `Track`, `Status`, `Shelf` (one library row), `View`
+  (which screen has the keys), `Msg` (worker to UI), `Cmd` (UI to worker),
+  `Asker` (worker asks the UI a question and blocks on the reply), `Escape`
+  (what Esc on a prompt does), the `marked` set behind `targets()`, and the
+  `filter` behind `rows()`
 - `config.rs` — `Cli`, the TOML `FileConfig`, and `Config::build`, which merges
   them
-- `worker.rs` — `ask_url` (loops until the URL validates) then `pipeline` then
-  `serve`, the post-run command loop. `tag_tracks` is the identify-and-write
-  pass, shared by the run and by retry
+- `worker.rs` — `ask_start` (library, resync or the URL prompt, which loops
+  until the URL validates) then `pipeline` then `serve`, which serves both the
+  post-run commands and the library screen. `tag_tracks` is the
+  identify-and-write pass, shared by the run and by retry; `open_shelf` builds
+  the same rows from the manifest and the tags on disk, with no network
 - `ytdlp.rs` — `scan` (flat-playlist listing), `run` (the real download)
-- `manifest.rs` — the `.earworm` sidecar: a `#url` header plus video id to
-  current filename
+- `manifest.rs` — the `.earworm` sidecar: `#url` and `#synced` headers plus
+  video id to current filename
 - `tag.rs` — lofty reads and writes, `identify` decides a track's status
 - `lookup.rs` — AcoustID, Deezer, Cover Art Archive, all through one `ureq`
   agent
@@ -37,7 +40,7 @@ call and file write. Nothing that blocks touches the render loop.
   `TryRecvError::Disconnected` as fatal, not as "no messages yet".
 - **`Status` must be `settled()` for the run to finish.** A terminal status
   missing from that list hangs the UI forever.
-- **`Msg::Quit` exists so cancelling the URL prompt ends the tool.** The
+- **`Msg::Quit` exists so cancelling the first URL prompt ends the tool.** The
   worker drops its sender straight after, so `main`'s disconnect branch has to
   check `app.quit` before deciding the worker died.
 - **`Asker::input` distinguishes empty from cancelled.** `None` is Esc; an
@@ -52,8 +55,30 @@ call and file write. Nothing that blocks touches the render loop.
   frame because whatever set the message has already finished. A `Stage` sent
   after `done` is set deliberately does not become the resting message, or
   cancelling a command would revert the header to a step already over.
+- **The filter is a predicate, never a rebuild of `tracks`.** `cursor` stays a
+  position in `tracks` and `marked` stays a set of track indices, so no
+  command means anything different under a filter. `rows()` is the view and
+  `row_of_cursor(&rows)` maps the cursor onto it, taking the view rather than
+  rebuilding it so the highlight and the pane cannot answer two different
+  questions; `shown()` counts without collecting, for the header. Note that
+  the `▌` marker comes from `pos == cursor` rather than from `ListState`, so
+  the marker cannot drift from what a command acts on: only the scroll offset
+  can, which is what the filter's scroll test pins down.
+- **`selected()` returns `None` for a filtered-out cursor,** so `e` and `c`
+  cannot reach a row that is off screen, and `snap()` puts the cursor back on
+  a visible row after every change to the filter.
+- **`apply` snaps after every message, not just after a keypress.** `Update`
+  carries a new name and it and `Progress` change the status word, so the
+  worker can filter the cursor's own track out from under it: editing the
+  track you are on does exactly that. Without the snap no `▌` is drawn
+  anywhere and `e`, `c` and `space` go quiet until the next `j`.
 - **`App.marked` holds track indices, not row positions.** A `Cmd` carrying
   rows would mean something different to the worker than it does on screen.
+- **Moving the cursor by hand clears `follow`, `g` and `G` included.** A jump
+  that keeps following reads as a broken key: the next progress message drags
+  the cursor straight back to whatever is downloading.
+- **`mark_like_cursor` stops at the filter.** `/` then `m` is how you mark one
+  artist's bad rows, and reaching past the filter marks the whole run instead.
 - **A bulk action clears the marks with `Msg::Unmark` on completion,** not when
   the key is pressed, and only when something was written. Clearing on dispatch
   throws away a twenty-track selection the moment someone escapes the prompt.
@@ -87,9 +112,55 @@ call and file write. Nothing that blocks touches the render loop.
 - **`--resync` runs one pipeline per folder, never one merged list.**
   `Track::index` is a position within its own playlist, so two playlists both
   have a track 1 and merging them makes every row, mark and command ambiguous.
-- **The `#url` header must stay invisible to the entry parser.** `read` skips
-  any key starting with `#`, and a manifest written before the header existed
+- **The `#` headers must stay invisible to the entry parser.** `read` skips
+  any key starting with `#`, and a manifest written before a header existed
   has to keep loading, or every folder downloaded so far re-downloads.
+- **`write` keeps the recorded sync time and `write_synced` moves it.** A tag
+  edit rewrites the entries without having met the playlist, and stamping it
+  would make the library claim a sync that never happened.
+- **`write_manifest` preserves entries the current tracks do not cover** when
+  the file is still on disk. A pass over part of a playlist (`--playlist-items`,
+  a retry, a folder opened from the library) would otherwise rewrite the whole
+  manifest from that part, forgetting files that `scan` cannot then recognise
+  by name, so the next sync downloads them again beside the copies on disk.
+  Entries whose file has gone are dropped, so a churning folder does not
+  collect dead lines for good.
+- **`open_shelf` numbers tracks from the filename, not the row position.**
+  Every file is written with its playlist number in front, and a folder with a
+  gap in it would otherwise renumber everything after the gap the next time one
+  of those tracks was edited. Two files can still carry the same number, since
+  a departure renumbers the tracks after it and the departed file keeps its
+  name: every command finds its track by index and takes the first match, so
+  sharing one makes a row write tags to another row's file. Tracks the playlist
+  still holds claim their number first and everything else is numbered past
+  them.
+- **The `.m3u8` names tracks by filename, never by full path.** It lives in
+  the folder it lists, so a relative name resolves wherever the folder is
+  copied to; an absolute one is valid only on the machine that wrote it, and
+  the whole playlist breaks the moment it reaches a phone or another user's
+  home. `last_playlist` matches on the filename for the same reason.
+- **`mark_departed` reads the folder's `.m3u8` to decide what is still in the
+  playlist,** because offline there is no listing to ask and that file is the
+  last sync's answer already written down. It sets `Status::Gone` rather than
+  just `listed = false`: `write_track` and `rename` are keyed on `Gone`, and
+  without it the first edit re-lists the track and renames it to a playlist
+  position it does not hold. A playlist file that names nothing on disk is not
+  believed, since emptying a correct `.m3u8` is the costlier guess.
+- **`write_track` keeps a departed track departed.** Overwriting the status
+  with `manual` disarms the two guards it just consulted, so a second edit of
+  the same row renames and re-lists it.
+- **`Msg::Done` carries the header word for a success.** Opening a folder from
+  the library settles without running anything, and "finished" would be a claim
+  about work that never happened. A failure always reads `failed`, so only the
+  success word varies.
+- **`manifest::load` parses the whole sidecar in one read,** because `library`
+  wants the URL, the sync time and the entries for every folder under `--dir`.
+- **`Msg::Library` carries `show`,** because the same message refreshes the
+  counts after a sync. Showing the library then would swap the screen out from
+  under the run the user is watching.
+- **`can_command` and `can_browse` are exclusive on `View`.** The two screens
+  move different cursors, so a key live on the wrong one acts on a row that is
+  not there.
 - **`save_manifest` is keyed on the file, not on `listed`.** A departed track
   is unlisted but must stay in `.earworm`, or a video returning to the
   playlist downloads again beside the copy on disk.
@@ -154,6 +225,22 @@ a `d` written elsewhere. A substring match also hits stale buffer contents from
 an earlier frame. Wait on the filesystem instead, the `.m3u8` appearing or
 `.earworm` gaining a line, and force a repaint with a resize when you must read
 the screen.
+
+**Rebuild the fixture for every pty run.** A run that edits tags changes the
+folder it ran against, so a second run with the same keys starts from
+different data and reports something else. Two runs that disagree are the
+harness, not the code, until proven otherwise.
+
+**Check the binary is newer than the source.** `cargo build` has reported
+`Finished` here without recompiling while `src/` was newer, which means
+verifying a fix against a binary that predates it. `cargo clean -p earworm`
+forces it.
+
+**Break the fix and watch the test fail.** Three tests written this way passed
+against the bug they described. Two specific traps: `ListState::select` with an
+out-of-range index clamps, so a fixture whose right answer is the last row
+passes either way, and the `▌` marker comes from `pos == cursor` rather than
+from the list state, so it cannot catch a view-mapping bug at all.
 
 ratatui installs its panic hook process-globally via `std::panic::set_hook`.
 
