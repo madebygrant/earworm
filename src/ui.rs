@@ -287,35 +287,68 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/* One entry per line in three aligned columns, widths measured from the
+   content: the old single-string-per-group layout could not line anything up,
+   and a six-character group label ate its own separator. */
 fn draw_help(frame: &mut Frame, app: &App) {
-    let (one, many) = if app.can_command() {
-        (
-            "e  edit this track      c  choose cover art      r  retry failures",
-            "s  swap artist and title      A  set one artist",
-        )
-    } else {
-        ("e / c / r  available once the run finishes", "")
-    };
-    let rows = vec![
-        ("move", "j k  ↑ ↓      g G  first last".to_string()),
-        ("view", "f  follow the active track     l  yt-dlp output".to_string()),
-        ("mark", "space  this track      m  every track like it".to_string()),
-        ("act", one.to_string()),
-        ("marked", many.to_string()),
-        ("quit", "q  ctrl+c".to_string()),
-        ("", String::new()),
-        ("run", app.settings.clone()),
+    let mut rows: Vec<(&str, &str, &str)> = vec![
+        ("move", "j k  ↑ ↓", ""),
+        ("", "g G", "first, last"),
+        ("view", "f", "follow the active track"),
+        ("", "l", "yt-dlp output"),
+        ("mark", "space", "this track"),
+        ("", "m", "every track like it"),
     ];
-    let lines: Vec<Line> = rows
-        .into_iter()
-        .map(|(key, text)| {
+    if app.can_command() {
+        rows.extend([
+            ("act", "e", "edit this track"),
+            ("", "c", "choose cover art"),
+            ("", "r", "retry failures"),
+            ("marked", "s", "swap artist and title"),
+            ("", "A", "set one artist"),
+        ]);
+    } else {
+        rows.push(("act", "e c r s A", "once the run finishes"));
+    }
+    rows.push(("quit", "q  Esc  ^c", ""));
+
+    let widest = |pick: fn(&(&str, &str, &str)) -> usize| {
+        rows.iter().map(pick).max().unwrap_or(0)
+    };
+    let group = widest(|r| r.0.chars().count()) + 2;
+    let key = widest(|r| r.1.chars().count()) + 2;
+
+    let mut lines: Vec<Line> = rows
+        .iter()
+        .map(|(label, keys, what)| {
             Line::from(vec![
-                Span::styled(format!(" {key:<6}"), Style::new().fg(GOLD)),
-                Span::styled(text, Style::new().fg(CREAM)),
+                Span::styled(format!(" {label:group$}"), Style::new().fg(DIM)),
+                Span::styled(format!("{keys:key$}"), Style::new().fg(GOLD)),
+                Span::styled((*what).to_string(), Style::new().fg(CREAM)),
             ])
         })
         .collect();
-    popup(frame, "keys", lines);
+
+    lines.push(Line::default());
+
+    // Wrapped to the table it sits under, or one long line sets the width.
+    let settings = widest(|r| r.2.chars().count()) + key;
+    for (n, piece) in wrap(&app.settings, settings.max(20)).into_iter().enumerate() {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!(" {:group$}", if n == 0 { "run" } else { "" }),
+                Style::new().fg(DIM),
+            ),
+            Span::styled(piece, Style::new().fg(CREAM)),
+        ]));
+    }
+
+    let content = lines
+        .iter()
+        .map(|l| l.width() as u16)
+        .max()
+        .unwrap_or(0);
+    popup(frame, "keys", lines, content + 3);
 }
 
 fn draw_prompt(frame: &mut Frame, app: &App) {
@@ -373,7 +406,7 @@ fn draw_prompt(frame: &mut Frame, app: &App) {
                 .map(move |piece| Line::styled(format!(" {piece}"), *style))
         })
         .collect();
-    popup(frame, header, lines);
+    popup(frame, header, lines, width);
 }
 
 fn popup_width(area: Rect) -> u16 {
@@ -382,10 +415,12 @@ fn popup_width(area: Rect) -> u16 {
     seventy.clamp(20.min(area.width), area.width)
 }
 
-fn popup(frame: &mut Frame, title: &str, lines: Vec<Line>) {
+fn popup(frame: &mut Frame, title: &str, lines: Vec<Line>, width: u16) {
     let screen = frame.area();
     let height = (lines.len() as u16 + 2).min(screen.height);
-    let area = centred(screen, popup_width(screen), height);
+    // Never narrower than the title it has to fit, never wider than the screen.
+    let width = width.clamp((title.chars().count() as u16 + 4).min(screen.width), screen.width);
+    let area = centred(screen, width, height);
     frame.render_widget(Clear, area);
     frame.render_widget(
         Paragraph::new(lines).block(
@@ -567,6 +602,59 @@ mod tests {
         let idle = super::SPINNER.iter().any(|f| finished(false).contains(f));
         assert!(spinning, "no spinner while busy");
         assert!(!idle, "spinner left running with nothing to do");
+    }
+
+    fn help_screen(can_command: bool) -> Vec<String> {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(
+            tx,
+            "parse on · lookup on · cover on · m3u8 on · prompts on · rename on".into(),
+        );
+        app.tracks = spread();
+        app.show_help = true;
+        app.done = can_command.then(|| Ok("done".into()));
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..30u16)
+            .map(|y| (0..120).map(|x| buffer[(x, y)].symbol().to_string()).collect())
+            .filter(|row: &String| row.contains('│'))
+            .collect()
+    }
+
+    /* Every description used to start wherever the group label left it, and a
+       six-character label ate the space after itself, printing "markeds". */
+    #[test]
+    fn the_help_modal_lines_its_columns_up() {
+        for can_command in [true, false] {
+            let rows = help_screen(can_command);
+            assert!(!rows.is_empty(), "no modal drawn");
+
+            let starts: Vec<usize> = rows
+                .iter()
+                .filter_map(|row| {
+                    // Nothing that is a substring of another row's text.
+                    [
+                        "first, last",
+                        "yt-dlp output",
+                        "every track like it",
+                        "set one artist",
+                        "once the run finishes",
+                    ]
+                        .iter()
+                        .find_map(|what| row.find(what))
+                })
+                .collect();
+            assert!(starts.len() >= 2, "not enough rows to compare");
+            assert!(
+                starts.windows(2).all(|pair| pair[0] == pair[1]),
+                "descriptions start at {starts:?}"
+            );
+
+            for row in &rows {
+                assert!(!row.contains("markeds"), "label ran into its keys: {row}");
+            }
+        }
     }
 
     #[test]
