@@ -20,7 +20,8 @@ call and file write. Nothing that blocks touches the render loop.
   `serve`, the post-run command loop. `tag_tracks` is the identify-and-write
   pass, shared by the run and by retry
 - `ytdlp.rs` — `scan` (flat-playlist listing), `run` (the real download)
-- `manifest.rs` — the `.earworm` sidecar mapping video id to current filename
+- `manifest.rs` — the `.earworm` sidecar: a `#url` header plus video id to
+  current filename
 - `tag.rs` — lofty reads and writes, `identify` decides a track's status
 - `lookup.rs` — AcoustID, Deezer, Cover Art Archive, all through one `ureq`
   agent
@@ -66,6 +67,37 @@ call and file write. Nothing that blocks touches the render loop.
   track is already downloaded by predicting yt-dlp's filename, which a rename
   invalidates. The sidecar closes that gap, so anything that moves a file must
   call `save_manifest`, or the next run re-downloads it and leaves a duplicate.
+- **An absence proves nothing unless the scan asked for everything and got
+  it.** `Listing::complete` covers a truncated listing; `cfg.extra` covers a
+  narrowed one, because `--playlist-items 4` makes every other track absent
+  while yt-dlp still exits 0. Which arguments filter is not knowable, so any
+  of them silences `note_departures`. Anything that later deletes rather than
+  reports must keep both halves.
+- **`finish` holds the run's `Result` and only clones it.** `main` reports the
+  exit status from the last `Msg::Done`, so rebuilding the result from the text
+  on screen turned a failed run into a successful one and `$?` came back 0.
+- **A `Prompt::Choice` header is a `Block::title`, which clips.** Anything
+  long enough to need wrapping goes in `note`, rendered above the options.
+- **`finish` returning false must skip `serve`.** It is the one answer that
+  means quit, and falling through would leave the worker waiting on a command
+  channel the UI has already stopped feeding.
+- **`Msg::Restart` exists because a second playlist reuses the session.**
+  Clearing tracks alone leaves `done` set, so the header would say finished
+  while the next run was going and the post-run keys would stay live.
+- **`--resync` runs one pipeline per folder, never one merged list.**
+  `Track::index` is a position within its own playlist, so two playlists both
+  have a track 1 and merging them makes every row, mark and command ambiguous.
+- **The `#url` header must stay invisible to the entry parser.** `read` skips
+  any key starting with `#`, and a manifest written before the header existed
+  has to keep loading, or every folder downloaded so far re-downloads.
+- **`save_manifest` is keyed on the file, not on `listed`.** A departed track
+  is unlisted but must stay in `.earworm`, or a video returning to the
+  playlist downloads again beside the copy on disk.
+- **`Status::Gone` rows are numbered past the playlist** so their indices
+  cannot collide with a real track's, and `tag_tracks` skips them so a
+  departed file is never re-tagged. That index is synthetic, so `write_track`
+  does not rename a departed track either: it would stamp a playlist position
+  the track no longer holds onto the file, next to the real holder.
 - **Only `Ok` and `Manual` tracks may be renamed.** Every other status is a
   guess, and a filename makes a guess look settled.
 - **The yt-dlp archive is keyed on the file existing, not on a status.** By

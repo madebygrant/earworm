@@ -7,7 +7,7 @@ use ratatui::widgets::{
     ScrollbarState,
 };
 
-use crate::app::{App, Escape, Prompt, Status};
+use crate::app::{App, Prompt, Status};
 
 use crate::theme::{self, AMBER, CREAM, DIM, GOLD, GREEN, RED, RULE, SURFACE};
 
@@ -359,22 +359,28 @@ fn draw_prompt(frame: &mut Frame, app: &App) {
     let inner = (width as usize).saturating_sub(4);
 
     let (header, mut rows) = match prompt {
-        Prompt::Choice { header, options } => (
+        Prompt::Choice {
             header,
-            options
-                .iter()
-                .enumerate()
-                .map(|(i, opt)| {
-                    let selected = i == app.choice;
-                    let style = if selected {
-                        Style::new().fg(GREEN)
-                    } else {
-                        Style::new()
-                    };
-                    (format!("{} {opt}", if selected { "▌" } else { " " }), style)
-                })
-                .collect::<Vec<_>>(),
-        ),
+            note,
+            options,
+            ..
+        } => {
+            let mut rows = Vec::new();
+            if !note.is_empty() {
+                rows.push((note.clone(), Style::new().fg(DIM)));
+                rows.push((String::new(), Style::new()));
+            }
+            rows.extend(options.iter().enumerate().map(|(i, opt)| {
+                let selected = i == app.choice;
+                let style = if selected {
+                    Style::new().fg(GREEN)
+                } else {
+                    Style::new()
+                };
+                (format!("{} {opt}", if selected { "▌" } else { " " }), style)
+            }));
+            (header, rows)
+        }
         Prompt::Input { header, .. } => (
             header,
             vec![(format!("{}\u{2588}", app.input), Style::new().fg(CREAM))],
@@ -383,13 +389,11 @@ fn draw_prompt(frame: &mut Frame, app: &App) {
     rows.push((String::new(), Style::new()));
     rows.push((
         match prompt {
-            Prompt::Choice { .. } => "j/k select   enter confirm   esc skip".to_string(),
+            Prompt::Choice { escape, .. } => {
+                format!("j/k select   enter confirm   {}", escape.hint())
+            }
             Prompt::Input { escape, .. } => {
-                let esc = match escape {
-                    Escape::Skip => "esc skip",
-                    Escape::Quit => "esc quit",
-                };
-                format!("enter confirm   ^u clear   ^w word   {esc}")
+                format!("enter confirm   ^u clear   ^w word   {}", escape.hint())
             }
         },
         Style::new().fg(DIM),

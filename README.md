@@ -45,13 +45,16 @@ earworm                                  # asks for a URL
 earworm 'https://youtube.com/playlist?list=...'
 earworm URL --dir ~/Music/new
 earworm URL -- --cookies-from-browser firefox   # extra args go to yt-dlp
+earworm --resync                         # every playlist already downloaded
 ```
 
 Tracks land in `<dir>/<playlist name>/`, named `NN - Artist - Title.opus` once
 earworm is confident of the tags, next to a `cover.jpg` (or `.png`) and
 `<playlist name>.m3u8`.
 
-Run without a URL and earworm asks for one. It takes `youtube.com`, `youtu.be`
+Run without a URL and earworm asks what to do. If you already have playlists
+downloaded it offers to resync them all; otherwise it goes straight to asking
+for a link. It takes `youtube.com`, `youtu.be`
 and the `m.` and `music.` subdomains, with or without the `https://`, and the
 link has to name a video, playlist or channel. Anything else comes back for
 editing rather than being rejected outright. Esc at that prompt quits.
@@ -68,6 +71,7 @@ editing rather than being rejected outright. Esc at that prompt quits.
 | `-F`, `--no-fix` | never prompt; unresolved tracks keep parsed tags |
 | `-R`, `--no-rename` | keep yt-dlp's filenames instead of renaming from tags |
 | `-A`, `--no-album` | don't fill an empty album tag with the playlist name |
+| `--resync` | sync every playlist already under `--dir` |
 | `--config PATH` | read this config file instead of the default one |
 | `--no-config` | ignore the config file entirely |
 
@@ -129,6 +133,25 @@ you instead of quietly ignoring the setting.
 Keys that change files go quiet while one is running; the header spinner
 comes back to say why.
 
+### When a run finishes
+
+A prompt says what happened and offers the two things worth doing next:
+
+```
+┌ finished ────────────────────────────────────────────────────────┐
+│ 12 tracks in ~/Music/Chill Evenings, playlist Chill Evenings.m3u8│
+│                                                                  │
+│ ▌ keep this open                                                 │
+│   sync another playlist                                          │
+│   quit                                                           │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+Keeping it open is first, so Enter never starts work or ends the session, and
+Esc does the same. That leaves the keys below available for fixing tags.
+Another playlist asks for a URL and starts over in the same session; cancelling
+that question comes back here rather than dropping out.
+
 ### Fixing several tracks at once
 
 `space` marks a track. `m` marks every track sharing the status of the one
@@ -142,6 +165,19 @@ cursor.
 Marks survive a cancelled prompt and clear once an action has written
 something. Bulk edits rename and rewrite the playlist just as a single edit
 does.
+
+### Syncing everything at once
+
+Each playlist folder records the URL it came from in its `.earworm` file, so
+`earworm --resync` walks `--dir`, finds the folders that know their own URL and
+syncs each one in turn. No arguments, no list to maintain. New tracks download,
+departed ones get reported, and a playlist that has since gone private is
+logged and skipped rather than stopping the rest.
+
+Folders downloaded before earworm started recording the URL have no entry, so
+they need one sync by URL before `--resync` picks them up. Playlists are
+visited in folder-name order, and the rows on screen are one playlist at a
+time, since a track's number is its position in its own playlist.
 
 ### Retrying failures
 
@@ -160,7 +196,8 @@ rest alone.
 
 The status column says which route a track took: `ok` for a confident match,
 `weak` for a low-confidence one, `manual` for an answered prompt, `kept` for
-parsed tags left alone, `none` when nothing matched.
+parsed tags left alone, `none` when nothing matched, `gone` for a file whose
+video has left the playlist.
 
 ## What it writes
 
@@ -177,6 +214,18 @@ video being retitled on YouTube. Delete a track and it downloads again; delete
 
 Re-running is cheap either way: earworm skips ids it already has and reads
 its own tags off the disk instead of looking them up again.
+
+A file whose video has since left the playlist gets a `gone` row and a line in
+the summary. earworm never deletes it, keeps remembering it in `.earworm` so a
+video that comes back doesn't download twice, and leaves it out of the
+`.m3u8`, which now matches the playlist.
+
+That check needs a listing that asked for the whole playlist and got all of
+it, so earworm stays quiet about departures when yt-dlp didn't finish listing,
+or when you passed extra yt-dlp arguments. `--playlist-items 4` makes every
+other track absent from the listing while it sits in the playlist untouched,
+and yt-dlp exits 0 either way, so the arguments are the only clue. It logs how
+many files it skipped over rather than guessing.
 
 The album tag gets the playlist name only when the lookup found no real album,
 since the release a track actually came from is the better answer.

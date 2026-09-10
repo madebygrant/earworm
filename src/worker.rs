@@ -15,44 +15,86 @@ use crate::ytdlp;
 
 pub fn run(mut cfg: Config, tx: Sender<Msg>, cancel: Arc<AtomicBool>, cmds: Receiver<Cmd>) {
     let mut tracks = Vec::new();
-    let result = match ask_url(&mut cfg, &tx) {
-        Ok(true) => pipeline(&cfg, &tx, &cancel, &mut tracks),
+    let result = match ask_start(&mut cfg, &tx) {
+        Start::Playlist => pipeline(&cfg, &tx, &cancel, &mut tracks),
+        Start::Resync(saved) => resync(&mut cfg, &tx, &cancel, &mut tracks, saved),
         /* Cancelling the first question cancels the tool: no run started, so
-           there is nothing to stay open for and no failure worth reporting. */
-        Ok(false) => {
+           there is nothing to stay open for. */
+        Start::Cancelled => {
             let _ = tx.send(Msg::Quit);
             return;
         }
-        Err(err) => Err(err),
     };
-    let _ = tx.send(Msg::Done(result.map_err(|e| e.to_string())));
-    serve(&cfg, &tx, &mut tracks, cmds, &cancel);
+    if finish(&mut cfg, &tx, &cancel, &mut tracks, result) {
+        serve(&cfg, &tx, &mut tracks, cmds, &cancel);
+    }
 }
 
-/// The URL can arrive from a prompt rather than the command line, so running
-/// earworm bare still gets somewhere. Always asks, even under --no-fix: there
-/// is nothing to do without one. `Ok(false)` means the user cancelled.
-fn ask_url(cfg: &mut Config, tx: &Sender<Msg>) -> Result<bool> {
+enum Start {
+    Playlist,
+    /// Carries the folders it found, so the answer is not looked up twice.
+    Resync(Vec<(PathBuf, String)>),
+    Cancelled,
+}
+
+/* Nothing to do without a URL, so ask for one. The menu only appears when
+   there is a library to resync: offering it on a first run would be an option
+   that can only fail. */
+fn ask_start(cfg: &mut Config, tx: &Sender<Msg>) -> Start {
     if !cfg.url.is_empty() {
-        return Ok(true);
+        return Start::Playlist;
     }
+    let saved = saved_playlists(&cfg.dir);
+    if cfg.resync {
+        return Start::Resync(saved);
+    }
+
+    if !saved.is_empty() {
+        let _ = tx.send(Msg::Stage("waiting for an answer".into()));
+        let count = saved.len();
+        let plural = if count == 1 { "playlist" } else { "playlists" };
+        let options = vec![
+            "sync a playlist by URL".to_string(),
+            format!("resync the {count} {plural} already downloaded"),
+            "quit".into(),
+        ];
+        let asker = Asker {
+            tx: tx.clone(),
+            enabled: true,
+        };
+        match asker.choose_or_quit("earworm", options) {
+            Some(0) => {}
+            Some(1) => return Start::Resync(saved),
+            // Esc means quit here, the same as it does on the URL question.
+            _ => return Start::Cancelled,
+        }
+    }
+
+    let _ = tx.send(Msg::Stage("waiting for a playlist URL".into()));
+    match prompt_url(tx) {
+        Some(url) => {
+            cfg.url = url;
+            Start::Playlist
+        }
+        None => Start::Cancelled,
+    }
+}
+
+/* Asks again rather than failing: a mistyped link is the likely case, and
+   handing back the text means fixing it instead of retyping it. `None` is a
+   cancel, which is why the first question can end the tool and a later one
+   can go back to the menu. */
+fn prompt_url(tx: &Sender<Msg>) -> Option<String> {
     let asker = Asker {
         tx: tx.clone(),
         enabled: true,
     };
-    let _ = tx.send(Msg::Stage("waiting for a playlist URL".into()));
-
-    /* Asks again rather than failing: a mistyped link is the likely case, and
-       handing back the text means fixing it instead of retyping it. */
     let mut header = "YouTube playlist URL".to_string();
     let mut typed = String::new();
     loop {
-        let Some(answer) = asker.input_or_quit(&header, &typed) else {
-            return Ok(false);
-        };
+        let answer = asker.input_or_quit(&header, &typed)?;
         if let Some(url) = youtube_url(&answer) {
-            cfg.url = url;
-            return Ok(true);
+            return Some(url);
         }
         header = if answer.trim().is_empty() {
             "Paste a YouTube link".into()
@@ -115,6 +157,127 @@ fn youtube_url(input: &str) -> Option<String> {
     ok.then_some(full)
 }
 
+/* The run is over and the UI would otherwise just sit there, so say so and
+   offer the two things worth doing next. Returns false when the answer was to
+   quit, which is the one case that must not fall through to the command loop.
+   Keeping it open is first, so Enter never starts work or ends the session. */
+fn finish(
+    cfg: &mut Config,
+    tx: &Sender<Msg>,
+    cancel: &AtomicBool,
+    tracks: &mut Vec<Track>,
+    result: Result<String>,
+) -> bool {
+    let asker = Asker {
+        tx: tx.clone(),
+        enabled: true,
+    };
+    /* Held as the finished `Result` for the whole loop and only ever cloned.
+       Rebuilding it from the displayed text turned a failed run into a
+       successful one, and `main` reports the exit status from this. */
+    let mut result: Result<String, String> = result.map_err(|e| e.to_string());
+    loop {
+        let _ = tx.send(Msg::Done(result.clone()));
+        if cancel.load(Ordering::SeqCst) {
+            return false;
+        }
+
+        let (title, note) = match &result {
+            Ok(summary) => ("finished", summary.clone()),
+            Err(err) => ("failed", err.clone()),
+        };
+        let options = vec![
+            "keep this open".to_string(),
+            "sync another playlist".into(),
+            "quit".into(),
+        ];
+        match asker.choose_noted(title, &note, options) {
+            Some(1) => {
+                // Cancelling the URL question goes back here, not out, and
+                // leaves the last run's outcome exactly as it was.
+                let Some(url) = prompt_url(tx) else {
+                    continue;
+                };
+                let _ = tx.send(Msg::Restart);
+                tracks.clear();
+                cfg.url = url;
+                result = pipeline(cfg, tx, cancel, tracks).map_err(|e| e.to_string());
+            }
+            Some(2) => {
+                let _ = tx.send(Msg::Quit);
+                return false;
+            }
+            // Esc keeps it open too: the safe answer to "what now?" is nothing.
+            _ => return true,
+        }
+    }
+}
+
+/// Every playlist folder already under `--dir`, in name order, each with the
+/// URL it recorded when it was written.
+fn saved_playlists(dir: &Path) -> Vec<(PathBuf, String)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<(PathBuf, String)> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .filter_map(|p| manifest::read_url(&p).map(|url| (p, url)))
+        .collect();
+    found.sort();
+    found
+}
+
+/* One pipeline per folder rather than one list of everything: `Track::index`
+   is a playlist position, and two playlists both have a track 1, so merging
+   them would make every row, mark and command ambiguous. */
+fn resync(
+    cfg: &mut Config,
+    tx: &Sender<Msg>,
+    cancel: &AtomicBool,
+    tracks: &mut Vec<Track>,
+    found: Vec<(PathBuf, String)>,
+) -> Result<String> {
+    if found.is_empty() {
+        bail!(
+            "no playlist under {} has a saved URL yet; sync one by URL first",
+            cfg.dir.display()
+        );
+    }
+
+    let mut synced = 0;
+    let mut listed = 0;
+    for (n, (folder, url)) in found.iter().enumerate() {
+        if cancel.load(Ordering::SeqCst) {
+            break;
+        }
+        let name = folder.file_name().unwrap_or_default().to_string_lossy();
+        let _ = tx.send(Msg::Stage(format!("{} of {}: {name}", n + 1, found.len())));
+        // Each folder starts from an empty list, so its rows are its own.
+        tracks.clear();
+        let _ = tx.send(Msg::Restart);
+        cfg.url = url.clone();
+
+        match pipeline(cfg, tx, cancel, tracks) {
+            Ok(summary) => {
+                synced += 1;
+                listed += tracks.iter().filter(|t| t.listed).count();
+                let _ = tx.send(Msg::Log(format!("{name}: {summary}")));
+            }
+            // One dead playlist should not cost the rest of the library.
+            Err(err) => {
+                let _ = tx.send(Msg::Log(format!("{name}: {err}")));
+            }
+        }
+    }
+
+    Ok(format!(
+        "{synced} of {} playlists, {listed} tracks",
+        found.len()
+    ))
+}
+
 fn pipeline(
     cfg: &Config,
     tx: &Sender<Msg>,
@@ -122,7 +285,8 @@ fn pipeline(
     tracks: &mut Vec<Track>,
 ) -> Result<String> {
     let _ = tx.send(Msg::Stage("reading playlist".into()));
-    *tracks = ytdlp::scan(cfg)?;
+    let listing = ytdlp::scan(cfg)?;
+    *tracks = listing.tracks;
 
     let playlist = folder_of(tracks)
         .and_then(|f| f.file_name().map(|n| n.to_string_lossy().to_string()))
@@ -130,6 +294,7 @@ fn pipeline(
     if !playlist.is_empty() {
         let _ = tx.send(Msg::Playlist(playlist.clone()));
     }
+    note_departures(cfg, tx, listing.complete, tracks);
     let _ = tx.send(Msg::Tracks(tracks.clone()));
 
     let have = tracks.iter().filter(|t| t.status == Status::Have).count();
@@ -155,7 +320,7 @@ fn pipeline(
     let mut cover = CoverState { written: false };
     tag_tracks(cfg, tx, cancel, tracks, &playlist, &asker, &mut cover, None);
 
-    save_manifest(tracks);
+    save_manifest(cfg, tracks);
     let playlist_file = write_playlist(cfg, tracks)?;
     let mut summary = summarise(tracks, playlist_file.as_deref());
     if !warning.is_empty() {
@@ -182,7 +347,9 @@ fn tag_tracks(
         if cancel.load(Ordering::SeqCst) {
             break;
         }
-        if wanted.is_some_and(|only| !only.contains(&track.index)) {
+        if wanted.is_some_and(|only| !only.contains(&track.index))
+            || track.status == Status::Gone
+        {
             continue;
         }
         let Some(path) = track.path.clone() else {
@@ -356,7 +523,7 @@ fn retry(
     };
     tag_tracks(cfg, tx, cancel, tracks, &playlist, asker, &mut cover, Some(&failed));
 
-    save_manifest(tracks);
+    save_manifest(cfg, tracks);
     let playlist_file = write_playlist(cfg, tracks)?;
 
     /* Rebuilt rather than appended to: this replaces the run's own summary,
@@ -398,6 +565,7 @@ fn write_track(
     }
     tag::set_fields(&path, &artist, &title)?;
 
+    let departed = tracks[pos].status == Status::Gone;
     let track = &mut tracks[pos];
     track.artist = artist;
     track.title = title;
@@ -405,7 +573,9 @@ fn write_track(
     track.status = Status::Manual;
     track.source = source.into();
     track.note.clear();
-    track.listed = true;
+    if !departed {
+        track.listed = true;
+    }
     let _ = tx.send(Msg::Update {
         index: track.index,
         status: Status::Manual,
@@ -413,7 +583,11 @@ fn write_track(
         note: Some(String::new()),
         name: Some(track.name.clone()),
     });
-    rename(cfg, tx, &mut tracks[pos]);
+    // Its index is synthetic, so renaming would stamp a playlist position
+    // this track no longer has onto the file, next to the real one.
+    if !departed {
+        rename(cfg, tx, &mut tracks[pos]);
+    }
     Ok(())
 }
 
@@ -457,7 +631,7 @@ fn bulk(
        selection, and rebuilding a twenty-track one by hand is the annoyance
        the deferred unmark exists to avoid. */
     if changed > 0 {
-        save_manifest(tracks);
+        save_manifest(cfg, tracks);
         write_playlist(cfg, tracks)?;
         let _ = tx.send(Msg::Unmark);
     }
@@ -522,7 +696,7 @@ fn edit(
     }
 
     write_track(cfg, tx, tracks, pos, artist, title, "typed")?;
-    save_manifest(tracks);
+    save_manifest(cfg, tracks);
     write_playlist(cfg, tracks)?;
     let _ = tx.send(Msg::Flash(format!("saved track {index}")));
     Ok(())
@@ -552,6 +726,58 @@ fn cover_options(found: &[lookup::Artwork], current: Option<String>) -> Vec<(Str
 /// Either extension can be the folder cover, so both are candidates for the
 /// "keep" row and both are cleared before a new one is written.
 const COVER_NAMES: [&str; 2] = ["cover.jpg", "cover.png"];
+
+/* Files the manifest remembers whose video is no longer in the playlist. They
+   are reported and otherwise left alone: nothing here deletes anything. */
+fn note_departures(cfg: &Config, tx: &Sender<Msg>, complete: bool, tracks: &mut Vec<Track>) {
+    let Some(folder) = folder_of(tracks) else {
+        return;
+    };
+    let current: HashSet<&str> = tracks.iter().map(|t| t.id.as_str()).collect();
+    let mut missing: Vec<(String, PathBuf)> = manifest::read(&folder)
+        .into_iter()
+        .filter(|(id, _)| !current.contains(id.as_str()))
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+
+    /* Absent from the listing is not the same as gone from the playlist, and
+       only a scan that asked for all of it and got all of it can tell the two
+       apart. yt-dlp exits 0 for a filtered listing, so `--playlist-items 4`
+       would otherwise report every other track as departed. Which arguments
+       filter is not knowable, so any of them is enough to stay quiet. */
+    let doubt = if !complete {
+        Some("yt-dlp did not finish listing the playlist")
+    } else if !cfg.extra.is_empty() {
+        Some("the extra yt-dlp arguments may have filtered it")
+    } else {
+        None
+    };
+    if let Some(why) = doubt {
+        let count = missing.len();
+        let files = if count == 1 { "file" } else { "files" };
+        let _ = tx.send(Msg::Log(format!(
+            "{count} {files} on disk are not in this listing, and are not being \
+             called gone because {why}"
+        )));
+        return;
+    }
+
+    missing.sort_by(|a, b| a.1.cmp(&b.1));
+    // Numbered past the playlist so the rows sort last and no index collides.
+    let next = tracks.iter().map(|t| t.index).max().unwrap_or(0);
+    for (offset, (id, path)) in missing.into_iter().enumerate() {
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let mut track = Track::new(next + offset + 1, id, name, path);
+        track.status = Status::Gone;
+        track.source = "not in playlist".into();
+        tracks.push(track);
+    }
+}
 
 /// Whether the folder already has its one image. Checking only `cover.jpg`
 /// would miss a PNG, and `tag::apply` writes a JPEG unconditionally, so the
@@ -738,15 +964,18 @@ fn clean(text: &str) -> String {
     }
 }
 
-fn save_manifest(tracks: &[Track]) {
+fn save_manifest(cfg: &Config, tracks: &[Track]) {
     let Some(folder) = folder_of(tracks) else {
         return;
     };
+    /* Keyed on the file, not on `listed`: dropping a departed track here
+       forgets it, and a video that comes back to the playlist would download
+       again beside the copy already on disk. */
     let entries = tracks
         .iter()
-        .filter(|t| t.listed)
+        .filter(|t| t.path.as_deref().is_some_and(Path::is_file))
         .filter_map(|t| t.path.clone().map(|p| (t.id.clone(), p)));
-    let _ = manifest::write(&folder, entries);
+    let _ = manifest::write(&folder, &cfg.url, entries);
 }
 
 fn folder_of(tracks: &[Track]) -> Option<PathBuf> {
@@ -768,6 +997,11 @@ fn summarise(tracks: &[Track], playlist: Option<&Path>) -> String {
     };
     if let Some(name) = playlist.and_then(Path::file_name) {
         summary = format!("{summary}, playlist {}", name.to_string_lossy());
+    }
+    // Said out loud, since the rows scroll off and nothing else mentions them.
+    let departed = tracks.iter().filter(|t| t.status == Status::Gone).count();
+    if departed > 0 {
+        summary = format!("{summary}, {departed} no longer in the playlist");
     }
     summary
 }
@@ -872,7 +1106,284 @@ mod tests {
     }
     use super::*;
     use std::sync::mpsc;
+    use crate::app::Reply;
     use crate::lookup::Artwork;
+
+    /* The exit status comes from the last `Msg::Done`, and rebuilding the
+       result from the text on screen turned a failed run into a successful
+       one, so `earworm; echo $?` reported 0 after a playlist that could not
+       be read. Reachable by backing out of "sync another playlist". */
+    #[test]
+    fn a_failed_run_stays_failed_through_the_finish_menu() {
+        let (tx, rx) = mpsc::channel();
+        let cancel = AtomicBool::new(false);
+        let mut cfg = config(true);
+        let mut tracks = Vec::new();
+
+        let outcomes = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                finish(
+                    &mut cfg,
+                    &tx,
+                    &cancel,
+                    &mut tracks,
+                    Err(anyhow::anyhow!("could not read the playlist")),
+                )
+            });
+
+            // Answer the menu, then back out of the URL question it opens.
+            let replies = [Reply::Choice(1), Reply::Cancel, Reply::Cancel];
+            let mut sent = 0;
+            let mut dones = Vec::new();
+            while sent < replies.len() {
+                match rx.recv().unwrap() {
+                    Msg::Done(result) => dones.push(result),
+                    Msg::Ask(_, reply) => {
+                        reply.send(replies[sent].clone()).unwrap();
+                        sent += 1;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(worker.join().unwrap(), "backing out should keep it open");
+            dones
+        });
+
+        assert_eq!(outcomes.len(), 2, "the menu was not shown twice");
+        for outcome in outcomes {
+            assert!(
+                outcome.is_err(),
+                "a failed run was reported as {outcome:?}, so the exit status is 0"
+            );
+        }
+    }
+
+    /* Only folders that recorded where they came from, in a stable order, and
+       no crash on a directory holding anything else. */
+    #[test]
+    fn saved_playlists_finds_the_folders_that_know_their_url() {
+        let root = scratch("library");
+        for (name, url) in [("Beta", Some("u-beta")), ("Alpha", Some("u-alpha")), ("NoUrl", None)] {
+            let folder = root.join(name);
+            std::fs::create_dir_all(&folder).unwrap();
+            match url {
+                Some(u) => manifest::write(&folder, u, std::iter::empty()).unwrap(),
+                // Written before the header existed, so it cannot be resynced.
+                None => std::fs::write(manifest::path(&folder), "vid\tfile.opus\n").unwrap(),
+            }
+        }
+        std::fs::write(root.join("loose.opus"), "not a folder").unwrap();
+
+        let found = saved_playlists(&root);
+        let names: Vec<String> = found
+            .iter()
+            .map(|(p, _)| p.file_name().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(names, ["Alpha", "Beta"], "wrong folders or wrong order");
+        assert_eq!(found[0].1, "u-alpha");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn saved_playlists_is_empty_for_a_directory_that_is_not_there() {
+        assert!(saved_playlists(Path::new("/nonexistent-earworm-library")).is_empty());
+    }
+
+    #[test]
+    fn the_summary_counts_departures_separately_from_the_playlist() {
+        let dir = scratch("summary");
+        let mut tracks = playlist_of(&dir, &[("a", "01 - A.opus")]);
+        tracks[0].listed = true;
+        let mut gone = Track::new(9, "b".into(), "09 - B.opus".into(), dir.join("09 - B.opus"));
+        gone.status = Status::Gone;
+        tracks.push(gone);
+
+        let line = summarise(&tracks, Some(&dir.join("Mix.m3u8")));
+        assert!(line.contains("1 tracks in"), "{line}");
+        assert!(line.contains("playlist Mix.m3u8"), "{line}");
+        assert!(line.contains("1 no longer in the playlist"), "{line}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn channel() -> (Sender<Msg>, mpsc::Receiver<Msg>) {
+        mpsc::channel()
+    }
+
+    fn playlist_of(dir: &Path, ids: &[(&str, &str)]) -> Vec<Track> {
+        ids.iter()
+            .enumerate()
+            .map(|(i, (id, name))| {
+                std::fs::write(dir.join(name), "audio").unwrap();
+                Track::new(i + 1, (*id).into(), (*name).into(), dir.join(name))
+            })
+            .collect()
+    }
+
+    /* The whole point of the reporting step: a file the manifest remembers
+       whose video has left the playlist gets a row instead of vanishing
+       silently, and nothing touches it. */
+    #[test]
+    fn a_departed_video_becomes_a_row_of_its_own() {
+        let dir = scratch("departed");
+        let mut tracks = playlist_of(&dir, &[("keep1", "01 - A.opus"), ("keep2", "02 - B.opus")]);
+        std::fs::write(dir.join("09 - Old.opus"), "audio").unwrap();
+        manifest::write(
+            &dir,
+            "u",
+            [
+                ("keep1".to_string(), dir.join("01 - A.opus")),
+                ("dropped".to_string(), dir.join("09 - Old.opus")),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        note_departures(&config(true), &channel().0, true, &mut tracks);
+
+        assert_eq!(tracks.len(), 3, "the departed file got no row");
+        let gone = tracks.last().unwrap();
+        assert_eq!(gone.status, Status::Gone);
+        assert_eq!(gone.id, "dropped");
+        assert_eq!(gone.name, "09 - Old.opus");
+        assert!(!gone.listed, "a departed track must stay out of the playlist");
+        assert!(gone.index > 2, "its index collides with a real track");
+        assert!(dir.join("09 - Old.opus").is_file(), "the file was touched");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* The premise, not the mechanics. `--playlist-items 4` makes every other
+       track absent from the listing while it sits in the playlist untouched,
+       and yt-dlp exits 0, so nothing but the arguments themselves says the
+       listing was narrowed. Reported as gone, a later prune deletes music. */
+    #[test]
+    fn a_filtered_listing_is_never_read_as_a_departure() {
+        for (complete, extra) in [
+            (true, vec!["--playlist-items".to_string(), "4".to_string()]),
+            (false, Vec::new()),
+            (false, vec!["--playlist-end".to_string(), "2".to_string()]),
+        ] {
+            let dir = scratch("filtered");
+            let mut tracks = playlist_of(&dir, &[("keep1", "01 - A.opus")]);
+            std::fs::write(dir.join("09 - Old.opus"), "audio").unwrap();
+            manifest::write(
+                &dir,
+                "u",
+                [("dropped".to_string(), dir.join("09 - Old.opus"))].into_iter(),
+            )
+            .unwrap();
+
+            let mut cfg = config(true);
+            cfg.extra = extra.clone();
+            let (tx, rx) = channel();
+            note_departures(&cfg, &tx, complete, &mut tracks);
+
+            assert_eq!(
+                tracks.len(),
+                1,
+                "reported a departure with complete={complete} extra={extra:?}"
+            );
+            let logged: Vec<String> = rx
+                .try_iter()
+                .filter_map(|m| match m {
+                    Msg::Log(line) => Some(line),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(logged.len(), 1, "said nothing about the files it skipped");
+            assert!(logged[0].contains("not in this listing"), "{:?}", logged[0]);
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    /// A real opus file, since `tag::set_fields` has to succeed for the code
+    /// under test to be reached at all. `None` if ffmpeg is not installed.
+    fn tiny_opus(at: &Path) -> Option<()> {
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono"])
+            .args(["-t", "0.2", "-c:a", "libopus", "-y"])
+            .arg(at)
+            .status()
+            .ok()?;
+        made.success().then_some(())
+    }
+
+    /* A departed track has no playlist position, so renumbering it stamps one
+       it does not have onto the file, possibly beside the real holder. The
+       non-departed half of this test is what proves the guard is load-bearing
+       rather than the rename simply never happening. */
+    #[test]
+    fn only_a_track_still_in_the_playlist_gets_renumbered() {
+        let dir = scratch("editgone");
+        let listed = dir.join("01 - A.opus");
+        let orphan = dir.join("09 - Old.opus");
+        if tiny_opus(&listed).is_none() || tiny_opus(&orphan).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        let mut tracks = vec![
+            Track::new(1, "keep1".into(), "01 - A.opus".into(), listed.clone()),
+            Track::new(2, "dropped".into(), "09 - Old.opus".into(), orphan.clone()),
+        ];
+        tracks[1].status = Status::Gone;
+        let (tx, _rx) = channel();
+        let cfg = config(true);
+
+        write_track(&cfg, &tx, &mut tracks, 1, "New".into(), "Title".into(), "typed").unwrap();
+        assert!(orphan.is_file(), "the departed file was moved");
+        assert!(
+            !dir.join("02 - New - Title.opus").exists(),
+            "a departed track was given a playlist number"
+        );
+
+        write_track(&cfg, &tx, &mut tracks, 0, "New".into(), "Title".into(), "typed").unwrap();
+        assert!(
+            dir.join("01 - New - Title.opus").is_file(),
+            "a listed track stopped being renamed, so the guard is too wide"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_manifest_entry_whose_file_is_gone_is_not_reported() {
+        let dir = scratch("vanished");
+        let mut tracks = playlist_of(&dir, &[("keep1", "01 - A.opus")]);
+        manifest::write(
+            &dir,
+            "u",
+            [("dropped".to_string(), dir.join("nothing here.opus"))].into_iter(),
+        )
+        .unwrap();
+
+        note_departures(&config(true), &channel().0, true, &mut tracks);
+        assert_eq!(tracks.len(), 1, "a deleted file is not a departure");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* Forgetting a departed track would re-download it beside the copy
+       already on disk if the video ever returned to the playlist. */
+    #[test]
+    fn the_manifest_keeps_remembering_a_departed_track() {
+        let dir = scratch("remember");
+        let mut tracks = playlist_of(&dir, &[("keep1", "01 - A.opus")]);
+        std::fs::write(dir.join("09 - Old.opus"), "audio").unwrap();
+        manifest::write(
+            &dir,
+            "u",
+            [("dropped".to_string(), dir.join("09 - Old.opus"))].into_iter(),
+        )
+        .unwrap();
+
+        note_departures(&config(true), &channel().0, true, &mut tracks);
+        tracks[0].listed = true;
+        save_manifest(&config(true), &tracks);
+
+        let back = manifest::read(&dir);
+        assert!(back.contains_key("dropped"), "the departed id was forgotten");
+        assert!(back.contains_key("keep1"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     /* A retry must not add a second folder image: the writer in `tag::apply`
        always writes cover.jpg, so a check that only looked for that name left
@@ -922,6 +1433,7 @@ mod tests {
             cover: true,
             lookup: true,
             fix: true,
+            resync: false,
             rename,
             album: true,
             extra: Vec::new(),
@@ -960,8 +1472,7 @@ mod tests {
             rename(&config(rename_on), &tx, &mut track);
             assert!(
                 dir.join(name).is_file(),
-                "{} with rename={rename_on} was renamed",
-                status.label()
+                "{status:?} with rename={rename_on} was renamed"
             );
             std::fs::remove_dir_all(&dir).unwrap();
         }

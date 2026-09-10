@@ -43,6 +43,11 @@ pub struct Cli {
     #[arg(short = 'A', long)]
     pub no_album: bool,
 
+    /// Sync every playlist folder already under --dir, using the URL each
+    /// one recorded
+    #[arg(long, conflicts_with = "url")]
+    pub resync: bool,
+
     /// Read this config file instead of the one in ~/.config/earworm
     #[arg(long, value_name = "PATH")]
     pub config: Option<String>,
@@ -107,6 +112,7 @@ pub struct Config {
     pub cover: bool,
     pub lookup: bool,
     pub fix: bool,
+    pub resync: bool,
     pub rename: bool,
     pub album: bool,
     pub extra: Vec<String>,
@@ -152,6 +158,8 @@ impl Config {
             cover: off("no_cover", file.cover),
             lookup: off("no_lookup", file.lookup),
             fix: off("no_fix", file.fix),
+            // An action, not a setting, so it has no config key.
+            resync: cli.resync,
             rename: off("no_rename", file.rename),
             album: off("no_album", file.album),
             extra,

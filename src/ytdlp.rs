@@ -30,10 +30,18 @@ fn output_template(dir: &Path, ext: &str) -> String {
     )
 }
 
+pub struct Listing {
+    pub tracks: Vec<Track>,
+    /// yt-dlp exited cleanly, so the listing is the whole playlist. A
+    /// truncated one looks exactly like a playlist that lost tracks, which is
+    /// why nothing may act on an absence unless this is true.
+    pub complete: bool,
+}
+
 /// Resolves ids, titles and destination paths from the playlist listing alone.
 /// One request instead of one per video, which is a second rather than half a
 /// minute; the paths match what the real download computes.
-pub fn scan(cfg: &Config) -> Result<Vec<Track>> {
+pub fn scan(cfg: &Config) -> Result<Listing> {
     let out = Command::new("yt-dlp")
         .args([
             "--skip-download",
@@ -104,7 +112,10 @@ pub fn scan(cfg: &Config) -> Result<Vec<Track>> {
             .unwrap_or("no detail from yt-dlp");
         bail!("could not read the playlist: {}", detail.trim());
     }
-    Ok(tracks)
+    Ok(Listing {
+        tracks,
+        complete: out.status.success(),
+    })
 }
 
 /// Re-running over finished tracks makes yt-dlp remux them, and its metadata

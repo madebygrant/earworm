@@ -7,7 +7,7 @@ use ratatui::style::Color;
 
 use crate::theme;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Status {
     Pending,
     Have,
@@ -20,6 +20,8 @@ pub enum Status {
     Weak,
     NoMatch,
     Failed,
+    /// On disk, but its video has left the playlist.
+    Gone,
 }
 
 impl Status {
@@ -36,6 +38,7 @@ impl Status {
             Status::Weak => "weak",
             Status::NoMatch => "none",
             Status::Failed => "failed",
+            Status::Gone => "gone",
         }
     }
 
@@ -47,7 +50,7 @@ impl Status {
             Status::NoMatch => theme::SAND,
             Status::Failed => theme::RED,
             Status::Downloading | Status::Tagging | Status::Downloaded => theme::GOLD,
-            Status::Pending | Status::Have | Status::Kept => theme::DIM,
+            Status::Pending | Status::Have | Status::Kept | Status::Gone => theme::DIM,
         }
     }
 
@@ -61,6 +64,7 @@ impl Status {
                 | Status::Weak
                 | Status::NoMatch
                 | Status::Failed
+                | Status::Gone
                 | Status::Have
         )
     }
@@ -123,7 +127,11 @@ pub enum Cmd {
 pub enum Prompt {
     Choice {
         header: String,
+        /// Shown above the options and wrapped, for text too long to survive
+        /// in the header, which the border clips rather than wrapping.
+        note: String,
         options: Vec<String>,
+        escape: Escape,
     },
     Input {
         header: String,
@@ -136,10 +144,25 @@ pub enum Prompt {
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum Escape {
+    /// Leave this track as it was.
     Skip,
+    /// End the tool, for a question asked before any work started.
     Quit,
+    /// Close the menu and carry on in the session.
+    Keep,
 }
 
+impl Escape {
+    pub fn hint(self) -> &'static str {
+        match self {
+            Escape::Skip => "esc skip",
+            Escape::Quit => "esc quit",
+            Escape::Keep => "esc dismiss",
+        }
+    }
+}
+
+#[derive(Clone)]
 pub enum Reply {
     Choice(usize),
     Text(String),
@@ -177,6 +200,9 @@ pub enum Msg {
     /// The worker has finished the command it was given and will accept
     /// another.
     Idle,
+    /// A second playlist is starting in the same session, so everything the
+    /// last one left on screen has to go.
+    Restart,
     /// Nothing to report and nothing to look at, so close the UI outright.
     Quit,
 }
@@ -200,12 +226,35 @@ impl Asker {
     }
 
     pub fn choose(&self, header: &str, options: Vec<String>) -> Option<usize> {
+        self.pick(header, "", options, Escape::Skip)
+    }
+
+    /// For a menu with no run behind it yet, where backing out ends the tool.
+    pub fn choose_or_quit(&self, header: &str, options: Vec<String>) -> Option<usize> {
+        self.pick(header, "", options, Escape::Quit)
+    }
+
+    /// A menu that reports something before it asks, and that backing out of
+    /// leaves the session where it was rather than skipping or quitting.
+    pub fn choose_noted(&self, header: &str, note: &str, options: Vec<String>) -> Option<usize> {
+        self.pick(header, note, options, Escape::Keep)
+    }
+
+    fn pick(
+        &self,
+        header: &str,
+        note: &str,
+        options: Vec<String>,
+        escape: Escape,
+    ) -> Option<usize> {
         if !self.enabled {
             return None;
         }
         match self.ask(Prompt::Choice {
             header: header.into(),
+            note: note.into(),
             options,
+            escape,
         }) {
             Reply::Choice(i) => Some(i),
             _ => None,
@@ -363,6 +412,14 @@ impl App {
             }
             Msg::Unmark => self.marked.clear(),
             Msg::Idle => self.busy = false,
+            Msg::Restart => {
+                self.done = None;
+                self.tracks.clear();
+                self.marked.clear();
+                self.playlist.clear();
+                self.cursor = 0;
+                self.follow = true;
+            }
             Msg::Quit => self.quit = true,
         }
     }
@@ -454,6 +511,7 @@ impl App {
             Status::Weak,
             Status::NoMatch,
             Status::Failed,
+            Status::Gone,
             Status::Have,
         ];
         order
@@ -573,6 +631,22 @@ mod tests {
         app.flash_until = Some(Instant::now());
         app.expire_flash();
         assert_eq!(app.stage, "finished");
+    }
+
+    /* Three prompts, three meanings for Esc, and the wording is the only
+       thing that tells them apart on screen. */
+    #[test]
+    fn every_escape_says_what_it_actually_does() {
+        assert_eq!(Escape::Skip.hint(), "esc skip");
+        assert_eq!(Escape::Quit.hint(), "esc quit");
+        assert_eq!(Escape::Keep.hint(), "esc dismiss");
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let asker = Asker { tx, enabled: false };
+        // Disabled, so these only prove which Escape each entry point picks.
+        assert!(asker.choose("h", vec![]).is_none());
+        assert!(asker.choose_or_quit("h", vec![]).is_none());
+        assert!(asker.choose_noted("h", "n", vec![]).is_none());
     }
 
     #[test]

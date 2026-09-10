@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
    track however it is now called, and a playlist that gets reordered or
    retitled upstream still resolves to the right file. */
 const NAME: &str = ".earworm";
+/// Header key. No video id starts with a `#`, so an older manifest without
+/// one still parses and a reader that predates it skips the line.
+const URL: &str = "#url";
 
 pub fn path(folder: &Path) -> PathBuf {
     folder.join(NAME)
@@ -23,6 +26,9 @@ pub fn read(folder: &Path) -> HashMap<String, PathBuf> {
         let Some((id, name)) = line.split_once('\t') else {
             continue;
         };
+        if id.starts_with('#') {
+            continue;
+        }
         let file = folder.join(name);
         if file.is_file() {
             found.insert(id.to_string(), file);
@@ -31,8 +37,26 @@ pub fn read(folder: &Path) -> HashMap<String, PathBuf> {
     found
 }
 
-pub fn write(folder: &Path, entries: impl Iterator<Item = (String, PathBuf)>) -> std::io::Result<()> {
+/// Where the folder came from, so it can be synced again without the URL
+/// being retyped. `None` for a folder written before the header existed.
+pub fn read_url(folder: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(path(folder)).ok()?;
+    text.lines()
+        .filter_map(|line| line.split_once('\t'))
+        .find(|(key, _)| *key == URL)
+        .map(|(_, url)| url.trim().to_string())
+        .filter(|url| !url.is_empty())
+}
+
+pub fn write(
+    folder: &Path,
+    url: &str,
+    entries: impl Iterator<Item = (String, PathBuf)>,
+) -> std::io::Result<()> {
     let mut body = String::new();
+    if !url.is_empty() && !url.contains(['\t', '\n']) {
+        body.push_str(&format!("{URL}\t{url}\n"));
+    }
     for (id, file) in entries {
         let Some(name) = file.file_name().map(|n| n.to_string_lossy().to_string()) else {
             continue;
@@ -63,6 +87,7 @@ mod tests {
         std::fs::write(dir.join("01 - A - B.opus"), "x").unwrap();
         write(
             &dir,
+            "https://youtube.com/playlist?list=PL1",
             [("vid1".to_string(), dir.join("01 - A - B.opus"))].into_iter(),
         )
         .unwrap();
@@ -74,8 +99,37 @@ mod tests {
     #[test]
     fn forgets_entries_whose_file_was_deleted() {
         let dir = scratch("gone");
-        write(&dir, [("vid1".to_string(), dir.join("missing.opus"))].into_iter()).unwrap();
+        write(&dir, "u", [("vid1".to_string(), dir.join("missing.opus"))].into_iter()).unwrap();
         assert!(read(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* The header has to be invisible to the entry parser, or the URL line
+       would come back as a video called "#url". */
+    #[test]
+    fn the_url_round_trips_without_becoming_an_entry() {
+        let dir = scratch("url");
+        std::fs::write(dir.join("01 - A.opus"), "x").unwrap();
+        let url = "https://youtube.com/playlist?list=PLabc";
+        write(&dir, url, [("vid1".to_string(), dir.join("01 - A.opus"))].into_iter()).unwrap();
+
+        assert_eq!(read_url(&dir).as_deref(), Some(url));
+        let files = read(&dir);
+        assert_eq!(files.len(), 1);
+        assert!(files.contains_key("vid1"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* A folder written before the header existed still has to load, or every
+       playlist downloaded so far would re-download. */
+    #[test]
+    fn a_manifest_without_a_url_still_reads() {
+        let dir = scratch("legacy");
+        std::fs::write(dir.join("01 - A.opus"), "x").unwrap();
+        std::fs::write(path(&dir), "vid1\t01 - A.opus\n").unwrap();
+
+        assert_eq!(read_url(&dir), None);
+        assert!(read(&dir).contains_key("vid1"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
