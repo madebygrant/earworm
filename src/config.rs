@@ -35,6 +35,14 @@ pub struct Cli {
     #[arg(short = 'F', long)]
     pub no_fix: bool,
 
+    /// Keep yt-dlp's filenames instead of renaming from the corrected tags
+    #[arg(short = 'R', long)]
+    pub no_rename: bool,
+
+    /// Skip filling an empty album tag with the playlist name
+    #[arg(short = 'A', long)]
+    pub no_album: bool,
+
     /// Read this config file instead of the one in ~/.config/earworm
     #[arg(long, value_name = "PATH")]
     pub config: Option<String>,
@@ -59,6 +67,8 @@ pub struct FileConfig {
     pub cover: Option<bool>,
     pub lookup: Option<bool>,
     pub fix: Option<bool>,
+    pub rename: Option<bool>,
+    pub album: Option<bool>,
     pub extra: Option<Vec<String>>,
     pub acoustid_key: Option<String>,
 }
@@ -97,6 +107,8 @@ pub struct Config {
     pub cover: bool,
     pub lookup: bool,
     pub fix: bool,
+    pub rename: bool,
+    pub album: bool,
     pub extra: Vec<String>,
     pub acoustid_key: Option<String>,
 }
@@ -140,6 +152,8 @@ impl Config {
             cover: off("no_cover", file.cover),
             lookup: off("no_lookup", file.lookup),
             fix: off("no_fix", file.fix),
+            rename: off("no_rename", file.rename),
+            album: off("no_album", file.album),
             extra,
             // The environment wins, so a key can be swapped for one run.
             acoustid_key: std::env::var("ACOUSTID_API_KEY")
@@ -155,12 +169,13 @@ impl Config {
     pub fn describe(&self) -> String {
         let on = |flag: bool| if flag { "on" } else { "off" };
         format!(
-            "parse {} · lookup {} · cover {} · m3u8 {} · prompts {}",
+            "parse {} · lookup {} · cover {} · m3u8 {} · prompts {} · rename {}",
             on(self.parse),
             on(self.lookup),
             on(self.cover),
             on(self.m3u8),
-            on(self.fix)
+            on(self.fix),
+            on(self.rename)
         )
     }
 }

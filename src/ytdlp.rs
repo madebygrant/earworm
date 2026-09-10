@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 
 use crate::app::{Msg, Status, Track};
 use crate::config::Config;
+use crate::manifest;
 
 static CHILD: AtomicU32 = AtomicU32::new(0);
 
@@ -65,11 +66,31 @@ pub fn scan(cfg: &Config) -> Result<Vec<Track>> {
             parts[2].to_string(),
             PathBuf::from(parts[3]),
         );
-        if track.path.as_ref().is_some_and(|p| p.exists()) {
+        // is_file, not exists: a directory sitting on the destination path
+        // would otherwise count as a track that had already downloaded.
+        if track.path.as_ref().is_some_and(|p| p.is_file()) {
             track.status = Status::Have;
         }
         tracks.push(track);
     }
+    /* Renaming moves a track off the path this scan predicts, so the manifest
+       is what says "already downloaded" once the filename no longer matches.
+       It also survives a title changing on YouTube. */
+    if let Some(folder) = tracks
+        .first()
+        .and_then(|t| t.path.as_deref())
+        .and_then(Path::parent)
+        .map(Path::to_path_buf)
+    {
+        let known = manifest::read(&folder);
+        for track in &mut tracks {
+            if let Some(file) = known.get(&track.id) {
+                track.path = Some(file.clone());
+                track.status = Status::Have;
+            }
+        }
+    }
+
     /* A non-zero exit only matters when nothing came back: one unavailable
        video in an otherwise readable playlist still fails the process. */
     if tracks.is_empty() {
@@ -89,11 +110,14 @@ pub fn scan(cfg: &Config) -> Result<Vec<Track>> {
 /// Re-running over finished tracks makes yt-dlp remux them, and its metadata
 /// step cannot copy the cover-art stream --embed-thumbnail added, which kills
 /// the whole run. Naming those ids up front makes yt-dlp skip them instead.
+///
+/// Keyed on the file being there rather than on a status, because a retry runs
+/// this again once the earlier tracks have moved on to `ok` or `manual`.
 fn write_archive(tracks: &[Track], path: &Path) -> Result<usize> {
     let mut file = std::fs::File::create(path)?;
     let mut count = 0;
     for track in tracks {
-        if track.status == Status::Have {
+        if track.path.as_deref().is_some_and(Path::is_file) {
             writeln!(file, "youtube {}", track.id)?;
             count += 1;
         }
@@ -116,7 +140,15 @@ impl Drop for Download {
 }
 
 pub fn run(cfg: &Config, tracks: &mut [Track], tx: &Sender<Msg>) -> Result<()> {
-    let scratch = std::env::temp_dir().join(format!("earworm-{}", std::process::id()));
+    /* A retry downloads a second time in the same process, and the guard
+       removes this whole directory on the way out, so the runs cannot share
+       a name. */
+    static RUN: AtomicU32 = AtomicU32::new(0);
+    let scratch = std::env::temp_dir().join(format!(
+        "earworm-{}-{}",
+        std::process::id(),
+        RUN.fetch_add(1, Ordering::SeqCst)
+    ));
     std::fs::create_dir_all(&scratch)?;
     let guard = Download {
         archive: scratch.join("archive"),

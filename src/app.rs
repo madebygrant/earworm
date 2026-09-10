@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 
@@ -108,6 +109,14 @@ impl Track {
 pub enum Cmd {
     Edit(usize),
     Cover(usize),
+    /// Every failed track at once: one at a time would mean one yt-dlp run
+    /// each, and the failures usually share a cause.
+    Retry,
+    /// Artist and title the wrong way round, which a playlist tends to get
+    /// wrong for every track at once or not at all.
+    Swap(Vec<usize>),
+    /// One artist across many tracks, for a compilation the lookup split up.
+    Artist(Vec<usize>),
 }
 
 pub enum Prompt {
@@ -158,6 +167,12 @@ pub enum Msg {
     Log(String),
     Ask(Prompt, Sender<Reply>),
     Done(Result<String, String>),
+    /// Sent once a bulk action has finished, so a cancelled one leaves the
+    /// selection intact rather than making the user rebuild it.
+    Unmark,
+    /// The worker has finished the command it was given and will accept
+    /// another.
+    Idle,
     /// Nothing to report and nothing to look at, so close the UI outright.
     Quit,
 }
@@ -227,6 +242,13 @@ pub struct App {
     pub tracks: Vec<Track>,
     pub logs: Vec<String>,
     pub cursor: usize,
+    /// Track indices, not row positions, so a bulk action means the same
+    /// thing to the worker as it does on screen.
+    pub marked: HashSet<usize>,
+    /// A command is in flight. Set when one is sent rather than when the
+    /// worker reports starting it, because the gap between the two is exactly
+    /// long enough for a second keypress to queue a duplicate.
+    pub busy: bool,
     pub follow: bool,
     pub show_logs: bool,
     pub prompt: Option<(Prompt, Sender<Reply>)>,
@@ -248,6 +270,8 @@ impl App {
             tracks: Vec::new(),
             logs: Vec::new(),
             cursor: 0,
+            marked: HashSet::new(),
+            busy: false,
             follow: true,
             show_logs: false,
             prompt: None,
@@ -308,19 +332,62 @@ impl App {
                 self.stage = if result.is_ok() { "finished" } else { "failed" }.into();
                 self.done = Some(result);
             }
+            Msg::Unmark => self.marked.clear(),
+            Msg::Idle => self.busy = false,
             Msg::Quit => self.quit = true,
         }
     }
 
     /// Commands are only offered once the pipeline is done: the worker is busy
     /// until then, and a queued edit would look like nothing happened.
-    pub fn can_command(&self) -> bool {
-        self.done.is_some() && self.prompt.is_none() && !self.tracks.is_empty()
+    pub fn toggle_mark(&mut self) {
+        if let Some(index) = self.selected()
+            && !self.marked.remove(&index)
+        {
+            self.marked.insert(index);
+        }
     }
 
-    pub fn send(&self, cmd: Cmd) {
-        if let Some(tx) = &self.cmds {
-            let _ = tx.send(cmd);
+    /// Marks every track sharing the cursor's status, which is the selection
+    /// worth making: a playlist gets `kept` or `weak` wrong in batches.
+    pub fn mark_like_cursor(&mut self) {
+        let Some(status) = self.tracks.get(self.cursor).map(|t| t.status) else {
+            return;
+        };
+        let same: Vec<usize> = self
+            .tracks
+            .iter()
+            .filter(|t| t.status == status)
+            .map(|t| t.index)
+            .collect();
+        // Already all marked, so the same key takes them back off again.
+        if same.iter().all(|i| self.marked.contains(i)) {
+            self.marked.retain(|i| !same.contains(i));
+        } else {
+            self.marked.extend(same);
+        }
+    }
+
+    /// What a bulk action applies to: the marked tracks, or the one under the
+    /// cursor when nothing is marked.
+    pub fn targets(&self) -> Vec<usize> {
+        if self.marked.is_empty() {
+            return self.selected().into_iter().collect();
+        }
+        let mut targets: Vec<usize> = self.marked.iter().copied().collect();
+        targets.sort_unstable();
+        targets
+    }
+
+    pub fn can_command(&self) -> bool {
+        self.done.is_some() && self.prompt.is_none() && !self.busy && !self.tracks.is_empty()
+    }
+
+    pub fn send(&mut self, cmd: Cmd) {
+        if let Some(tx) = &self.cmds
+            && tx.send(cmd).is_ok()
+        {
+            self.busy = true;
         }
     }
 
@@ -362,5 +429,112 @@ impl App {
 
     pub fn settled(&self) -> usize {
         self.tracks.iter().filter(|t| t.status.settled()).count()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn app_with(statuses: &[Status]) -> App {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.tracks = statuses
+            .iter()
+            .enumerate()
+            .map(|(i, status)| {
+                let mut track =
+                    Track::new(i + 1, "id".into(), "name".into(), PathBuf::from("/tmp/x.opus"));
+                track.status = *status;
+                track
+            })
+            .collect();
+        app
+    }
+
+    #[test]
+    fn a_bulk_action_falls_back_to_the_cursor_when_nothing_is_marked() {
+        let mut app = app_with(&[Status::Ok, Status::Kept, Status::Weak]);
+        app.cursor = 1;
+        assert_eq!(app.targets(), [2]);
+
+        app.toggle_mark();
+        assert_eq!(app.targets(), [2], "marking the cursor changes nothing yet");
+        app.cursor = 2;
+        assert_eq!(app.targets(), [2], "the mark wins over the cursor");
+    }
+
+    #[test]
+    fn marks_toggle_one_at_a_time() {
+        let mut app = app_with(&[Status::Ok, Status::Ok]);
+        app.toggle_mark();
+        app.cursor = 1;
+        app.toggle_mark();
+        assert_eq!(app.targets(), [1, 2]);
+        app.toggle_mark();
+        assert_eq!(app.targets(), [1]);
+    }
+
+    /* The point of `m` is grabbing a whole class of bad rows at once, and the
+       same key has to give them back or there is no way to undo a misfire. */
+    #[test]
+    fn marking_by_status_covers_that_status_and_then_clears_it() {
+        let mut app = app_with(&[Status::Kept, Status::Ok, Status::Kept, Status::Weak]);
+        app.cursor = 0;
+        app.mark_like_cursor();
+        assert_eq!(app.targets(), [1, 3]);
+
+        app.mark_like_cursor();
+        assert!(app.marked.is_empty(), "the second press unmarked them");
+        assert_eq!(app.targets(), [1], "back to the cursor track");
+    }
+
+    #[test]
+    fn marking_by_status_keeps_marks_made_by_hand() {
+        let mut app = app_with(&[Status::Kept, Status::Ok, Status::Kept]);
+        app.cursor = 1;
+        app.toggle_mark();
+        app.cursor = 0;
+        app.mark_like_cursor();
+        assert_eq!(app.targets(), [1, 2, 3]);
+    }
+
+    /* The gap between sending a command and the worker reporting it is long
+       enough for a second keypress, and a duplicated swap silently undoes the
+       first one, so the send itself has to close the door. */
+    #[test]
+    fn a_command_in_flight_blocks_another() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.tracks = app_with(&[Status::Ok]).tracks;
+        app.done = Some(Ok(String::new()));
+        assert!(app.can_command());
+
+        app.send(Cmd::Swap(vec![1]));
+        assert!(!app.can_command(), "a second command could still be sent");
+
+        app.apply(Msg::Idle);
+        assert!(app.can_command(), "the worker finished but the keys stayed dead");
+        assert_eq!(rx.try_iter().count(), 1, "exactly one command was queued");
+    }
+
+    #[test]
+    fn a_dead_command_channel_does_not_wedge_the_keys() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.tracks = app_with(&[Status::Ok]).tracks;
+        app.done = Some(Ok(String::new()));
+        drop(rx);
+        app.send(Cmd::Retry);
+        assert!(app.can_command(), "nothing was queued, so nothing is pending");
+    }
+
+    #[test]
+    fn a_finished_bulk_action_clears_the_selection() {
+        let mut app = app_with(&[Status::Kept, Status::Kept]);
+        app.mark_like_cursor();
+        assert_eq!(app.targets().len(), 2);
+        app.apply(Msg::Unmark);
+        assert!(app.marked.is_empty());
     }
 }

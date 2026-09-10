@@ -38,6 +38,7 @@ impl Drop for WriteGuard {
 pub struct Info {
     pub artist: String,
     pub title: String,
+    pub album: String,
     pub duration: u64,
 }
 
@@ -54,6 +55,7 @@ pub fn read(path: &Path) -> Result<Info> {
     Ok(Info {
         artist: tag.and_then(|t| t.artist()).unwrap_or_default().to_string(),
         title: tag.and_then(|t| t.title()).unwrap_or_default().to_string(),
+        album: tag.and_then(|t| t.album()).unwrap_or_default().to_string(),
         duration: file.properties().duration().as_secs(),
     })
 }
@@ -77,6 +79,10 @@ fn with_tag<F: FnOnce(&mut Tag)>(path: &Path, edit: F) -> Result<()> {
     edit(tag);
     tag.save_to_path(path, WriteOptions::default())
         .context("cannot write tags")
+}
+
+pub fn set_album(path: &Path, album: &str) -> Result<()> {
+    with_tag(path, |tag| tag.set_album(album.to_string()))
 }
 
 pub fn set_fields(path: &Path, artist: &str, title: &str) -> Result<()> {
@@ -298,3 +304,4 @@ mod tests {
         assert_eq!(image_extension(b""), None);
     }
 }
+

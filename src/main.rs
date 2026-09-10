@@ -1,6 +1,7 @@
 mod app;
 mod config;
 mod lookup;
+mod manifest;
 mod tag;
 mod theme;
 mod ui;
@@ -127,6 +128,17 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             if let Some(index) = app.selected() {
                 app.send(Cmd::Cover(index));
             }
+        }
+        KeyCode::Char('r') if app.can_command() => app.send(Cmd::Retry),
+        KeyCode::Char(' ') => app.toggle_mark(),
+        KeyCode::Char('m') => app.mark_like_cursor(),
+        KeyCode::Char('s') if app.can_command() => {
+            let targets = app.targets();
+            app.send(Cmd::Swap(targets));
+        }
+        KeyCode::Char('A') if app.can_command() => {
+            let targets = app.targets();
+            app.send(Cmd::Artist(targets));
         }
         KeyCode::Char('g') => app.cursor = 0,
         KeyCode::Char('G') => app.cursor = app.tracks.len().saturating_sub(1),

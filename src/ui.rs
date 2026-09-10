@@ -89,8 +89,9 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
             Style::new().fg(CREAM),
         ));
     }
-    // Movement the track rows cannot show: a slow lookup still looks alive.
-    if app.done.is_none() {
+    /* Movement the track rows cannot show: a slow lookup still looks alive,
+       and a bulk action over fifty tracks explains why the keys went quiet. */
+    if app.done.is_none() || app.busy {
         spans.push(Span::styled(
             format!("  {}", SPINNER[(app.tick / 2) % SPINNER.len()]),
             Style::new().fg(GOLD),
@@ -124,7 +125,7 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|t| t.name.chars().count())
         .max()
         .unwrap_or(0);
-    let name_width = longest.min(width.saturating_sub(STATUS_WIDTH + 8).max(12));
+    let name_width = longest.min(width.saturating_sub(STATUS_WIDTH + 9).max(12));
 
     let items: Vec<ListItem> = app
         .tracks
@@ -136,6 +137,15 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
                 Span::styled(
                     if selected { "▌" } else { " " },
                     Style::new().fg(GREEN),
+                ),
+                // Its own column, so a marked track under the cursor shows both.
+                Span::styled(
+                    if app.marked.contains(&track.index) {
+                        "•"
+                    } else {
+                        " "
+                    },
+                    Style::new().fg(GOLD),
                 ),
                 dim(format!("{:>3} ", track.index)),
             ];
@@ -221,6 +231,12 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             Style::new().fg(if app.show_logs { DIM } else { AMBER }),
         ));
     }
+    if !app.marked.is_empty() {
+        hints.push((
+            format!("   {} marked", app.marked.len()),
+            Style::new().fg(GOLD),
+        ));
+    }
     hints.push(("   h keys".to_string(), Style::new().fg(DIM)));
     let reserved: usize = hints.iter().map(|(t, _)| t.chars().count()).sum();
 
@@ -272,15 +288,20 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 fn draw_help(frame: &mut Frame, app: &App) {
-    let actions = if app.can_command() {
-        "e  edit artist and title      c  choose cover art"
+    let (one, many) = if app.can_command() {
+        (
+            "e  edit this track      c  choose cover art      r  retry failures",
+            "s  swap artist and title      A  set one artist",
+        )
     } else {
-        "e / c  available once the run finishes"
+        ("e / c / r  available once the run finishes", "")
     };
     let rows = vec![
         ("move", "j k  ↑ ↓      g G  first last".to_string()),
         ("view", "f  follow the active track     l  yt-dlp output".to_string()),
-        ("act", actions.to_string()),
+        ("mark", "space  this track      m  every track like it".to_string()),
+        ("act", one.to_string()),
+        ("marked", many.to_string()),
         ("quit", "q  ctrl+c".to_string()),
         ("", String::new()),
         ("run", app.settings.clone()),
@@ -523,6 +544,29 @@ mod tests {
             crate::theme::background(23, 24),
             "the gradient has to actually fade"
         );
+    }
+
+    /* The spinner is the only sign that a command is running, since the keys
+       go quiet while one is in flight. */
+    #[test]
+    fn the_spinner_returns_while_a_command_runs() {
+        let finished = |busy: bool| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(tx, "settings".into());
+            app.tracks = spread();
+            app.done = Some(Ok("finished".into()));
+            app.busy = busy;
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..80)
+                .map(|x| buffer[(x, 0)].symbol().to_string())
+                .collect::<String>()
+        };
+        let spinning = super::SPINNER.iter().any(|f| finished(true).contains(f));
+        let idle = super::SPINNER.iter().any(|f| finished(false).contains(f));
+        assert!(spinning, "no spinner while busy");
+        assert!(!idle, "spinner left running with nothing to do");
     }
 
     #[test]
