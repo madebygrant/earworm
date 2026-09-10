@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use std::sync::mpsc::Sender;
 
 use ratatui::style::Color;
@@ -147,6 +148,9 @@ pub enum Reply {
 
 pub enum Msg {
     Stage(String),
+    /// A stage message that undoes itself. What a command just did is worth
+    /// saying and not worth leaving on the header for the rest of the session.
+    Flash(String),
     Playlist(String),
     Tracks(Vec<Track>),
     Progress {
@@ -178,6 +182,9 @@ pub enum Msg {
 }
 
 /// Prompts are answered by the UI thread, so a question blocks only the worker.
+/// Long enough to read a filename in, short enough not to outlive interest.
+const FLASH: Duration = Duration::from_secs(4);
+
 pub struct Asker {
     pub tx: Sender<Msg>,
     pub enabled: bool,
@@ -238,6 +245,9 @@ pub struct App {
     pub tick: usize,
     pub show_help: bool,
     pub stage: String,
+    /// What the header goes back to once a flash expires.
+    resting: String,
+    flash_until: Option<Instant>,
     pub playlist: String,
     pub tracks: Vec<Track>,
     pub logs: Vec<String>,
@@ -266,6 +276,8 @@ impl App {
             tick: 0,
             show_help: false,
             stage: "starting".into(),
+            resting: "starting".into(),
+            flash_until: None,
             playlist: String::new(),
             tracks: Vec::new(),
             logs: Vec::new(),
@@ -284,7 +296,22 @@ impl App {
 
     pub fn apply(&mut self, msg: Msg) {
         match msg {
-            Msg::Stage(s) => self.stage = s,
+            Msg::Stage(s) => {
+                /* Only while the run itself is talking. A command's progress
+                   ("looking for artwork") would otherwise become what the
+                   header falls back to, so cancelling it would revert to a
+                   step that had already finished. Post-run, every command
+                   path ends in a Flash or a Done, which restores it. */
+                if self.done.is_none() {
+                    self.resting = s.clone();
+                }
+                self.flash_until = None;
+                self.stage = s;
+            }
+            Msg::Flash(s) => {
+                self.stage = s;
+                self.flash_until = Some(Instant::now() + FLASH);
+            }
             Msg::Playlist(p) => self.playlist = p,
             Msg::Tracks(t) => self.tracks = t,
             Msg::Progress { index, percent } => {
@@ -330,6 +357,8 @@ impl App {
             }
             Msg::Done(result) => {
                 self.stage = if result.is_ok() { "finished" } else { "failed" }.into();
+                self.resting = self.stage.clone();
+                self.flash_until = None;
                 self.done = Some(result);
             }
             Msg::Unmark => self.marked.clear(),
@@ -340,6 +369,15 @@ impl App {
 
     /// Commands are only offered once the pipeline is done: the worker is busy
     /// until then, and a queued edit would look like nothing happened.
+    /// Called every frame: a flash has to expire on its own, since the thing
+    /// that set it has already finished and will not send anything else.
+    pub fn expire_flash(&mut self) {
+        if self.flash_until.is_some_and(|at| Instant::now() >= at) {
+            self.stage = self.resting.clone();
+            self.flash_until = None;
+        }
+    }
+
     pub fn toggle_mark(&mut self) {
         if let Some(index) = self.selected()
             && !self.marked.remove(&index)
@@ -502,6 +540,41 @@ mod tests {
     /* The gap between sending a command and the worker reporting it is long
        enough for a second keypress, and a duplicated swap silently undoes the
        first one, so the send itself has to close the door. */
+    /* Six post-run messages used to sit on the header for the rest of the
+       session, the command error being the one people noticed. */
+    #[test]
+    fn a_flash_goes_back_to_what_the_run_ended_on() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.apply(Msg::Stage("identifying".into()));
+        app.apply(Msg::Done(Ok("12 tracks".into())));
+        assert_eq!(app.stage, "finished");
+
+        app.apply(Msg::Flash("failed: cannot write tags".into()));
+        assert_eq!(app.stage, "failed: cannot write tags");
+        app.expire_flash();
+        assert_eq!(app.stage, "failed: cannot write tags", "expired immediately");
+
+        app.flash_until = Some(Instant::now());
+        app.expire_flash();
+        assert_eq!(app.stage, "finished");
+    }
+
+    /* A command's own progress is not somewhere to fall back to: it had
+       already finished by the time the flash replaced it. */
+    #[test]
+    fn a_flash_never_reverts_to_a_commands_progress_message() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.apply(Msg::Done(Ok("12 tracks".into())));
+        app.apply(Msg::Stage("looking for artwork".into()));
+        app.apply(Msg::Flash("cancelled".into()));
+
+        app.flash_until = Some(Instant::now());
+        app.expire_flash();
+        assert_eq!(app.stage, "finished");
+    }
+
     #[test]
     fn a_command_in_flight_blocks_another() {
         let (tx, rx) = std::sync::mpsc::channel();

@@ -81,6 +81,7 @@ fn run(
                 }
             }
         }
+        app.expire_flash();
         terminal.draw(|frame| ui::draw(frame, app))?;
         app.tick = app.tick.wrapping_add(1);
 

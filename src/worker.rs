@@ -296,7 +296,7 @@ fn serve(
             Cmd::Artist(targets) => artist(cfg, tx, tracks, &asker, &targets),
         };
         if let Err(err) = done {
-            let _ = tx.send(Msg::Stage(format!("failed: {err}")));
+            let _ = tx.send(Msg::Flash(format!("failed: {err}")));
             let _ = tx.send(Msg::Log(err.to_string()));
         }
         // Last, so the keys stay dead until everything above has landed.
@@ -320,7 +320,7 @@ fn retry(
         .map(|t| t.index)
         .collect();
     if failed.is_empty() {
-        let _ = tx.send(Msg::Stage("nothing to retry".into()));
+        let _ = tx.send(Msg::Flash("nothing to retry".into()));
         return Ok(());
     }
 
@@ -352,7 +352,7 @@ fn retry(
     /* The folder image is already there from the first pass, and rewriting it
        from a retried track would change the album art for every other one. */
     let mut cover = CoverState {
-        written: folder.is_some_and(|f| COVER_NAMES.iter().any(|n| f.join(n).exists())),
+        written: folder.as_deref().is_some_and(has_cover),
     };
     tag_tracks(cfg, tx, cancel, tracks, &playlist, asker, &mut cover, Some(&failed));
 
@@ -461,7 +461,7 @@ fn bulk(
         write_playlist(cfg, tracks)?;
         let _ = tx.send(Msg::Unmark);
     }
-    let _ = tx.send(Msg::Stage(match failed {
+    let _ = tx.send(Msg::Flash(match failed {
         0 => format!("{what} {changed} tracks"),
         n => format!("{what} {changed} tracks, {n} could not be written"),
     }));
@@ -524,7 +524,7 @@ fn edit(
     write_track(cfg, tx, tracks, pos, artist, title, "typed")?;
     save_manifest(tracks);
     write_playlist(cfg, tracks)?;
-    let _ = tx.send(Msg::Stage(format!("saved track {index}")));
+    let _ = tx.send(Msg::Flash(format!("saved track {index}")));
     Ok(())
 }
 
@@ -553,6 +553,13 @@ fn cover_options(found: &[lookup::Artwork], current: Option<String>) -> Vec<(Str
 /// "keep" row and both are cleared before a new one is written.
 const COVER_NAMES: [&str; 2] = ["cover.jpg", "cover.png"];
 
+/// Whether the folder already has its one image. Checking only `cover.jpg`
+/// would miss a PNG, and `tag::apply` writes a JPEG unconditionally, so the
+/// folder would end up with both and players would pick either.
+fn has_cover(folder: &Path) -> bool {
+    COVER_NAMES.iter().any(|name| folder.join(name).is_file())
+}
+
 fn current_cover(folder: &Path) -> Option<String> {
     for name in COVER_NAMES {
         let Ok(bytes) = std::fs::read(folder.join(name)) else {
@@ -569,7 +576,7 @@ fn current_cover(folder: &Path) -> Option<String> {
 }
 
 fn cancelled(tx: &Sender<Msg>) -> Result<()> {
-    let _ = tx.send(Msg::Stage("cancelled".into()));
+    let _ = tx.send(Msg::Flash("cancelled".into()));
     Ok(())
 }
 
@@ -649,7 +656,7 @@ fn cover(
             let _ = tx.send(Msg::Log(format!("{}: {err}", path.display())));
         }
     }
-    let _ = tx.send(Msg::Stage(format!("cover set from {label}")));
+    let _ = tx.send(Msg::Flash(format!("cover set from {label}")));
     Ok(())
 }
 
@@ -866,6 +873,28 @@ mod tests {
     use super::*;
     use std::sync::mpsc;
     use crate::lookup::Artwork;
+
+    /* A retry must not add a second folder image: the writer in `tag::apply`
+       always writes cover.jpg, so a check that only looked for that name left
+       a PNG cover with a JPEG beside it. Driven off the constant, so adding a
+       name without teaching this check about it fails here. */
+    #[test]
+    fn every_cover_name_counts_as_the_folder_already_having_one() {
+        let dir = scratch("cover");
+        assert!(!has_cover(&dir), "an empty folder claimed a cover");
+
+        for name in COVER_NAMES {
+            std::fs::write(dir.join(name), "image").unwrap();
+            assert!(has_cover(&dir), "{name} was not recognised");
+            std::fs::remove_file(dir.join(name)).unwrap();
+            assert!(!has_cover(&dir), "{name} counted after deletion");
+        }
+
+        // A directory of that name is not an image either.
+        std::fs::create_dir(dir.join(COVER_NAMES[0])).unwrap();
+        assert!(!has_cover(&dir));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn scratch(tag: &str) -> PathBuf {
         let dir =

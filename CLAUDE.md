@@ -46,6 +46,11 @@ call and file write. Nothing that blocks touches the render loop.
   second press to queue a duplicate, and a duplicated swap silently undoes the
   first. `serve` sends `Msg::Idle` last, after everything else for that
   command.
+- **`Msg::Flash` is a stage message that expires; `Msg::Stage` is one that
+  stays.** Post-run outcomes flash, and `main` calls `expire_flash` every
+  frame because whatever set the message has already finished. A `Stage` sent
+  after `done` is set deliberately does not become the resting message, or
+  cancelling a command would revert the header to a step already over.
 - **`App.marked` holds track indices, not row positions.** A `Cmd` carrying
   rows would mean something different to the worker than it does on screen.
 - **A bulk action clears the marks with `Msg::Unmark` on completion,** not when
