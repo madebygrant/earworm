@@ -22,6 +22,9 @@ pub enum Status {
     Failed,
     /// On disk, but its video has left the playlist.
     Gone,
+    /// In the playlist and not on disk, because the run was never asked to
+    /// fetch it. Distinct from `Failed`, which would overstate what went wrong.
+    Skipped,
 }
 
 impl Status {
@@ -39,6 +42,7 @@ impl Status {
             Status::NoMatch => "none",
             Status::Failed => "failed",
             Status::Gone => "gone",
+            Status::Skipped => "skipped",
         }
     }
 
@@ -50,7 +54,9 @@ impl Status {
             Status::NoMatch => theme::SAND,
             Status::Failed => theme::RED,
             Status::Downloading | Status::Tagging | Status::Downloaded => theme::GOLD,
-            Status::Pending | Status::Have | Status::Kept | Status::Gone => theme::DIM,
+            Status::Pending | Status::Have | Status::Kept | Status::Gone | Status::Skipped => {
+                theme::DIM
+            }
         }
     }
 
@@ -65,6 +71,7 @@ impl Status {
                 | Status::NoMatch
                 | Status::Failed
                 | Status::Gone
+                | Status::Skipped
                 | Status::Have
         )
     }
@@ -122,6 +129,10 @@ pub struct Shelf {
     /// left the playlist, which needs a listing to know about.
     pub missing: usize,
     pub synced: Option<u64>,
+    /// Filename and whether it is still on disk, in playlist order. Resolved
+    /// here because the draw loop must not stat, and the filename carries the
+    /// number and tags already, so the preview needs no tag read.
+    pub files: Vec<(String, bool)>,
 }
 
 /// Which screen has the keys. The library is a screen and not a prompt because
@@ -198,6 +209,9 @@ impl Escape {
 pub enum Reply {
     Choice(usize),
     Text(String),
+    /// Track indices the run should download. Empty is a real answer: tag what
+    /// is already on disk and fetch nothing.
+    Picked(Vec<usize>),
     Cancel,
 }
 
@@ -229,6 +243,10 @@ pub enum Msg {
     /// user is looking at and must not be replaced under them.
     Library { shelves: Vec<Shelf>, show: bool },
     Ask(Prompt, Sender<Reply>),
+    /// Hand the track list to the user to choose from before downloading.
+    /// Not a `Prompt`: the answer is made with the list's own cursor, marks
+    /// and filter, which a popup would cover up.
+    Pick(Sender<Reply>),
     /// A run has settled. `stage` is the header word for a success, since not
     /// everything that settles has run: opening a folder from the library
     /// downloads nothing and "finished" would be a claim about work.
@@ -366,6 +384,10 @@ pub struct App {
     pub choice: usize,
     pub input: String,
     pub done: Option<Result<String, String>>,
+    /// The worker is blocked waiting for the tracks to download. Holding the
+    /// reply channel here is what makes the keys mean "choose" for as long as
+    /// the question is open, and dropping it answers `Cancel`.
+    pub picking: Option<Sender<Reply>>,
     pub quit: bool,
 }
 
@@ -396,6 +418,7 @@ impl App {
             choice: 0,
             input: String::new(),
             done: None,
+            picking: None,
             quit: false,
         }
     }
@@ -460,6 +483,20 @@ impl App {
                 if show {
                     self.view = View::Library;
                 }
+            }
+            /* Opens with everything that needs fetching already marked, so
+               Enter is the whole playlist and the work is unmarking what you
+               do not want. Starting empty would make "download all" the
+               laborious answer and the accidental one a silent no-op. */
+            Msg::Pick(reply) => {
+                self.marked = self
+                    .tracks
+                    .iter()
+                    .filter(|t| !matches!(t.status, Status::Have | Status::Gone))
+                    .map(|t| t.index)
+                    .collect();
+                self.follow = false;
+                self.picking = Some(reply);
             }
             Msg::Ask(prompt, reply) => {
                 if let Prompt::Input { value, .. } = &prompt {
@@ -551,6 +588,47 @@ impl App {
         targets
     }
 
+    /// Every row the filter shows, marked or unmarked together. `m` stops at
+    /// the filter for the same reason, so this is the only way to reach the
+    /// whole playlist in one key once a filter is on.
+    pub fn toggle_all(&mut self) {
+        let shown: Vec<usize> = self
+            .tracks
+            .iter()
+            .filter(|t| self.shows(t))
+            .map(|t| t.index)
+            .collect();
+        if shown.iter().all(|i| self.marked.contains(i)) {
+            self.marked.retain(|i| !shown.contains(i));
+        } else {
+            self.marked.extend(shown);
+        }
+    }
+
+    /// Answers the pick with the marked set. The marks and not `targets()`:
+    /// falling back to the cursor would turn "I unmarked everything" into
+    /// "download the row I happen to be on".
+    pub fn confirm_pick(&mut self) {
+        let Some(reply) = self.picking.take() else {
+            return;
+        };
+        let mut picked: Vec<usize> = self.marked.iter().copied().collect();
+        picked.sort_unstable();
+        let _ = reply.send(Reply::Picked(picked));
+        self.marked.clear();
+        self.follow = true;
+    }
+
+    /// Esc: download nothing and tag what is already there. Not a quit, since
+    /// a folder of existing files is still worth the rest of the run.
+    pub fn cancel_pick(&mut self) {
+        if let Some(reply) = self.picking.take() {
+            let _ = reply.send(Reply::Picked(Vec::new()));
+            self.marked.clear();
+            self.follow = true;
+        }
+    }
+
     pub fn can_command(&self) -> bool {
         self.view == View::Tracks
             && self.done.is_some()
@@ -597,6 +675,12 @@ impl App {
             .get(self.cursor)
             .filter(|t| self.shows(t))
             .map(|t| t.index)
+    }
+
+    /// Whether the track list is narrowed or about to be. The library screen
+    /// has its own cursor and the filter does not reach it.
+    pub fn filtering(&self) -> bool {
+        self.view == View::Tracks && (self.typing_filter || !self.filter.is_empty())
     }
 
     /// Whether a row survives the filter, matched against the name and the
@@ -716,6 +800,7 @@ impl App {
             Status::NoMatch,
             Status::Failed,
             Status::Gone,
+            Status::Skipped,
             Status::Have,
         ];
         order
@@ -1079,6 +1164,7 @@ mod tests {
             tracks: 3,
             missing: 0,
             synced: None,
+            files: Vec::new(),
         }
     }
 
@@ -1160,6 +1246,151 @@ mod tests {
         app.mark_like_cursor();
         assert_eq!(app.targets().len(), 2);
         app.apply(Msg::Unmark);
+        assert!(app.marked.is_empty());
+    }
+
+    /* `counts()` is a hand-kept array where `settled()` is an exhaustive
+       match, so a new variant reaches the header's total without reaching the
+       tally beside it, and the two disagree with nothing saying why. */
+    #[test]
+    fn every_settled_status_is_counted_in_the_tally() {
+        let settled: Vec<Status> = [
+            Status::Pending,
+            Status::Have,
+            Status::Downloading,
+            Status::Downloaded,
+            Status::Tagging,
+            Status::Ok,
+            Status::Manual,
+            Status::Kept,
+            Status::Weak,
+            Status::NoMatch,
+            Status::Failed,
+            Status::Gone,
+            Status::Skipped,
+        ]
+        .into_iter()
+        .filter(|s| s.settled())
+        .collect();
+
+        let app = app_with(&settled);
+        let counted: Vec<Status> = app.counts().into_iter().map(|(s, _)| s).collect();
+        for status in &settled {
+            assert!(counted.contains(status), "{status:?} is missing from the tally");
+        }
+        assert_eq!(
+            app.counts().iter().map(|(_, n)| n).sum::<usize>(),
+            app.settled(),
+            "the tally and the header total disagree"
+        );
+    }
+
+    /* A terminal status left out of `settled()` means the run never reaches
+       its own count and the UI waits forever. The match below has no
+       wildcard, so a new variant fails to compile here first. */
+    #[test]
+    fn every_status_is_either_in_flight_or_settled() {
+        let all = [
+            Status::Pending,
+            Status::Have,
+            Status::Downloading,
+            Status::Downloaded,
+            Status::Tagging,
+            Status::Ok,
+            Status::Manual,
+            Status::Kept,
+            Status::Weak,
+            Status::NoMatch,
+            Status::Failed,
+            Status::Gone,
+            Status::Skipped,
+        ];
+        for status in all {
+            let in_flight = match status {
+                Status::Pending | Status::Downloading | Status::Downloaded | Status::Tagging => {
+                    true
+                }
+                Status::Have
+                | Status::Ok
+                | Status::Manual
+                | Status::Kept
+                | Status::Weak
+                | Status::NoMatch
+                | Status::Failed
+                | Status::Gone
+                | Status::Skipped => false,
+            };
+            assert_eq!(status.settled(), !in_flight, "{status:?}");
+        }
+    }
+
+    fn picking_app(statuses: &[Status]) -> (App, std::sync::mpsc::Receiver<Reply>) {
+        let mut app = app_with(statuses);
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.apply(Msg::Pick(tx));
+        (app, rx)
+    }
+
+    /* Enter has to mean the whole playlist, so the gate opens with everything
+       that needs fetching already marked and the work is unmarking. Starting
+       empty makes the accidental answer a silent no-op. */
+    #[test]
+    fn the_pick_opens_with_everything_that_needs_downloading() {
+        let (app, _rx) = picking_app(&[Status::Pending, Status::Have, Status::Gone, Status::Pending]);
+        let mut marked: Vec<usize> = app.marked.iter().copied().collect();
+        marked.sort_unstable();
+        assert_eq!(marked, [1, 4], "on-disk and departed tracks were selected");
+        assert!(!app.follow, "following would drag the cursor off the choice");
+    }
+
+    /* `targets()` falls back to the cursor when nothing is marked, which here
+       would turn "I want none of these" into "download the row I am on". */
+    #[test]
+    fn unmarking_everything_answers_with_nothing() {
+        let (mut app, rx) = picking_app(&[Status::Pending, Status::Pending]);
+        app.toggle_all();
+        assert!(app.marked.is_empty());
+        app.confirm_pick();
+        assert!(matches!(rx.recv().unwrap(), Reply::Picked(p) if p.is_empty()));
+        assert!(app.picking.is_none(), "the question stayed open");
+    }
+
+    /* Esc before any download still leaves a folder worth tagging, so it
+       answers rather than quitting. */
+    #[test]
+    fn cancelling_the_pick_downloads_nothing_and_carries_on() {
+        let (mut app, rx) = picking_app(&[Status::Pending]);
+        app.cancel_pick();
+        assert!(matches!(rx.recv().unwrap(), Reply::Picked(p) if p.is_empty()));
+        assert!(app.picking.is_none());
+    }
+
+    #[test]
+    fn confirming_answers_with_the_marks_in_order() {
+        let (mut app, rx) = picking_app(&[Status::Pending, Status::Pending, Status::Pending]);
+        app.marked.remove(&2);
+        app.confirm_pick();
+        assert!(matches!(rx.recv().unwrap(), Reply::Picked(p) if p == [1, 3]));
+    }
+
+    /* `a` reaching past the filter is the same bug `m` already guards, and
+       under a pick it selects a whole playlist instead of one artist. */
+    #[test]
+    fn marking_everything_stops_at_the_filter() {
+        let mut app = app_with(&[Status::Ok, Status::Failed, Status::Ok]);
+        app.tracks[0].name = "Aphex Twin - Xtal".into();
+        app.tracks[1].name = "Boards - Olson".into();
+        app.tracks[2].name = "Aphex Twin - Avril".into();
+        app.marked.clear();
+        app.filter = "aphex".into();
+
+        app.toggle_all();
+        let mut marked: Vec<usize> = app.marked.iter().copied().collect();
+        marked.sort_unstable();
+        assert_eq!(marked, [1, 3], "the filtered-out track was marked");
+
+        // The same key takes the shown rows back off, leaving the rest alone.
+        app.toggle_all();
         assert!(app.marked.is_empty());
     }
 }

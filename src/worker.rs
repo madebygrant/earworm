@@ -2,11 +2,11 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, Sender};
+use std::sync::mpsc::{self, Receiver, Sender};
 
 use anyhow::{Context, Result, bail};
 
-use crate::app::{Asker, Cmd, Escape, Msg, Shelf, Status, Track};
+use crate::app::{Asker, Cmd, Escape, Msg, Reply, Shelf, Status, Track};
 use crate::config::{self, Config};
 use crate::lookup;
 use crate::manifest;
@@ -16,7 +16,7 @@ use crate::ytdlp;
 pub fn run(mut cfg: Config, tx: Sender<Msg>, cancel: Arc<AtomicBool>, cmds: Receiver<Cmd>) {
     let mut tracks = Vec::new();
     let result = match ask_start(&mut cfg, &tx) {
-        Start::Playlist => pipeline(&cfg, &tx, &cancel, &mut tracks),
+        Start::Playlist => pipeline(&cfg, &tx, &cancel, &mut tracks, cfg.pick),
         Start::Resync(saved) => resync(&mut cfg, &tx, &cancel, &mut tracks, saved),
         /* Nothing has been synced and nothing has failed, so there is no
            outcome to report: the library screen is the whole answer. */
@@ -198,7 +198,8 @@ fn finish(
                 let _ = tx.send(Msg::Restart);
                 tracks.clear();
                 cfg.url = url;
-                result = pipeline(cfg, tx, cancel, tracks).map_err(|e| e.to_string());
+                let gate = cfg.pick;
+                result = pipeline(cfg, tx, cancel, tracks, gate).map_err(|e| e.to_string());
             }
             Some(2) => {
                 let _ = tx.send(Msg::Quit);
@@ -225,13 +226,23 @@ pub fn library(dir: &Path) -> Vec<Shelf> {
             // One read for all three: this walks every folder under --dir.
             let sidecar = manifest::load(&path);
             let url = sidecar.url?;
-            let missing = sidecar.entries.iter().filter(|(_, f)| !f.is_file()).count();
+            // One stat per entry, feeding both the count and the preview.
+            let files: Vec<(String, bool)> = sidecar
+                .entries
+                .iter()
+                .map(|(_, f)| {
+                    let name = f.file_name().unwrap_or_default().to_string_lossy().into();
+                    (name, f.is_file())
+                })
+                .collect();
+            let missing = files.iter().filter(|(_, here)| !here).count();
             Some(Shelf {
                 name: path.file_name().unwrap_or_default().to_string_lossy().into(),
                 url,
-                tracks: sidecar.entries.len() - missing,
+                tracks: files.len() - missing,
                 missing,
                 synced: sidecar.synced,
+                files,
                 path,
             })
         })
@@ -423,7 +434,7 @@ fn resync(
         let _ = tx.send(Msg::Restart);
         cfg.url = shelf.url.clone();
 
-        match pipeline(cfg, tx, cancel, tracks) {
+        match pipeline(cfg, tx, cancel, tracks, false) {
             Ok(summary) => {
                 synced += 1;
                 listed += tracks.iter().filter(|t| t.listed).count();
@@ -442,11 +453,15 @@ fn resync(
     ))
 }
 
+/// `gate` is separate from `cfg.pick` because `--resync` walks the whole
+/// library unattended: a question per folder is the one thing that would stop
+/// it, and the user asked for the sync, not for each playlist in it.
 fn pipeline(
     cfg: &Config,
     tx: &Sender<Msg>,
     cancel: &AtomicBool,
     tracks: &mut Vec<Track>,
+    gate: bool,
 ) -> Result<String> {
     let _ = tx.send(Msg::Stage("reading playlist".into()));
     let listing = ytdlp::scan(cfg)?;
@@ -460,6 +475,10 @@ fn pipeline(
     }
     note_departures(cfg, tx, listing.complete, tracks);
     let _ = tx.send(Msg::Tracks(tracks.clone()));
+
+    if gate {
+        ask_which(tx, tracks);
+    }
 
     let have = tracks.iter().filter(|t| t.status == Status::Have).count();
     let _ = tx.send(Msg::Stage(format!(
@@ -493,6 +512,38 @@ fn pipeline(
     Ok(summary)
 }
 
+/* Blocks the worker on the UI's answer while the screen keeps drawing. Marks
+   the rest `Skipped` rather than dropping them: `write_playlist` builds the
+   .m3u8 from the tracks it is given, so a shortened list would rewrite a whole
+   playlist file from the handful this run happened to fetch. */
+fn ask_which(tx: &Sender<Msg>, tracks: &mut [Track]) {
+    let (reply_tx, reply_rx) = mpsc::channel();
+    let _ = tx.send(Msg::Stage("choose tracks".into()));
+    if tx.send(Msg::Pick(reply_tx)).is_err() {
+        return;
+    }
+    let picked: HashSet<usize> = match reply_rx.recv() {
+        Ok(Reply::Picked(picked)) => picked.into_iter().collect(),
+        // The UI is gone, and skipping the whole playlist on the way out is
+        // worse than the download the shutdown is about to kill anyway.
+        _ => return,
+    };
+    for track in tracks.iter_mut() {
+        // Already on disk or already departed: nothing was going to fetch it.
+        if picked.contains(&track.index) || track.status != Status::Pending {
+            continue;
+        }
+        track.status = Status::Skipped;
+        let _ = tx.send(Msg::Update {
+            index: track.index,
+            status: Status::Skipped,
+            source: None,
+            note: Some("not picked".into()),
+            name: None,
+        });
+    }
+}
+
 /// The identify-and-write pass. `wanted` limits it to a set of track indices,
 /// which is how a retry re-tags its own failures without disturbing tracks
 /// that already came out right.
@@ -511,8 +562,11 @@ fn tag_tracks(
         if cancel.load(Ordering::SeqCst) {
             break;
         }
+        /* Neither has a file this run is entitled to touch: a departed one is
+           somebody else's playlist position, a skipped one was never fetched.
+           Falling through marks both `Failed` for having no file. */
         if wanted.is_some_and(|only| !only.contains(&track.index))
-            || track.status == Status::Gone
+            || matches!(track.status, Status::Gone | Status::Skipped)
         {
             continue;
         }
@@ -712,7 +766,8 @@ fn start_url(
     let _ = tx.send(Msg::Restart);
     tracks.clear();
     cfg.url = url;
-    Some(pipeline(cfg, tx, cancel, tracks))
+    let gate = cfg.pick;
+    Some(pipeline(cfg, tx, cancel, tracks, gate))
 }
 
 /// Syncs the playlist that is open against the URL its manifest recorded,
@@ -728,7 +783,8 @@ fn sync_open(
     }
     let _ = tx.send(Msg::Restart);
     tracks.clear();
-    pipeline(cfg, tx, cancel, tracks)
+    let gate = cfg.pick;
+    pipeline(cfg, tx, cancel, tracks, gate)
 }
 
 /// Downloads and re-tags whatever came out `failed`. The archive names every
@@ -1300,6 +1356,12 @@ fn summarise(tracks: &[Track], playlist: Option<&Path>) -> String {
     if departed > 0 {
         summary = format!("{summary}, {departed} no longer in the playlist");
     }
+    /* The count of tracks is the count that got a file, so without this a run
+       that fetched ten of two hundred reads exactly like a complete one. */
+    let skipped = tracks.iter().filter(|t| t.status == Status::Skipped).count();
+    if skipped > 0 {
+        summary = format!("{summary}, {skipped} not downloaded");
+    }
     summary
 }
 
@@ -1484,6 +1546,35 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /* The preview pane draws from these and nothing else, so a `library` that
+       stopped filling them would leave it blank with every UI test still
+       green. Playlist order matters too: the pane shows the first screenful. */
+    #[test]
+    fn the_library_records_each_folders_files_and_which_are_gone() {
+        let root = scratch("shelf-files");
+        let folder = root.join("Focus");
+        std::fs::create_dir_all(&folder).unwrap();
+        let here = folder.join("01 - A.opus");
+        let gone = folder.join("02 - B.opus");
+        std::fs::write(&here, "audio").unwrap();
+        manifest::write(
+            &folder,
+            "u",
+            [("a".to_string(), here), ("b".to_string(), gone)].into_iter(),
+        )
+        .unwrap();
+
+        let shelf = library(&root).remove(0);
+        assert_eq!(
+            shelf.files,
+            [("01 - A.opus".to_string(), true), ("02 - B.opus".to_string(), false)],
+            "the pane has nothing to draw"
+        );
+        // The same stat pass feeds the row's counts, so they must agree.
+        assert_eq!((shelf.tracks, shelf.missing), (1, 1));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn the_library_is_empty_for_a_directory_that_is_not_there() {
         assert!(library(Path::new("/nonexistent-earworm-library")).is_empty());
@@ -1505,8 +1596,124 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /* The headline count is tracks that got a file, so a run told to fetch one
+       of three otherwise reads exactly like a complete one. */
+    #[test]
+    fn the_summary_says_how_many_were_never_downloaded() {
+        let dir = scratch("skipped-summary");
+        let mut tracks = playlist_of(&dir, &[("a", "01 - A.opus")]);
+        tracks[0].listed = true;
+        for (n, id) in [(2, "b"), (3, "c")] {
+            let mut track = Track::new(n, id.into(), format!("{n:02} - X.opus"), dir.join("x"));
+            track.status = Status::Skipped;
+            tracks.push(track);
+        }
+
+        let line = summarise(&tracks, None);
+        assert!(line.contains("1 tracks in"), "{line}");
+        assert!(line.contains("2 not downloaded"), "{line}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* Both of these have a path and no file behind it, and the whole reason
+       the status exists is that the pass must tell them apart: one is a
+       download that went wrong, the other a download nobody asked for. */
+    #[test]
+    fn tagging_calls_an_absent_file_failed_but_leaves_a_skipped_one_alone() {
+        let dir = scratch("skipped-tagging");
+        let (tx, _rx) = channel();
+        let mut tracks = vec![
+            Track::new(1, "a".into(), "01 - A.opus".into(), dir.join("01 - A.opus")),
+            Track::new(2, "b".into(), "02 - B.opus".into(), dir.join("02 - B.opus")),
+        ];
+        tracks[1].status = Status::Skipped;
+
+        let asker = Asker { tx: tx.clone(), enabled: false };
+        let mut cover = CoverState { written: true };
+        let cancel = AtomicBool::new(false);
+        tag_tracks(
+            &config(false),
+            &tx,
+            &cancel,
+            &mut tracks,
+            "Mix",
+            &asker,
+            &mut cover,
+            None,
+        );
+
+        assert_eq!(tracks[0].status, Status::Failed, "an absent file is a failure");
+        assert_eq!(tracks[1].status, Status::Skipped, "a skipped track was re-judged");
+        assert!(!tracks[1].listed, "a skipped track reached the .m3u8");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     fn channel() -> (Sender<Msg>, mpsc::Receiver<Msg>) {
         mpsc::channel()
+    }
+
+    /* The pick decides what the download fetches, and everything it leaves out
+       has to end up `Skipped`: `Pending` would reach the tagging pass, find no
+       file and be reported as a failure the user caused on purpose. */
+    #[test]
+    fn what_the_pick_leaves_out_becomes_skipped() {
+        let (tx, rx) = channel();
+        let mut tracks = vec![
+            Track::new(1, "a".into(), "A".into(), PathBuf::from("/tmp/a")),
+            Track::new(2, "b".into(), "B".into(), PathBuf::from("/tmp/b")),
+            Track::new(3, "c".into(), "C".into(), PathBuf::from("/tmp/c")),
+            Track::new(4, "d".into(), "D".into(), PathBuf::from("/tmp/d")),
+        ];
+        tracks[2].status = Status::Have;
+        tracks[3].status = Status::Gone;
+
+        // Answer before asking: the worker blocks on recv, and this is one thread.
+        let answer = std::thread::spawn(move || {
+            for msg in rx {
+                if let Msg::Pick(reply) = msg {
+                    let _ = reply.send(Reply::Picked(vec![1]));
+                    break;
+                }
+            }
+        });
+        ask_which(&tx, &mut tracks);
+        drop(tx);
+        answer.join().unwrap();
+
+        let statuses: Vec<Status> = tracks.iter().map(|t| t.status).collect();
+        assert_eq!(
+            statuses,
+            [Status::Pending, Status::Skipped, Status::Have, Status::Gone],
+            "a picked, on-disk or departed track was re-judged"
+        );
+    }
+
+    /* The UI going away mid-question must not turn the whole playlist into a
+       deliberate skip on the way out, and it can go away on either side of the
+       question: before the ask lands, or after it with the answer never sent. */
+    #[test]
+    fn a_pick_nobody_answers_leaves_every_track_alone() {
+        let track = || vec![Track::new(1, "a".into(), "A".into(), PathBuf::from("/tmp/a"))];
+
+        let (tx, rx) = channel();
+        drop(rx);
+        let mut gone_before = track();
+        ask_which(&tx, &mut gone_before);
+        assert_eq!(gone_before[0].status, Status::Pending, "the ask never landed");
+
+        let (tx, rx) = channel();
+        // Takes the question and drops the reply channel without answering.
+        let hangs_up = std::thread::spawn(move || {
+            for msg in rx {
+                if matches!(msg, Msg::Pick(_)) {
+                    break;
+                }
+            }
+        });
+        let mut gone_after = track();
+        ask_which(&tx, &mut gone_after);
+        hangs_up.join().unwrap();
+        assert_eq!(gone_after[0].status, Status::Pending, "the answer never came");
     }
 
     fn playlist_of(dir: &Path, ids: &[(&str, &str)]) -> Vec<Track> {
@@ -1986,6 +2193,7 @@ mod tests {
             list: false,
             rename,
             album: true,
+            pick: true,
             extra: Vec::new(),
             acoustid_key: None,
         }

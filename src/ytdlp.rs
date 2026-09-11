@@ -124,11 +124,15 @@ pub fn scan(cfg: &Config) -> Result<Listing> {
 ///
 /// Keyed on the file being there rather than on a status, because a retry runs
 /// this again once the earlier tracks have moved on to `ok` or `manual`.
+///
+/// `Skipped` is the one status that also belongs here: it is how the run says
+/// it was never asked for this track, and the archive is what makes yt-dlp
+/// honour that without narrowing the listing the way `--playlist-items` would.
 fn write_archive(tracks: &[Track], path: &Path) -> Result<usize> {
     let mut file = std::fs::File::create(path)?;
     let mut count = 0;
     for track in tracks {
-        if track.path.as_deref().is_some_and(Path::is_file) {
+        if track.status == Status::Skipped || track.path.as_deref().is_some_and(Path::is_file) {
             writeln!(file, "youtube {}", track.id)?;
             count += 1;
         }
@@ -286,4 +290,37 @@ pub fn run(cfg: &Config, tracks: &mut [Track], tx: &Sender<Msg>) -> Result<()> {
         bail!("yt-dlp exited with {status}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /* The archive is what keeps yt-dlp off a track the run was not asked for,
+       and it has to work without a file behind it: that is the whole
+       difference from an already-downloaded one. Narrowing the listing with
+       --playlist-items would silence departure detection instead. */
+    #[test]
+    fn the_archive_names_skipped_tracks_as_well_as_downloaded_ones() {
+        let dir = std::env::temp_dir().join(format!("earworm-archive-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let here = dir.join("01 - A.opus");
+        std::fs::write(&here, "audio").unwrap();
+
+        let mut tracks = vec![
+            Track::new(1, "have".into(), "01 - A.opus".into(), here),
+            Track::new(2, "want".into(), "02 - B.opus".into(), dir.join("02 - B.opus")),
+            Track::new(3, "skip".into(), "03 - C.opus".into(), dir.join("03 - C.opus")),
+        ];
+        tracks[2].status = Status::Skipped;
+
+        let path = dir.join("archive");
+        assert_eq!(write_archive(&tracks, &path).unwrap(), 2);
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(body.contains("youtube have"), "{body:?}");
+        assert!(body.contains("youtube skip"), "{body:?}");
+        assert!(!body.contains("youtube want"), "the run would not fetch it: {body:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

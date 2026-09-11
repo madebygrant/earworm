@@ -13,15 +13,16 @@ call and file write. Nothing that blocks touches the render loop.
 - `app.rs` — `App` state, `Track`, `Status`, `Shelf` (one library row), `View`
   (which screen has the keys), `Msg` (worker to UI), `Cmd` (UI to worker),
   `Asker` (worker asks the UI a question and blocks on the reply), `Escape`
-  (what Esc on a prompt does), the `marked` set behind `targets()`, and the
-  `filter` behind `rows()`
+  (what Esc on a prompt does), `picking` (the reply channel for the pick gate),
+  the `marked` set behind `targets()`, and the `filter` behind `rows()`
 - `config.rs` — `Cli`, the TOML `FileConfig`, and `Config::build`, which merges
   them
 - `worker.rs` — `ask_start` (library, resync or the URL prompt, which loops
   until the URL validates) then `pipeline` then `serve`, which serves both the
   post-run commands and the library screen. `tag_tracks` is the
-  identify-and-write pass, shared by the run and by retry; `open_shelf` builds
-  the same rows from the manifest and the tags on disk, with no network
+  identify-and-write pass, shared by the run and by retry; `ask_which` is the
+  pick gate between the scan and the download; `open_shelf` builds the same
+  rows from the manifest and the tags on disk, with no network
 - `ytdlp.rs` — `scan` (flat-playlist listing), `run` (the real download)
 - `manifest.rs` — the `.earworm` sidecar: `#url` and `#synced` headers plus
   video id to current filename
@@ -29,8 +30,8 @@ call and file write. Nothing that blocks touches the render loop.
 - `lookup.rs` — AcoustID, Deezer, Cover Art Archive, all through one `ureq`
   agent
 - `ui.rs` — every draw function
-- `theme.rs` — the palette, plus `background()`, the gradient painted behind
-  every frame
+- `theme.rs` — the palette, plus `background()`, the diagonal gradient painted
+  behind every frame
 
 ## Things that will bite you
 
@@ -39,10 +40,28 @@ call and file write. Nothing that blocks touches the render loop.
 - **A worker panic must not hang the UI.** The event loop treats
   `TryRecvError::Disconnected` as fatal, not as "no messages yet".
 - **`Status` must be `settled()` for the run to finish.** A terminal status
-  missing from that list hangs the UI forever.
+  missing from that list hangs the UI forever. `settled()` is an exhaustive
+  match, so a new variant fails to compile there; `App::counts()` is a
+  hand-kept array and does not, which is exactly where `Skipped` was first
+  missed. A settled status absent from `counts()` is counted in the header's
+  total and left out of the tally beside it, and the two disagree with nothing
+  saying why.
 - **`Msg::Quit` exists so cancelling the first URL prompt ends the tool.** The
   worker drops its sender straight after, so `main`'s disconnect branch has to
   check `app.quit` before deciding the worker died.
+- **The pick gate blocks the worker on a channel only the UI can answer.**
+  The reply `Sender` lives in `App.picking` and nothing else holds a clone, so
+  every path that takes it (`confirm_pick`, `cancel_pick`) must send. Quitting
+  mid-pick deliberately does not: `main` never joins the worker, so the blocked
+  thread goes with the process. `handle_pick_key` sends no `Cmd`, or the work
+  would queue behind a question nothing is going to answer.
+- **`confirm_pick` reads `marked`, never `targets()`.** `targets()` falls back
+  to the cursor when nothing is marked, which here turns "I want none of these"
+  into "download the row I happen to be on".
+- **A skipped track stays in `tracks`.** `write_playlist` builds the `.m3u8`
+  from the tracks it is handed, so dropping the unpicked ones would rewrite a
+  whole playlist file from the handful this run fetched. `Status::Skipped` is
+  what keeps them present and untouched.
 - **`Asker::input` distinguishes empty from cancelled.** `None` is Esc; an
   empty string is a real answer. Collapsing them silently discards edits.
 - **`App.busy` is set by `send`, not by a message from the worker.** The gap
@@ -109,6 +128,12 @@ call and file write. Nothing that blocks touches the render loop.
 - **`Msg::Restart` exists because a second playlist reuses the session.**
   Clearing tracks alone leaves `done` set, so the header would say finished
   while the next run was going and the post-run keys would stay live.
+- **`pipeline` takes `gate` rather than reading `cfg.pick`, and `resync` passes
+  `false`.** The gate is on by default, so a question per folder is the one
+  thing that would stop an unattended walk of the whole library: the user asked
+  for the sync, not for each playlist in it. Nothing tests this. It is a single
+  literal at one call site, and switching it to `cfg.pick` still compiles and
+  still passes the suite, so treat that line as load-bearing.
 - **`--resync` runs one pipeline per folder, never one merged list.**
   `Track::index` is a position within its own playlist, so two playlists both
   have a track 1 and merging them makes every row, mark and command ambiguous.
@@ -171,6 +196,14 @@ call and file write. Nothing that blocks touches the render loop.
   the track no longer holds onto the file, next to the real holder.
 - **Only `Ok` and `Manual` tracks may be renamed.** Every other status is a
   guess, and a filename makes a guess look settled.
+- **`Skipped` is the one status the archive reads.** It is how a gated run
+  tells yt-dlp not to fetch a track, and it has to work with no file behind it.
+  `--playlist-items` would do the same job and silence `note_departures`, since
+  narrowing the listing makes every other track absent; narrowing only the
+  download leaves `Listing::complete` meaning what it says.
+- **`tag_tracks` skips `Gone` and `Skipped` together.** Neither has a file this
+  run may touch, and falling through marks both `Failed` for having none, which
+  reports a deliberate choice as something that went wrong.
 - **The yt-dlp archive is keyed on the file existing, not on a status.** By
   retry time the tracks that worked are `ok` or `manual`, so keying on
   `Status::Have` would leave them out, and yt-dlp remuxing them fails the whole
@@ -202,6 +235,22 @@ call and file write. Nothing that blocks touches the render loop.
 
 ### Drawing and config
 
+- **A mode band deliberately punches through the gradient, and must fill the
+  row.** `draw_band` backs the filter and the pick. `Paragraph` styles only the
+  cells it writes, so the padding is what covers the gradient: pad to the full
+  width and drop the right-hand hint when both halves will not fit. A band that
+  stops mid-row reads as a rendering fault, where a missing hint reads as a
+  narrow terminal. The pick band replaces the filter band, so it carries the
+  filter text too, or `a` acts on a narrowed list with nothing saying so.
+- **The library preview draws from `Shelf.files`, never from the disk.**
+  Presence is resolved in `worker::library`, in the stat pass that already
+  counts `missing`, because the draw loop must not stat and a tag read per
+  cursor move would need a worker round trip. Filenames carry the number and
+  tags already, so the pane needs no tag read at all.
+- **One derivation of the selected shelf.** `draw_library` binds `selected`
+  once and hands it to the pane, the `ListState`, the `▌` and the scrollbar.
+  Recomputing the clamp per widget is how the highlight and the pane come to
+  answer two different questions.
 - **`draw_background` must run first and stay first.** Every other widget
   styles only its foreground, which is what lets the gradient survive
   underneath. A widget that sets a background punches a hole, and `Clear` under
@@ -210,7 +259,9 @@ call and file write. Nothing that blocks touches the render loop.
 - **A `bool` clap flag can't tell "off" from "unset".** `Config::build` takes
   the raw `ArgMatches` and checks `value_source`, which is why `main` goes
   through `Cli::command().get_matches()` rather than `Cli::parse()`. A flag
-  with no matching config key silently makes the file unable to set it.
+  with no matching config key silently makes the file unable to set it. Every
+  flag is a negation and goes through `off`, so the command line can only
+  switch a feature off and the file is the only way to hold one on.
 
 ## Testing the TUI
 

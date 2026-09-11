@@ -44,6 +44,7 @@ cargo install --path .
 earworm                                  # asks for a URL
 earworm 'https://youtube.com/playlist?list=...'
 earworm URL --dir ~/Music/new
+earworm URL --no-pick                    # don't stop to choose, fetch it all
 earworm URL -- --cookies-from-browser firefox   # extra args go to yt-dlp
 earworm --resync                         # every playlist already downloaded
 earworm --list                           # what is already on disk, then exit
@@ -73,6 +74,7 @@ otherwise backs out to the screen behind it.
 | `-F`, `--no-fix` | never prompt; unresolved tracks keep parsed tags |
 | `-R`, `--no-rename` | keep yt-dlp's filenames instead of renaming from tags |
 | `-A`, `--no-album` | don't fill an empty album tag with the playlist name |
+| `--no-pick` | download the whole playlist without stopping to choose tracks |
 | `--resync` | sync every playlist already under `--dir` |
 | `--list` | print the playlists already under `--dir` and exit |
 | `--config PATH` | read this config file instead of the default one |
@@ -96,6 +98,7 @@ m3u8 = true        # write the playlist file
 fix = true         # prompt when a track can't be resolved
 rename = true      # rename files from the corrected tags
 album = true       # fill an empty album tag with the playlist name
+pick = true        # stop to choose tracks before downloading
 
 extra = ["--sleep-requests", "1"]   # always passed to yt-dlp
 acoustid_key = "..."                # or use ACOUSTID_API_KEY
@@ -112,8 +115,8 @@ a repeated yt-dlp option takes its command-line value.
 different key. A key in the file sits there in plain text, so
 `chmod 600 ~/.config/earworm/config.toml` if the machine has other users.
 
-An unknown key is a startup error rather than a silent no-op, so a typo tells
-you instead of quietly ignoring the setting.
+An unknown key is a startup error, so a typo tells you instead of silently
+changing nothing.
 
 ## Keys
 
@@ -130,6 +133,8 @@ you instead of quietly ignoring the setting.
 | `S` | sync the open playlist against its saved URL |
 | `space` | mark or unmark the track under the cursor |
 | `m` | mark every track sharing that track's status |
+| `a` | mark every row the filter shows (at the pick gate) |
+| `enter` | start the download (at the pick gate) |
 | `s` | swap artist and title on the marked tracks |
 | `A` | set one artist across the marked tracks |
 | `h` `?` | keys and current settings |
@@ -137,7 +142,7 @@ you instead of quietly ignoring the setting.
 | `q` `ctrl+c` | quit |
 
 On the library screen the list is folders, so most of those keys have nothing
-to move over:
+to act on:
 
 | Key | Action |
 | --- | --- |
@@ -166,8 +171,8 @@ A prompt says what happened and what to do about it:
 └──────────────────────────────────────────────────────────────────┘
 ```
 
-Keeping it open is first, so Enter never starts work or ends the session, and
-Esc does the same. That leaves the keys below available for fixing tags.
+Keeping it open is first, so neither Enter nor Esc starts work or ends the
+session. That leaves the keys below available for fixing tags.
 Another playlist asks for a URL and starts over in the same session; cancelling
 that question comes back here rather than dropping out.
 
@@ -176,18 +181,52 @@ that question comes back here rather than dropping out.
 `/` filters as you type, against the track name and the status word, so
 `/sheeran` finds one artist and `/failed` finds the rows worth retrying. `^w`
 takes back a word and `^u` the lot. Enter puts the keys back and leaves the
-filter up; Esc clears it. The header counts what is showing, as `3 of 40`.
+filter up; Esc clears it.
+
+A filtered list looks exactly like a short one, so the rule under the header
+turns into a filled band naming the filter and counting what it shows:
+
+```
+ FILTER  /sheeran                             3 of 40 shown  ·  esc clears
+```
 
 The filter is a view and nothing else. Track numbers stay the numbers they
 have, `j` and `k` step over what is hidden, and the track under the cursor is
 always one you can see, so `e` can never reach a row off screen. `m` marks
-only within the filter, which is what makes `/` then `m` worth having: it
-grabs one artist's bad rows and nothing else. Marks you made before filtering
+only within the filter, which is what makes `/` then `m` worth having. It
+grabs one artist's bad rows and leaves the rest. Marks you made before filtering
 still count, and the bar keeps saying how many there are.
 
 Fixing a track can push it out of the filter you found it with, since the name
 it matched on has changed. The row goes and the cursor moves to the next one
 still showing.
+
+### Choosing what to download
+
+Every run pauses between reading the playlist and downloading it, and hands you
+the list:
+
+```
+ PICK  158 of 361 selected       space  ·  a all  ·  enter downloads  ·  esc none
+```
+
+The gate is there because you can't know whether you want the whole thing until
+you see it has 361 tracks. Everything that needs fetching starts selected, so
+Enter is the whole playlist and the work is unselecting. Tracks already on disk
+start unselected, since nothing was going to fetch them.
+
+`space` toggles one, `m` toggles every track sharing its status, `a` toggles
+every row the filter shows, and `/` narrows the list the same as ever, so
+`/sheeran` then `a` picks one artist. Enter starts the download; Esc downloads
+nothing and carries on, which still tags and playlists what is already in the
+folder.
+
+Tracks you leave out get a `skipped` row and a line in the summary. They are
+not failures, and nothing deletes or re-tags them: run again and they download.
+
+`--no-pick` skips the gate, for when you already know you want everything.
+`earworm --resync` never gates, since it walks the whole library unattended and
+a question per folder is the one thing that would stop it.
 
 ### Fixing several tracks at once
 
@@ -217,6 +256,12 @@ Every post-run key then works on those tracks, which makes the library the way
 to fix a tag on something downloaded weeks ago. `S` syncs the open playlist
 against the URL its manifest recorded, `R` syncs all of them, and Esc goes
 back.
+
+When there is room, a pane beside the rows lists that folder's tracks, with
+anything the manifest names that is no longer on disk marked `!` in amber. That
+turns the `2 missing` on the row into something you can act on without opening
+the folder. It is read-only and starts from the top, with a count of what it
+could not fit; below about 100 columns it makes way for the rows themselves.
 
 Only one playlist is on screen at a time, because a track's number is its
 position in its own playlist and two playlists both have a track 1.
@@ -252,7 +297,7 @@ rest alone.
 The status column says which route a track took: `ok` for a confident match,
 `weak` for a low-confidence one, `manual` for an answered prompt, `kept` for
 parsed tags left alone, `none` when nothing matched, `gone` for a file whose
-video has left the playlist.
+video has left the playlist, `skipped` for one you left out at the pick gate.
 
 ## What it writes
 
@@ -268,7 +313,7 @@ video being retitled on YouTube. It also records the playlist URL and the time
 of the last sync, which is what the library screen reads. Delete a track and it
 downloads again; delete `.earworm` and every renamed track downloads again.
 
-A pass that only covers part of a playlist, a retry or a folder opened from the
+A pass over part of a playlist, such as a retry or a folder opened from the
 library, leaves the entries it did not look at alone. Rewriting the manifest
 from just that part would forget files that are on disk under names `scan`
 cannot predict, and the next sync would download them all over again.
@@ -280,8 +325,8 @@ holding absolute paths was written by an older earworm and works only on the
 machine that wrote it; any sync or tag edit rewrites it, and `earworm --resync`
 does the whole library.
 
-Re-running is cheap either way: earworm skips ids it already has and reads
-its own tags off the disk instead of looking them up again.
+Re-running is cheap. earworm skips ids it already has and reads its own tags
+off the disk instead of looking them up again.
 
 A file whose video has since left the playlist gets a `gone` row and a line in
 the summary. earworm never deletes it, keeps remembering it in `.earworm` so a

@@ -43,6 +43,10 @@ pub struct Cli {
     #[arg(short = 'A', long)]
     pub no_album: bool,
 
+    /// Download the whole playlist without stopping to choose tracks
+    #[arg(long)]
+    pub no_pick: bool,
+
     /// Sync every playlist folder already under --dir, using the URL each
     /// one recorded
     #[arg(long, conflicts_with = "url")]
@@ -78,6 +82,7 @@ pub struct FileConfig {
     pub fix: Option<bool>,
     pub rename: Option<bool>,
     pub album: Option<bool>,
+    pub pick: Option<bool>,
     pub extra: Option<Vec<String>>,
     pub acoustid_key: Option<String>,
 }
@@ -120,6 +125,7 @@ pub struct Config {
     pub list: bool,
     pub rename: bool,
     pub album: bool,
+    pub pick: bool,
     pub extra: Vec<String>,
     pub acoustid_key: Option<String>,
 }
@@ -168,6 +174,7 @@ impl Config {
             list: cli.list,
             rename: off("no_rename", file.rename),
             album: off("no_album", file.album),
+            pick: off("no_pick", file.pick),
             extra,
             // The environment wins, so a key can be swapped for one run.
             acoustid_key: std::env::var("ACOUSTID_API_KEY")
@@ -304,5 +311,19 @@ mod tests {
         assert!(FileConfig::load(&missing, false).is_ok(), "default path may be absent");
         let err = FileConfig::load(&missing, true).unwrap_err().to_string();
         assert!(err.contains("reading"), "{err}");
+    }
+
+    /* The gate is the default now, so its flag is a negation like every other
+       one: the command line can switch it off, and only the file can hold it
+       on against a habit of typing --no-pick. */
+    #[test]
+    fn the_pick_gate_is_on_unless_something_says_otherwise() {
+        assert!(build("", &[]).pick, "a bare run lost the gate");
+        assert!(!build("", &["--no-pick"]).pick, "the flag did not switch it off");
+        assert!(!build("pick = false\n", &[]).pick, "the file could not switch it off");
+        assert!(
+            !build("pick = true\n", &["--no-pick"]).pick,
+            "the command line lost to the file"
+        );
     }
 }

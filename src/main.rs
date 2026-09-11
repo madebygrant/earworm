@@ -144,6 +144,13 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         handle_filter_key(app, code, mods);
         return;
     }
+    /* The pick owns the keys while it is open: the worker is blocked on the
+       answer, so a key that started a command would queue work behind a
+       question nothing is going to answer. */
+    if app.picking.is_some() {
+        handle_pick_key(app, code, mods);
+        return;
+    }
     match code {
         KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.quit = true,
         KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
@@ -180,6 +187,30 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             let targets = app.targets();
             app.send(Cmd::Artist(targets));
         }
+        KeyCode::Char('g') => app.jump(false),
+        KeyCode::Char('G') => app.jump(true),
+        _ => {}
+    }
+}
+
+/* Moving, marking and filtering are the same keys as always, so the selection
+   is made with the list the user is already reading. Only Enter and Esc are
+   new, and both answer the question the worker is blocked on. */
+fn handle_pick_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    match code {
+        KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.quit = true,
+        KeyCode::Char('q') => app.quit = true,
+        KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
+        KeyCode::Enter => app.confirm_pick(),
+        KeyCode::Esc if !app.filter.is_empty() => app.clear_filter(),
+        KeyCode::Esc => app.cancel_pick(),
+        KeyCode::Char('/') => app.typing_filter = true,
+        KeyCode::Char(' ') => app.toggle_mark(),
+        KeyCode::Char('m') => app.mark_like_cursor(),
+        KeyCode::Char('a') => app.toggle_all(),
+        KeyCode::Char('l') => app.show_logs = !app.show_logs,
+        KeyCode::Char('j') | KeyCode::Down => app.step(true),
+        KeyCode::Char('k') | KeyCode::Up => app.step(false),
         KeyCode::Char('g') => app.jump(false),
         KeyCode::Char('G') => app.jump(true),
         _ => {}

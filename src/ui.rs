@@ -1,19 +1,21 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::Style;
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
     ScrollbarState,
 };
 
-use crate::app::{App, Prompt, Status, View};
+use crate::app::{App, Prompt, Shelf, Status, View};
 use crate::manifest;
 
-use crate::theme::{self, AMBER, CREAM, DIM, GOLD, GREEN, RED, RULE, SURFACE};
+use crate::theme::{self, AMBER, CREAM, DIM, GOLD, GREEN, INK, RED, RULE, SURFACE};
 
 const SPINNER: [&str; 8] = ["⣷", "⣯", "⣟", "⡿", "⢿", "⣻", "⣽", "⣾"];
 const STATUS_WIDTH: usize = 8;
+/// Narrowest library screen that still has room for a preview beside the rows.
+const PREVIEW_FROM: u16 = 100;
 
 fn dim(text: impl Into<String>) -> Span<'static> {
     Span::styled(text.into(), Style::new().fg(DIM))
@@ -31,7 +33,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     draw_background(frame);
     draw_header(frame, app, header);
-    draw_rule(frame, rule);
+    // The pick wins: it says what the keys do, and it carries the filter.
+    if app.picking.is_some() {
+        draw_pick_bar(frame, app, rule);
+    } else if app.filtering() {
+        draw_filter_bar(frame, app, rule);
+    } else {
+        draw_rule(frame, rule);
+    }
     if app.show_logs && !app.logs.is_empty() {
         let [list, logs] =
             Layout::vertical([Constraint::Min(1), Constraint::Length(8)]).areas(body);
@@ -57,8 +66,8 @@ fn draw_background(frame: &mut Frame) {
     let area = frame.area();
     let buffer = frame.buffer_mut();
     for y in area.top()..area.bottom() {
-        let bg = theme::background(y - area.top(), area.height);
         for x in area.left()..area.right() {
+            let bg = theme::background(x - area.left(), y - area.top(), area.width, area.height);
             buffer[(x, y)].set_bg(bg);
         }
     }
@@ -71,6 +80,61 @@ fn draw_rule(frame: &mut Frame, area: Rect) {
             Style::new().fg(RULE),
         )),
         area,
+    );
+}
+
+/* A mode where the list is not the whole playlist, or the keys do not mean
+   what they usually mean, takes the rule's row as a filled band rather than a
+   hint among hints. It deliberately covers the gradient, which is what makes
+   it impossible to miss. */
+fn draw_band(frame: &mut Frame, area: Rect, left: String, mut right: String) {
+    let width = area.width as usize;
+    let band = Style::new().fg(INK).bg(GOLD);
+    let used = left.chars().count();
+    let mut spans = vec![Span::styled(left, band.add_modifier(Modifier::BOLD))];
+    /* Paragraph styles only the cells it writes, so the padding is what keeps
+       the gradient out. It runs to the full width even when that costs the
+       hint: a torn band reads as a rendering fault. */
+    let rest = width.saturating_sub(used);
+    let gap = if used + right.chars().count() <= width {
+        rest - right.chars().count()
+    } else {
+        right.clear();
+        rest
+    };
+    spans.push(Span::styled(" ".repeat(gap), band));
+    spans.push(Span::styled(right, band));
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn draw_filter_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let caret = if app.typing_filter { "\u{2588}" } else { "" };
+    let right = if app.typing_filter {
+        "enter keeps  ·  esc clears ".to_string()
+    } else {
+        format!("{} of {} shown  ·  esc clears ", app.shown(), app.tracks.len())
+    };
+    draw_band(
+        frame,
+        area,
+        format!(" FILTER  /{}{}", app.filter, caret),
+        right,
+    );
+}
+
+/* Carries the filter too, since the pick band replaces it: a narrowed list
+   with nothing saying so is what `a` would then mark the wrong amount of. */
+fn draw_pick_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let mut left = format!(" PICK  {} of {} selected", app.marked.len(), app.tracks.len());
+    if !app.filter.is_empty() || app.typing_filter {
+        let caret = if app.typing_filter { "\u{2588}" } else { "" };
+        left = format!("{left}  /{}{}", app.filter, caret);
+    }
+    draw_band(
+        frame,
+        area,
+        left,
+        "space  ·  a all  ·  enter downloads  ·  esc none ".to_string(),
     );
 }
 
@@ -100,21 +164,17 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         ));
     } else if !app.tracks.is_empty() {
         spans.push(dim("  ·  "));
-        /* Under a filter the settled count describes the whole run, which is
-           not what the list is showing, so say how much of it is. */
+        // How much of the run is showing is the filter band's to say.
         spans.push(Span::styled(
-            if app.filter.is_empty() {
-                format!("{}/{}", app.settled(), app.tracks.len())
-            } else {
-                format!("{} of {}", app.shown(), app.tracks.len())
-            },
+            format!("{}/{}", app.settled(), app.tracks.len()),
             Style::new().fg(CREAM),
         ));
     }
     /* Movement the track rows cannot show: a slow lookup still looks alive,
        and a bulk action over fifty tracks explains why the keys went quiet.
-       The library has no run behind it, so an idle one must not appear busy. */
-    if (app.done.is_none() && app.view == View::Tracks) || app.busy {
+       The library has no run behind it, so an idle one must not appear busy.
+       A pick is waiting on a keypress, so nothing is moving behind it. */
+    if app.picking.is_none() && ((app.done.is_none() && app.view == View::Tracks) || app.busy) {
         spans.push(Span::styled(
             format!("  {}", SPINNER[(app.tick / 2) % SPINNER.len()]),
             Style::new().fg(GOLD),
@@ -159,6 +219,24 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    /* Resolved once and shared with the pane below, so the row the marker is
+       on and the folder the pane describes cannot become two questions. */
+    let selected = app.shelf.min(app.library.len() - 1);
+
+    /* The shelf row already needs name plus 28 columns of counts and sync
+       time, so the pane only appears where both fit without squeezing names
+       down to nothing. Below that it is simply absent. */
+    let area = if area.width >= PREVIEW_FROM {
+        // u32: the product overflows u16 past 32767 columns.
+        let pane = (u32::from(area.width) * 2 / 5).min(60) as u16;
+        let [list, preview] =
+            Layout::horizontal([Constraint::Min(1), Constraint::Length(pane)]).areas(area);
+        draw_preview(frame, &app.library[selected], preview);
+        list
+    } else {
+        area
+    };
+
     let width = area.width as usize;
     let longest = app
         .library
@@ -177,7 +255,7 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
             let pad = name_width.saturating_sub(name.chars().count());
             let mut spans = vec![
                 Span::styled(
-                    if row == app.shelf { "▌" } else { " " },
+                    if row == selected { "▌" } else { " " },
                     Style::new().fg(GREEN),
                 ),
                 Span::styled(format!(" {name}{:pad$}", ""), Style::new().fg(CREAM)),
@@ -201,11 +279,11 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
         .collect();
 
     let mut state = ListState::default();
-    state.select(Some(app.shelf.min(app.library.len() - 1)));
+    state.select(Some(selected));
     frame.render_stateful_widget(List::new(items), area, &mut state);
 
     if app.library.len() > area.height as usize {
-        let mut bar_state = ScrollbarState::new(app.library.len()).position(app.shelf);
+        let mut bar_state = ScrollbarState::new(app.library.len()).position(selected);
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
@@ -216,6 +294,56 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
             &mut bar_state,
         );
     }
+}
+
+/* Read-only and always from the top: giving the pane a cursor would mean a
+   third view mode and a second set of keys, and Enter already opens the folder
+   properly. What it is for is the `n missing` count on the shelf row, which
+   says a sync would re-download something but never which one. */
+fn draw_preview(frame: &mut Frame, shelf: &Shelf, area: Rect) {
+    let block = Block::new()
+        .borders(Borders::LEFT)
+        .border_style(Style::new().fg(RULE));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    if shelf.files.is_empty() {
+        frame.render_widget(Paragraph::new(Line::from(dim(" nothing recorded"))), inner);
+        return;
+    }
+
+    let width = inner.width as usize;
+    let height = inner.height as usize;
+    // The last line goes to the tail count, so no track is silently dropped.
+    let room = if shelf.files.len() > height {
+        height - 1
+    } else {
+        shelf.files.len()
+    };
+
+    let mut lines: Vec<Line> = shelf.files[..room]
+        .iter()
+        .map(|(name, here)| {
+            let title = name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem);
+            /* Missing files are the reason the pane exists, so they get a
+               gutter mark as well as the colour. */
+            let mark = if *here { ' ' } else { '!' };
+            Line::from(Span::styled(
+                format!("{mark}{}", truncate(title, width.saturating_sub(1))),
+                Style::new().fg(if *here { CREAM } else { AMBER }),
+            ))
+        })
+        .collect();
+    if room < shelf.files.len() {
+        lines.push(Line::from(dim(format!(
+            " … {} more",
+            shelf.files.len() - room
+        ))));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -344,7 +472,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             Style::new().fg(if app.show_logs { DIM } else { AMBER }),
         ));
     }
-    if !app.marked.is_empty() && app.view == View::Tracks {
+    if !app.marked.is_empty() && app.view == View::Tracks && app.picking.is_none() {
         hints.push((
             format!("   {} marked", app.marked.len()),
             Style::new().fg(GOLD),
@@ -357,18 +485,6 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         hints.push(("   enter open".to_string(), Style::new().fg(GOLD)));
         hints.push(("   R resync all".to_string(), Style::new().fg(DIM)));
         hints.push(("   n new URL".to_string(), Style::new().fg(DIM)));
-    }
-    /* The box is the only thing on screen that says the list is narrowed, so
-       it holds its place ahead of the tally and the summary. */
-    if app.typing_filter {
-        hints.push((
-            format!("   /{}\u{2588}", app.filter),
-            Style::new().fg(GOLD),
-        ));
-        hints.push(("   enter keeps   esc clears".to_string(), Style::new().fg(DIM)));
-    } else if !app.filter.is_empty() {
-        hints.push((format!("   /{}", app.filter), Style::new().fg(GOLD)));
-        hints.push(("   esc clears".to_string(), Style::new().fg(DIM)));
     }
     hints.push(("   h keys".to_string(), Style::new().fg(DIM)));
     let reserved: usize = hints.iter().map(|(t, _)| t.chars().count()).sum();
@@ -440,6 +556,17 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("", "n", "sync a new URL"),
             ("view", "l", "yt-dlp output"),
             ("quit", "q  Esc  ^c", ""),
+        ]);
+    } else if app.picking.is_some() {
+        rows.extend([
+            ("pick", "space", "this track"),
+            ("", "m", "every track like it"),
+            ("", "a", "everything the filter shows"),
+            ("", "/", "filter by name or status"),
+            ("go", "enter", "download what is selected"),
+            ("", "Esc", "download nothing"),
+            ("view", "l", "yt-dlp output"),
+            ("quit", "q  ^c", ""),
         ]);
     } else {
         rows.extend([
@@ -729,6 +856,9 @@ mod tests {
                 tracks: 42,
                 missing: 0,
                 synced: Some(epoch() - 3 * 86_400),
+                files: (1..=42)
+                    .map(|n| (format!("{n:02} Artist - Track {n}.opus"), true))
+                    .collect(),
             },
             Shelf {
                 path: std::path::PathBuf::from("/music/Road trip"),
@@ -737,17 +867,27 @@ mod tests {
                 tracks: 9,
                 missing: 2,
                 synced: None,
+                files: vec![
+                    ("01 Kraftwerk - Autobahn.opus".into(), true),
+                    ("02 Neu! - Hallogallo.opus".into(), false),
+                    ("03 Can - Vitamin C.opus".into(), true),
+                ],
             },
         ]
     }
 
     fn library_screen(width: u16) -> Vec<String> {
+        library_screen_at(width, 0)
+    }
+
+    fn library_screen_at(width: u16, shelf: usize) -> Vec<String> {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(tx, "settings".into());
         app.apply(Msg::Library {
             shelves: shelves(),
             show: true,
         });
+        app.shelf = shelf;
         let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
         terminal.draw(|f| super::draw(f, &mut app)).unwrap();
         let buffer = terminal.backend().buffer().clone();
@@ -775,6 +915,45 @@ mod tests {
         assert!(rows[3].contains("never synced"), "{:?}", rows[3]);
         // A list of folders gives no clue that Enter opens one.
         assert!(rows[11].contains("enter open"), "{:?}", rows[11]);
+    }
+
+    /* The shelf row says a sync would re-download two files but never which,
+       which is the whole reason the pane is there. It follows the cursor
+       without a cursor of its own, and a folder longer than the pane says how
+       many it could not show rather than ending mid-list. */
+    #[test]
+    fn the_preview_shows_the_selected_folders_tracks() {
+        let rows = library_screen_at(120, 1);
+        let pane: String = rows[2..10].join("\n");
+        assert!(pane.contains("Autobahn"), "{pane:?}");
+        assert!(pane.contains("Vitamin C"), "{pane:?}");
+        // The missing one is marked, not merely coloured.
+        let gone = rows[3..10]
+            .iter()
+            .find(|r| r.contains("Hallogallo"))
+            .expect("the missing track is not in the pane");
+        assert!(gone.contains("!02 Neu! - Hallogallo"), "{gone:?}");
+        // The name is enough; the extension is noise in a preview.
+        assert!(!pane.contains(".opus"), "{pane:?}");
+
+        let long = library_screen_at(120, 0);
+        let pane: String = long[2..10].join("\n");
+        assert!(pane.contains("Track 1"), "{pane:?}");
+        assert!(pane.contains("Track 7"), "{pane:?}");
+        assert!(!pane.contains("Track 8"), "a row overflowed the pane: {pane:?}");
+        assert!(pane.contains("… 35 more"), "{pane:?}");
+    }
+
+    /* The shelf row already needs its name plus 28 columns of counts, so a
+       pane at this width would leave nothing for either. */
+    #[test]
+    fn a_narrow_library_has_no_preview_at_all() {
+        let rows = library_screen(80);
+        assert!(
+            !rows[2..10].iter().any(|r| r.contains('│')),
+            "the pane divider is drawn at 80 columns: {rows:?}"
+        );
+        assert!(!rows.join("\n").contains("Autobahn"), "{rows:?}");
     }
 
     /* Only the matching rows, in order, with the marker on the cursor's own
@@ -874,6 +1053,115 @@ mod tests {
         );
     }
 
+    /* A narrowed list looks exactly like a short run, so the one signal that
+       says otherwise has to be unmissable: a band across the full width, not a
+       hint sharing the status bar with everything else. */
+    #[test]
+    fn an_active_filter_gets_a_band_of_its_own() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.tracks = spread();
+        app.filter = "one".into();
+        let mut terminal = Terminal::new(TestBackend::new(60, 10)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        let band: String = (0..60).map(|x| buffer[(x, 1)].symbol().to_string()).collect();
+        assert!(band.contains("FILTER"), "{band:?}");
+        assert!(band.contains("/one"), "{band:?}");
+        assert!(
+            band.contains(&format!("{} of {} shown", app.shown(), app.tracks.len())),
+            "{band:?}"
+        );
+        for x in 0..60u16 {
+            assert_eq!(buffer[(x, 1)].bg, crate::theme::GOLD, "the band breaks at {x}");
+        }
+
+        /* Narrow enough that the hint cannot fit beside the query, which is
+           where the band used to stop early and let the gradient back in. */
+        let mut narrow = Terminal::new(TestBackend::new(30, 10)).unwrap();
+        narrow.draw(|f| super::draw(f, &mut app)).unwrap();
+        for x in 0..30u16 {
+            assert_eq!(
+                narrow.backend().buffer()[(x, 1)].bg,
+                crate::theme::GOLD,
+                "the band breaks at {x} once the hint no longer fits"
+            );
+        }
+
+        // Narrower than the label itself, where the fill has nothing left to do.
+        for w in [1u16, 8, 13] {
+            let mut t = Terminal::new(TestBackend::new(w, 10)).unwrap();
+            t.draw(|f| super::draw(f, &mut app)).unwrap();
+            for x in 0..w {
+                assert_eq!(t.backend().buffer()[(x, 1)].bg, crate::theme::GOLD, "at width {w}, column {x}");
+            }
+        }
+
+        // And it is gone once the filter is, so the rule comes back.
+        app.clear_filter();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let rule: String = (0..60)
+            .map(|x| terminal.backend().buffer()[(x, 1)].symbol().to_string())
+            .collect();
+        assert_eq!(rule, "─".repeat(60));
+    }
+
+    /* The keys mean something different while the pick is open and the worker
+       is blocked on the answer, so the band has to say both what is selected
+       and what Enter will do. */
+    #[test]
+    fn the_pick_band_says_what_is_selected_and_what_the_keys_do() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.tracks = spread();
+        let (reply, _back) = std::sync::mpsc::channel();
+        app.apply(Msg::Pick(reply));
+
+        let mut terminal = Terminal::new(TestBackend::new(90, 10)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let band: String = (0..90).map(|x| buffer[(x, 1)].symbol().to_string()).collect();
+
+        assert!(band.contains("PICK"), "{band:?}");
+        assert!(
+            band.contains(&format!("{} of {} selected", app.marked.len(), app.tracks.len())),
+            "{band:?}"
+        );
+        assert!(band.contains("enter downloads"), "{band:?}");
+        assert!(band.contains("esc none"), "{band:?}");
+        for x in 0..90u16 {
+            assert_eq!(buffer[(x, 1)].bg, crate::theme::GOLD, "the band breaks at {x}");
+        }
+
+        // Nothing is running behind a question, so the spinner must not claim so.
+        let header: String = (0..90).map(|x| buffer[(x, 0)].symbol().to_string()).collect();
+        assert!(
+            !super::SPINNER.iter().any(|s| header.contains(s)),
+            "the header span while waiting on a keypress: {header:?}"
+        );
+    }
+
+    /* The pick band replaces the filter band, so it has to carry the filter or
+       a narrowed list goes unannounced while `a` acts on it. */
+    #[test]
+    fn the_pick_band_still_shows_an_active_filter() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.tracks = spread();
+        let (reply, _back) = std::sync::mpsc::channel();
+        app.apply(Msg::Pick(reply));
+        app.filter = "one".into();
+
+        let mut terminal = Terminal::new(TestBackend::new(90, 10)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let band: String = (0..90)
+            .map(|x| terminal.backend().buffer()[(x, 1)].symbol().to_string())
+            .collect();
+        assert!(band.contains("PICK"), "{band:?}");
+        assert!(band.contains("/one"), "{band:?}");
+    }
+
     #[test]
     fn a_filter_that_matches_nothing_says_so_rather_than_going_blank() {
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -962,14 +1250,15 @@ mod tests {
         let buffer = terminal.backend().buffer().clone();
 
         for y in 0..24u16 {
-            let want = crate::theme::background(y, 24);
             for x in 0..60u16 {
+                let want = crate::theme::background(x, y, 60, 24);
                 assert_eq!(buffer[(x, y)].bg, want, "at {x},{y}");
             }
         }
+        // Bottom-left and top-right are the two ends of the diagonal.
         assert_ne!(
-            crate::theme::background(0, 24),
-            crate::theme::background(23, 24),
+            crate::theme::background(0, 23, 60, 24),
+            crate::theme::background(59, 0, 60, 24),
             "the gradient has to actually fade"
         );
     }
