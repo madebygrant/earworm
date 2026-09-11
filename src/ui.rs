@@ -675,6 +675,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
         rows.extend([
             ("sync", "R", "sync every playlist"),
             ("", "n", "sync a new URL"),
+            ("set", "f", "audio format for new downloads"),
             ("view", "l", "yt-dlp output"),
             ("quit", "q  Esc  ^c", ""),
         ]);

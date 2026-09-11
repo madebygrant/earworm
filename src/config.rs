@@ -4,7 +4,7 @@ use anyhow::{Context, Result};
 use clap::{ArgMatches, Parser, parser::ValueSource};
 use serde::Deserialize;
 
-/// Download a YouTube playlist as tagged opus files.
+/// Download a YouTube playlist as tagged audio files.
 #[derive(Parser, Debug)]
 #[command(name = "earworm", version, about, long_about = None)]
 pub struct Cli {
@@ -14,6 +14,10 @@ pub struct Cli {
     /// Output directory
     #[arg(short, long, default_value = "~/Music")]
     pub dir: String,
+
+    /// Audio format: opus, m4a, mp3, flac, vorbis or alac
+    #[arg(short, long, value_name = "NAME")]
+    pub format: Option<String>,
 
     /// Keep YouTube's own artist/track, skip title parsing
     #[arg(short = 'P', long)]
@@ -75,6 +79,7 @@ pub struct Cli {
 #[serde(deny_unknown_fields)]
 pub struct FileConfig {
     pub dir: Option<String>,
+    pub format: Option<String>,
     pub parse: Option<bool>,
     pub m3u8: Option<bool>,
     pub cover: Option<bool>,
@@ -105,6 +110,65 @@ impl FileConfig {
     }
 }
 
+/* yt-dlp's name for the format paired with the extension it actually writes.
+   The two disagree for `vorbis` and `alac`, and both halves are needed:
+   `run` passes the name to --audio-format while `scan` predicts filenames
+   with the extension. wav and aac are deliberately absent: neither carries
+   tags or cover art, so earworm would do a third of its job and report it
+   as finished. */
+pub const FORMATS: [(&str, &str); 6] = [
+    ("opus", "opus"),
+    ("m4a", "m4a"),
+    ("mp3", "mp3"),
+    ("flac", "flac"),
+    ("vorbis", "ogg"),
+    ("alac", "m4a"),
+];
+
+pub const DEFAULT_FORMAT: &str = "opus";
+
+/// The extension a format lands on disk with, which is not always its name.
+pub fn extension(format: &str) -> &'static str {
+    FORMATS
+        .iter()
+        .find(|(name, _)| *name == format)
+        .map_or("opus", |(_, ext)| *ext)
+}
+
+/// Writes one key back in place, leaving comments and every other line as
+/// they were: the file is hand-edited, and rewriting it from the parsed
+/// struct would drop the comments and flatten the formatting.
+pub fn save_format(path: &std::path::Path, format: &str) -> Result<()> {
+    let old = std::fs::read_to_string(path).unwrap_or_default();
+    let line = format!("format = \"{format}\"");
+    let mut out = String::new();
+    let mut replaced = false;
+    for existing in old.lines() {
+        let names_format = existing
+            .trim_start()
+            .strip_prefix("format")
+            .is_some_and(|rest| rest.trim_start().starts_with('='));
+        out.push_str(if names_format && !replaced {
+            replaced = true;
+            &line
+        } else {
+            existing
+        });
+        out.push('\n');
+    }
+    if !replaced {
+        out.push_str(&line);
+        out.push('\n');
+    }
+    /* A config earworm can no longer read is worse than one that never
+       recorded the choice: the next start would fail outright. */
+    toml::from_str::<FileConfig>(&out).context("the edited config no longer parses")?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(path, out).with_context(|| format!("writing {}", path.display()))
+}
+
 pub fn config_path() -> PathBuf {
     let base = std::env::var("XDG_CONFIG_HOME")
         .ok()
@@ -116,6 +180,12 @@ pub fn config_path() -> PathBuf {
 pub struct Config {
     pub url: String,
     pub dir: PathBuf,
+    /// yt-dlp's name for the format, not the extension. See `FORMATS`.
+    pub format: String,
+    /// Where a setting changed in the tool gets written back. `None` under
+    /// --no-config, which asked for the file to be left out of the run and
+    /// so cannot be the place a choice is remembered.
+    pub config_file: Option<PathBuf>,
     pub parse: bool,
     pub m3u8: bool,
     pub cover: bool,
@@ -135,12 +205,15 @@ impl Config {
     /// as `false` whether it was left off or never mentioned, and only the
     /// value source separates "the user asked for this" from "unset".
     pub fn build(cli: Cli, matches: &ArgMatches) -> Result<Self> {
+        let mut config_file = None;
         let file = if cli.no_config {
             FileConfig::default()
         } else {
             let named = cli.config.as_ref();
             let path = named.map_or_else(config_path, |p| expand(p));
-            FileConfig::load(&path, named.is_some())?
+            let loaded = FileConfig::load(&path, named.is_some())?;
+            config_file = Some(path);
+            loaded
         };
 
         let given = |id: &str| matches.value_source(id) == Some(ValueSource::CommandLine);
@@ -161,9 +234,23 @@ impl Config {
         let mut extra = file.extra.unwrap_or_default();
         extra.extend(cli.extra);
 
+        let format = cli
+            .format
+            .or(file.format)
+            .unwrap_or_else(|| DEFAULT_FORMAT.to_string());
+        /* Checked here rather than left to yt-dlp: an unknown name gets as
+           far as the download before failing, by which time the scan has
+           already predicted filenames with an extension nothing will write. */
+        if !FORMATS.iter().any(|(name, _)| *name == format) {
+            let known: Vec<&str> = FORMATS.iter().map(|(name, _)| *name).collect();
+            anyhow::bail!("unknown format \"{format}\", expected one of {}", known.join(", "));
+        }
+
         Ok(Config {
             url: cli.url.unwrap_or_default(),
             dir: expand(&dir),
+            format,
+            config_file,
             parse: off("no_parse", file.parse),
             m3u8: off("no_m3u8", file.m3u8),
             cover: off("no_cover", file.cover),
@@ -190,7 +277,8 @@ impl Config {
     pub fn describe(&self) -> String {
         let on = |flag: bool| if flag { "on" } else { "off" };
         format!(
-            "parse {} · lookup {} · cover {} · m3u8 {} · prompts {} · rename {}",
+            "format {} · parse {} · lookup {} · cover {} · m3u8 {} · prompts {} · rename {}",
+            self.format,
             on(self.parse),
             on(self.lookup),
             on(self.cover),
@@ -226,6 +314,12 @@ mod tests {
         let mut argv = vec!["earworm".to_string(), "--config".into(), file.path.clone()];
         argv.extend(args.iter().map(|a| a.to_string()));
         run(argv)
+    }
+
+    /// Reads a config file back through the real parser, which is the only
+    /// thing that proves a written setting survives a restart.
+    fn build_at(path: &str) -> Config {
+        run(vec!["earworm".to_string(), "--config".into(), path.to_string()])
     }
 
     fn run(argv: Vec<String>) -> Config {
@@ -292,6 +386,63 @@ mod tests {
             .try_get_matches_from(["earworm", "--no-config", "--config", "/tmp/x.toml"])
             .unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn the_format_comes_from_the_file_and_the_flag_beats_it() {
+        assert_eq!(build("", &[]).format, DEFAULT_FORMAT);
+        assert_eq!(build("format = \"flac\"\n", &[]).format, "flac");
+        assert_eq!(build("format = \"flac\"\n", &["--format", "mp3"]).format, "mp3");
+    }
+
+    /* Left to yt-dlp it fails after the scan has already predicted filenames
+       with an extension nothing is going to write. */
+    #[test]
+    fn an_unknown_format_is_refused_at_startup() {
+        let mut file = temp("format");
+        writeln!(file.handle, "format = \"wav\"").unwrap();
+        let matches = Cli::command()
+            .get_matches_from(["earworm", "--config", &file.path]);
+        let built = Config::build(Cli::from_arg_matches(&matches).unwrap(), &matches);
+        let err = match built {
+            Err(err) => err.to_string(),
+            Ok(cfg) => panic!("wav was accepted as {}", cfg.format),
+        };
+        assert!(err.contains("unknown format"), "{err}");
+    }
+
+    /// Two formats land on an extension that is not their name, and the scan
+    /// predicts filenames from the extension alone.
+    #[test]
+    fn the_extension_is_not_always_the_format_name() {
+        assert_eq!(extension("vorbis"), "ogg");
+        assert_eq!(extension("alac"), "m4a");
+        assert_eq!(extension("opus"), "opus");
+    }
+
+    /* The file is hand-edited, so saving a setting has to leave every other
+       line where it was. */
+    #[test]
+    fn saving_the_format_replaces_the_key_and_keeps_the_rest() {
+        let file = temp("save");
+        std::fs::write(
+            &file.path,
+            "# keep me\nformat = \"opus\"\ndir = \"/tmp/music\"\n",
+        )
+        .unwrap();
+        save_format(std::path::Path::new(&file.path), "flac").unwrap();
+
+        let back = std::fs::read_to_string(&file.path).unwrap();
+        assert_eq!(back, "# keep me\nformat = \"flac\"\ndir = \"/tmp/music\"\n");
+        assert_eq!(build_at(&file.path).format, "flac");
+    }
+
+    #[test]
+    fn saving_the_format_adds_the_key_when_it_is_missing() {
+        let file = temp("add");
+        std::fs::write(&file.path, "dir = \"/tmp/music\"\n").unwrap();
+        save_format(std::path::Path::new(&file.path), "m4a").unwrap();
+        assert_eq!(build_at(&file.path).format, "m4a");
     }
 
     #[test]

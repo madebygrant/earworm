@@ -2,7 +2,7 @@
 name = "earworm"
 version = "0.1.0"
 edition = "2024"
-description = "A terminal UI for turning a YouTube playlist into a folder of tagged opus files"
+description = "A terminal UI for turning a YouTube playlist into a folder of tagged audio files"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/madebygrant/earworm"
 homepage = "https://github.com/madebygrant/earworm"

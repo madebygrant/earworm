@@ -216,6 +216,8 @@ pub enum Cmd {
     Play(PathBuf),
     /// Play/pause whatever cliamp has loaded, which need not be one of ours.
     Toggle,
+    /// Choose the audio format new downloads arrive in, and remember it.
+    Format,
 }
 
 pub enum Prompt {
@@ -318,6 +320,9 @@ pub enum Msg {
     /// A second playlist is starting in the same session, so everything the
     /// last one left on screen has to go.
     Restart,
+    /// The run's settings line for the help overlay, re-sent when one of them
+    /// is changed from inside the tool rather than by a flag.
+    Settings(String),
     /// Nothing to report and nothing to look at, so close the UI outright.
     Quit,
 }
@@ -597,6 +602,7 @@ impl App {
                 self.flash_until = None;
                 self.done = Some(result);
             }
+            Msg::Settings(s) => self.settings = s,
             Msg::Unmark => self.marked.clear(),
             Msg::Idle => self.busy = false,
             Msg::Restart => {

@@ -30,6 +30,13 @@ fn output_template(dir: &Path, ext: &str) -> String {
     )
 }
 
+/// The scan predicts the filenames the download will write, so both have to
+/// agree about the format: the download names it and the scan needs the
+/// extension it lands on.
+fn scan_template(cfg: &Config) -> String {
+    output_template(&cfg.dir, crate::config::extension(&cfg.format))
+}
+
 pub struct Listing {
     pub tracks: Vec<Track>,
     /// yt-dlp exited cleanly, so the listing is the whole playlist. A
@@ -53,7 +60,7 @@ pub fn scan(cfg: &Config) -> Result<Listing> {
         // title that carries an "(Official Video)" suffix.
         .args(["--replace-in-metadata", "track,title", TITLE_CLEANUP, ""])
         .arg("--output")
-        .arg(output_template(&cfg.dir, "opus"))
+        .arg(scan_template(cfg))
         .arg("--print")
         .arg("%(id)s\t%(playlist_index)s\t%(title)s\t%(filename)s")
         .args(&cfg.extra)
@@ -179,8 +186,6 @@ pub fn run(cfg: &Config, tracks: &mut [Track], tx: &Sender<Msg>) -> Result<()> {
     cmd.args([
         "--yes-playlist",
         "--extract-audio",
-        "--audio-format",
-        "opus",
         "--embed-thumbnail",
         "--embed-metadata",
         "--quiet",
@@ -189,6 +194,7 @@ pub fn run(cfg: &Config, tracks: &mut [Track], tx: &Sender<Msg>) -> Result<()> {
         "--progress-delta",
         "0.5",
     ]);
+    cmd.args(["--audio-format", &cfg.format]);
     cmd.arg("--progress-template")
         .arg("download:@P\t%(info.playlist_index)s\t%(progress._percent_str)s");
     cmd.arg("--print")
@@ -295,6 +301,18 @@ pub fn run(cfg: &Config, tracks: &mut [Track], tx: &Sender<Msg>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /* A predicted filename that misses the extension makes every track look
+       absent, so the run downloads a folder it already has. */
+    #[test]
+    fn the_scan_predicts_filenames_in_the_chosen_format() {
+        let mut cfg = crate::worker::tests::config(true);
+        cfg.dir = PathBuf::from("/tmp/music");
+        cfg.format = "vorbis".into();
+        assert!(scan_template(&cfg).ends_with(".ogg"), "{}", scan_template(&cfg));
+        cfg.format = "opus".into();
+        assert!(scan_template(&cfg).ends_with(".opus"), "{}", scan_template(&cfg));
+    }
 
     /* The archive is what keeps yt-dlp off a track the run was not asked for,
        and it has to work without a file behind it: that is the whole

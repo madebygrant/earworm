@@ -6,7 +6,7 @@ use lofty::config::WriteOptions;
 use lofty::file::{AudioFile, TaggedFile, TaggedFileExt};
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::probe::Probe;
-use lofty::tag::{Accessor, Tag, TagExt, TagType};
+use lofty::tag::{Accessor, Tag, TagExt};
 
 use crate::app::{Asker, Status};
 use crate::config::Config;
@@ -71,8 +71,12 @@ pub struct Outcome {
 
 fn with_tag<F: FnOnce(&mut Tag)>(path: &Path, edit: F) -> Result<()> {
     let mut file = open(path)?;
+    /* Taken from the container, never assumed: inserting Vorbis comments
+       into an mp3 is refused outright by lofty, and the write then fails on
+       any untagged file in a format other than opus or flac. */
     if file.primary_tag().is_none() {
-        file.insert_tag(Tag::new(TagType::VorbisComments));
+        let kind = file.file_type().primary_tag_type();
+        file.insert_tag(Tag::new(kind));
     }
     let _writing = WriteGuard::new();
     let tag = file.primary_tag_mut().context("no writable tag")?;
@@ -293,7 +297,54 @@ fn choose_artist(asker: &Asker, index: usize, old: &str, new: &str) -> (String, 
 
 #[cfg(test)]
 mod tests {
-    use super::image_extension;
+    use super::{image_extension, open, read, set_fields};
+    use std::path::{Path, PathBuf};
+
+    /// Silent, untagged and in whatever container the codec implies, which is
+    /// the case `with_tag` has to insert a tag for.
+    fn bare(at: &Path, codec: &str) -> Option<()> {
+        let mut cmd = std::process::Command::new("ffmpeg");
+        cmd.args(["-v", "error", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono"])
+            .args(["-t", "0.2", "-map_metadata", "-1", "-c:a", codec])
+            /* Otherwise ffmpeg stamps an encoder tag of its own and the file
+               arrives already tagged, which is not the case under test. */
+            .args(["-fflags", "+bitexact", "-flags:a", "+bitexact"]);
+        // The only one of the three that can be written with no tag at all.
+        if codec == "libmp3lame" {
+            cmd.args(["-id3v2_version", "0", "-write_id3v1", "0"]);
+        }
+        cmd.arg("-y").arg(at).status().ok()?.success().then_some(())
+    }
+
+    /* A tag type the container does not take is refused outright, and a file
+       with no tag at all is where the type has to be guessed: assuming Vorbis
+       comments left an untagged mp3 or m4a unwritable while the download that
+       produced it reported success. */
+    #[test]
+    fn writes_tags_into_every_container_earworm_downloads() {
+        let dir = std::env::temp_dir().join(format!("earworm-tagtypes-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut untagged = 0;
+        for (codec, ext) in [("libmp3lame", "mp3"), ("aac", "m4a"), ("flac", "flac")] {
+            let file: PathBuf = dir.join(format!("track.{ext}"));
+            if bare(&file, codec).is_none() {
+                eprintln!("skipped {ext}: ffmpeg could not write it");
+                continue;
+            }
+            use lofty::file::TaggedFileExt;
+            if open(&file).unwrap().primary_tag().is_none() {
+                untagged += 1;
+            }
+            set_fields(&file, "Kraftwerk", "Autobahn").unwrap_or_else(|e| panic!("{ext}: {e}"));
+            let back = read(&file).unwrap();
+            assert_eq!((back.artist.as_str(), back.title.as_str()), ("Kraftwerk", "Autobahn"), "{ext}");
+        }
+        /* The branch under test only runs for a file with no tag, so a
+           fixture that arrives tagged would pass while saying nothing. */
+        assert!(untagged > 0, "every fixture came with a tag already");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn detects_image_types_by_magic_bytes() {

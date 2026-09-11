@@ -706,6 +706,40 @@ fn tag_tracks(
 /// Serves edits and cover changes after the run, so the tracks stay editable
 /// without a second pass over the network, and serves the library screen,
 /// which has no run behind it at all.
+/* The choice outlives the run it is made in, so it goes back to the config
+   file rather than living in this process. Nothing already downloaded is
+   converted: the manifest names those files by the name they have, so they
+   stay downloaded and stay in the format they arrived in. */
+fn set_format(cfg: &mut Config, tx: &Sender<Msg>, asker: &Asker) -> Result<()> {
+    let options: Vec<String> = config::FORMATS
+        .iter()
+        .map(|(name, ext)| {
+            let here = if *name == cfg.format { "  (current)" } else { "" };
+            format!("{name}  .{ext}{here}")
+        })
+        .collect();
+    let Some(choice) = asker.choose_noted(
+        "Format for new downloads",
+        "Tracks already on disk keep the format they were downloaded in.",
+        options,
+    ) else {
+        return Ok(());
+    };
+    let picked = config::FORMATS[choice].0;
+    cfg.format = picked.to_string();
+    // Or the help overlay keeps reporting the format the run started with.
+    let _ = tx.send(Msg::Settings(cfg.describe()));
+
+    let Some(path) = cfg.config_file.clone() else {
+        let _ = tx.send(Msg::Flash(format!("format: {picked}, this run only")));
+        return Ok(());
+    };
+    config::save_format(&path, picked)?;
+    let _ = tx.send(Msg::Log(format!("format {picked} written to {}", path.display())));
+    let _ = tx.send(Msg::Flash(format!("format: {picked}, remembered")));
+    Ok(())
+}
+
 fn serve(
     cfg: &mut Config,
     tx: &Sender<Msg>,
@@ -761,6 +795,10 @@ fn serve(
             }
             Cmd::Artist(targets) => {
                 report(tx, artist(cfg, tx, tracks, &asker, &targets));
+                None
+            }
+            Cmd::Format => {
+                report(tx, set_format(cfg, tx, &asker));
                 None
             }
             Cmd::Toggle => {
@@ -1484,7 +1522,7 @@ fn label(title: &str, artist: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
 
     #[test]
     fn accepts_the_shapes_a_youtube_link_actually_comes_in() {
@@ -2258,7 +2296,7 @@ mod tests {
         track
     }
 
-    fn config(rename: bool) -> Config {
+    pub fn config(rename: bool) -> Config {
         Config {
             url: String::new(),
             dir: PathBuf::new(),
@@ -2267,6 +2305,8 @@ mod tests {
             cover: true,
             lookup: true,
             fix: true,
+            format: config::DEFAULT_FORMAT.into(),
+            config_file: None,
             resync: false,
             list: false,
             rename,
@@ -2401,3 +2441,117 @@ mod tests {
     }
 }
 
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "earworm-format-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn answer(rx: &Receiver<Msg>, reply: Reply) -> Vec<Msg> {
+        let mut seen = Vec::new();
+        for msg in rx {
+            let done = matches!(msg, Msg::Ask(..));
+            if let Msg::Ask(_, back) = &msg {
+                back.send(reply.clone()).unwrap();
+            }
+            seen.push(msg);
+            if done {
+                break;
+            }
+        }
+        seen
+    }
+
+    /// Chosen in the tool, so the next session has to start there too.
+    #[test]
+    fn choosing_a_format_writes_it_to_the_config_file() {
+        let dir = scratch("save");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "# mine\ndir = \"/tmp/music\"\n").unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let mut cfg = super::tests::config(true);
+        cfg.config_file = Some(path.clone());
+        let asker = Asker { tx: tx.clone(), enabled: true };
+
+        let picked = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| set_format(&mut cfg, &tx, &asker));
+            // The index of "mp3" in FORMATS, which is what the menu lists.
+            let mut seen = answer(&rx, Reply::Choice(2));
+            worker.join().unwrap().unwrap();
+            // Drained after the join: the interesting messages come after the
+            // answer, so stopping at the question would catch none of them.
+            seen.extend(rx.try_iter());
+            seen
+        });
+
+        assert_eq!(cfg.format, "mp3");
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("format = \"mp3\""), "{written:?}");
+        assert!(written.contains("# mine"), "the file was rewritten: {written:?}");
+        assert!(written.contains("dir = \"/tmp/music\""), "{written:?}");
+        assert!(
+            picked.iter().any(|m| matches!(m, Msg::Settings(s) if s.contains("format mp3"))),
+            "the help overlay still reports the old format"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Backing out of the menu must not write, or Esc becomes a way to set
+    /// whatever the cursor happened to rest on.
+    #[test]
+    fn backing_out_changes_nothing() {
+        let dir = scratch("escape");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "dir = \"/tmp/music\"\n").unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let mut cfg = super::tests::config(true);
+        cfg.config_file = Some(path.clone());
+        let asker = Asker { tx: tx.clone(), enabled: true };
+
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| set_format(&mut cfg, &tx, &asker));
+            answer(&rx, Reply::Cancel);
+            worker.join().unwrap().unwrap();
+        });
+
+        assert_eq!(cfg.format, config::DEFAULT_FORMAT);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "dir = \"/tmp/music\"\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// --no-config asked for the file to be left out of the run, so there is
+    /// nowhere to remember it and the session has to say so.
+    #[test]
+    fn without_a_config_file_the_choice_lasts_one_session() {
+        let (tx, rx) = mpsc::channel();
+        let mut cfg = super::tests::config(true);
+        cfg.config_file = None;
+        let asker = Asker { tx: tx.clone(), enabled: true };
+
+        let seen = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| set_format(&mut cfg, &tx, &asker));
+            let mut seen = answer(&rx, Reply::Choice(3));
+            worker.join().unwrap().unwrap();
+            seen.extend(rx.try_iter());
+            seen
+        });
+
+        assert_eq!(cfg.format, "flac");
+        assert!(
+            seen.iter().any(|m| matches!(m, Msg::Flash(s) if s.contains("this run only"))),
+            "nothing said the choice was not kept"
+        );
+    }
+}

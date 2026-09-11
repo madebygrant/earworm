@@ -1,6 +1,6 @@
 # earworm
 
-A terminal UI for turning a YouTube playlist into a folder of tagged opus files.
+A terminal UI for turning a YouTube playlist into a folder of tagged audio files.
 
 `yt-dlp` does the downloading. earworm does everything after. It splits artist
 and title out of the video title, checks that guess against AcoustID and
@@ -15,7 +15,7 @@ Three external binaries, all on PATH:
 | Binary | Homebrew formula | Used for |
 | --- | --- | --- |
 | `yt-dlp` | `yt-dlp` | downloading and extracting audio |
-| `ffmpeg` | `ffmpeg` | opus conversion, thumbnail embedding |
+| `ffmpeg` | `ffmpeg` | audio conversion, thumbnail embedding |
 | `fpcalc` | `chromaprint` | acoustic fingerprinting (optional) |
 | `cliamp` | `cliamp` | playing a finished playlist (optional) |
 
@@ -46,6 +46,7 @@ earworm                                  # asks for a URL
 earworm 'https://youtube.com/playlist?list=...'
 earworm URL --dir ~/Music/new
 earworm URL --no-pick                    # don't stop to choose, fetch it all
+earworm URL --format flac                # opus by default
 earworm URL -- --cookies-from-browser firefox   # extra args go to yt-dlp
 earworm --resync                         # every playlist already downloaded
 earworm --list                           # what is already on disk, then exit
@@ -54,6 +55,15 @@ earworm --list                           # what is already on disk, then exit
 Tracks land in `<dir>/<playlist name>/`, named `NN - Artist - Title.opus` once
 earworm is confident of the tags, next to a `cover.jpg` (or `.png`) and
 `<playlist name>.m3u8`.
+
+Opus is the default. `--format` takes `opus`, `m4a`, `mp3`, `flac`, `vorbis`
+or `alac`. Pressing `f` on the library screen changes it mid-session and writes
+the choice to the config file, so the next playlist arrives the same way.
+
+Changing it converts nothing already on disk. The manifest records each track
+by the filename it has, so those files stay as they are and a folder you switch
+format on ends up holding both. earworm leaves out wav and aac, since neither
+carries tags or cover art.
 
 Reading a playlist takes a second or so, and the screen has nothing to say
 until it comes back, so that is where the wordmark animates in. It runs once
@@ -73,6 +83,7 @@ otherwise backs out to the screen behind it.
 | Flag | Effect |
 | --- | --- |
 | `-d`, `--dir` | output directory (default `~/Music`) |
+| `-f`, `--format` | opus, m4a, mp3, flac, vorbis or alac (default opus) |
 | `-P`, `--no-parse` | keep YouTube's own artist/track, skip title parsing |
 | `-L`, `--no-lookup` | skip AcoustID/Deezer, keep parsed tags |
 | `-C`, `--no-cover` | don't write `cover.jpg` |
@@ -96,6 +107,7 @@ holds the settings you'd otherwise retype every run. Every key is optional.
 
 ```toml
 dir = "~/Music/playlists"
+format = "opus"    # or m4a, mp3, flac, vorbis, alac
 
 parse = true       # split artist and title out of the video title
 lookup = true      # confirm against AcoustID and Deezer
@@ -159,6 +171,7 @@ to act on:
 | `space` | play/pause cliamp (only while it is running) |
 | `R` | sync every playlist |
 | `n` | sync a new URL |
+| `f` | choose the format new downloads arrive in |
 | `l` | toggle the yt-dlp output pane |
 | `h` `?` | keys and current settings |
 | `q` `Esc` `ctrl+c` | quit |

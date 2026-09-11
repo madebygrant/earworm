@@ -282,6 +282,41 @@ call and file write. Nothing that blocks touches the render loop.
   when cliamp is, so a bare index would mean a different thing depending on
   what is installed.
 
+### Audio format
+
+- **A format name is not an extension.** `vorbis` writes `.ogg` and `alac`
+  writes `.m4a`, so `FORMATS` carries both. `run` hands the name to
+  `--audio-format`, `scan` predicts filenames with the extension, and
+  `scan_template` is what stops the two drifting apart. A scan predicting the
+  wrong extension makes every track look absent and re-downloads a folder that
+  is already complete.
+- **`Config::build` checks the format rather than leaving it to yt-dlp.** An
+  unknown name gets as far as the download, by which time the scan has already
+  predicted filenames nothing is going to write.
+- **wav and aac are left out on purpose.** Neither carries tags or cover art,
+  so earworm would do a third of its job and report it as finished.
+- **`with_tag` takes the tag type from the container.** lofty refuses a tag
+  type the format cannot hold, so assuming Vorbis comments left every untagged
+  mp3 and m4a failing with "no writable tag". ffmpeg stamps a tag of its own on
+  almost anything, so the test that covers this asks for an mp3 with
+  `-id3v2_version 0 -write_id3v1 0` and asserts at least one fixture arrived
+  untagged.
+- **Changing the format converts nothing.** The manifest records each track by
+  the filename it has, so those tracks stay downloaded and stay as they are,
+  and a folder switched part-way holds both. Re-fetching them would be a far
+  more expensive guess than leaving them alone.
+- **`save_format` edits one line and re-parses before writing.** The config is
+  hand-edited, so rebuilding it from the parsed struct would drop every
+  comment. A file earworm can no longer read is worse than one that never
+  recorded the choice, since the next start fails outright.
+- **`f` is library-only, like `space`.** It follows the active track on the
+  track list, and the setting is about the next playlist rather than the one on
+  screen. `--no-config` leaves `Config.config_file` as `None`, and the flash
+  then says the choice lasts one session.
+- **`Msg::Settings` exists because `App.settings` is built once at startup.**
+  Change a setting from inside the tool without re-sending it and the help
+  overlay keeps reporting the format the run began with.
+
 ### Text, subprocesses and keys
 
 - **Byte indexing over a lowercased copy of a string is wrong.**

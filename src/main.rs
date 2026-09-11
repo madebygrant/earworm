@@ -291,6 +291,10 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 app.send(Cmd::Play(folder));
             }
         }
+        /* Library-only, like space: `f` follows the active track on the track
+           list, and the setting is about the next playlist rather than the
+           one on screen. */
+        KeyCode::Char('f') if app.can_browse() => app.send(Cmd::Format),
         KeyCode::Char('R') if app.can_browse() => app.send(Cmd::ResyncAll),
         KeyCode::Char('n') if app.can_browse() => app.send(Cmd::Url),
         _ => {}
