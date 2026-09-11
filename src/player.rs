@@ -5,6 +5,9 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 
+use serde_json::Value;
+
+use crate::app::{Playback, Player};
 use crate::lookup;
 
 const BIN: &str = "cliamp";
@@ -73,22 +76,66 @@ pub fn installed() -> bool {
     *FOUND.get_or_init(|| cliamp(BIN, IPC, &["--version"]).is_some_and(|(ok, _)| ok))
 }
 
-/// Whether the player is up, which `cliamp status` answers by its exit code
-/// alone. Cheap enough to poll: about 11ms, against a socket that is either
-/// there or not.
+/// What cliamp is doing. About 11ms, so cheap enough for the poll behind it.
+pub fn probe() -> Playback {
+    if !installed() {
+        return Playback::default();
+    }
+    let text = cliamp(BIN, IPC, &["status", "--json"]).map_or_else(String::new, |(_, s)| s);
+    /* Parsed rather than exit-code checked: a stopped cliamp prints its "not
+       running" line instead of JSON, so failing to parse is the same answer
+       and one probe covers both questions. */
+    let Ok(state) = serde_json::from_str::<Value>(&text) else {
+        return Playback {
+            player: Player::Stopped,
+            ..Playback::default()
+        };
+    };
+    Playback {
+        player: Player::Running,
+        folder: folder_of(state.pointer("/track/path").and_then(Value::as_str)),
+        playing: state.get("state").and_then(Value::as_str) == Some("playing"),
+    }
+}
+
+/* cliamp names the track and never the playlist, so the folder is what says
+   which library row is on air. A radio stream's path is a URL and belongs to
+   no folder, which the leading slash is enough to tell apart. */
+fn folder_of(path: Option<&str>) -> Option<PathBuf> {
+    let path = path.filter(|p| p.starts_with('/'))?;
+    Path::new(path).parent().map(Path::to_path_buf)
+}
+
+/// Play/pause, which cliamp applies to whatever it has loaded. Nothing is
+/// reported back: `serve` re-probes the moment it finishes with a command, so
+/// the indicator is the answer.
+pub fn toggle() -> Result<()> {
+    toggle_with(BIN, IPC)
+}
+
+fn toggle_with(bin: &str, limit: Duration) -> Result<()> {
+    match cliamp(bin, limit, &["toggle"]) {
+        None => bail!("cliamp did not answer"),
+        Some((false, why)) => bail!("{why}"),
+        Some((true, _)) => Ok(()),
+    }
+}
+
+/// Whether a playlist can be handed over right now, for callers with no reason
+/// to hold the rest of the snapshot.
 pub fn running() -> bool {
-    installed() && cliamp(BIN, IPC, &["status"]).is_some_and(|(ok, _)| ok)
+    probe().player.ready()
 }
 
 pub fn load(folder: &Path) -> Result<String> {
-    load_with(BIN, folder)
+    load_with(BIN, STORE, IPC, folder)
 }
 
 /* `import` refuses a name it already holds rather than replacing it, so a
    second sync of the same playlist would fail on an unchanged copy. Deleting
    first is what makes this a refresh, and the delete failing is the ordinary
    first-time case rather than an error. */
-fn load_with(bin: &str, folder: &Path) -> Result<String> {
+fn load_with(bin: &str, store: Duration, ipc: Duration, folder: &Path) -> Result<String> {
     let playlist = playlist_file(folder);
     if !playlist.is_file() {
         bail!("no .m3u8 to play; run with --no-m3u8 off");
@@ -98,8 +145,8 @@ fn load_with(bin: &str, folder: &Path) -> Result<String> {
     };
     let name = stored(folder);
 
-    let _ = cliamp(bin, STORE, &["playlist", "delete", &name]);
-    let imported = match cliamp(bin, STORE, &["playlist", "import", "--name", &name, file]) {
+    let _ = cliamp(bin, store, &["playlist", "delete", &name]);
+    let imported = match cliamp(bin, store, &["playlist", "import", "--name", &name, file]) {
         None => bail!("cliamp did not answer"),
         Some((false, why)) => bail!("{why}"),
         // cliamp counted the tracks it took, which is better than a guess.
@@ -109,7 +156,7 @@ fn load_with(bin: &str, folder: &Path) -> Result<String> {
     /* Not running is the ordinary case rather than a failure: the tracks are
        imported either way, so say where they landed. The stored name and not
        the folder's, since that is what to look for in cliamp. */
-    match cliamp(bin, IPC, &["load", &name]) {
+    match cliamp(bin, ipc, &["load", &name]) {
         Some((true, _)) => Ok(format!("playing \"{name}\" in cliamp")),
         _ if imported.is_empty() => Ok(format!("imported \"{name}\"; start cliamp to play it")),
         _ => Ok(format!("{imported} start cliamp to play it")),
@@ -120,6 +167,11 @@ fn load_with(bin: &str, folder: &Path) -> Result<String> {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /* The stubs are executables written moments before they run, and macOS
+       charges for the first exec of a new one. That has nothing to do with how
+       long cliamp takes to answer, so these must not borrow its bounds. */
+    const SLACK: Duration = Duration::from_secs(60);
 
     /// A stand-in `cliamp` that logs its argv and exits by the rules given as
     /// `case` lines, so the call sequence can be asserted without cliamp.
@@ -174,7 +226,7 @@ esac
 exit 0"#,
         );
         let dir = bin.parent().unwrap().to_path_buf();
-        let said = load_with(&bin.to_string_lossy(), &folder(&dir)).unwrap();
+        let said = load_with(&bin.to_string_lossy(), SLACK, SLACK, &folder(&dir)).unwrap();
 
         let calls = calls(&log);
         assert_eq!(calls.len(), 3, "{calls:?}");
@@ -193,7 +245,7 @@ exit 0"#,
     fn never_touches_a_playlist_under_the_bare_folder_name() {
         let (bin, log) = stub("namespace", "exit 0");
         let dir = bin.parent().unwrap().to_path_buf();
-        load_with(&bin.to_string_lossy(), &folder(&dir)).unwrap();
+        load_with(&bin.to_string_lossy(), SLACK, SLACK, &folder(&dir)).unwrap();
 
         for call in calls(&log) {
             for field in call.split('|') {
@@ -216,7 +268,7 @@ esac
 exit 0"#,
         );
         let dir = bin.parent().unwrap().to_path_buf();
-        let said = load_with(&bin.to_string_lossy(), &folder(&dir)).unwrap();
+        let said = load_with(&bin.to_string_lossy(), SLACK, SLACK, &folder(&dir)).unwrap();
         assert!(said.contains("start cliamp"), "{said}");
         assert!(said.contains("earworm - Focus ("), "{said}");
         std::fs::remove_dir_all(dir).unwrap();
@@ -233,7 +285,7 @@ esac
 exit 0"#,
         );
         let dir = bin.parent().unwrap().to_path_buf();
-        let err = load_with(&bin.to_string_lossy(), &folder(&dir)).unwrap_err();
+        let err = load_with(&bin.to_string_lossy(), SLACK, SLACK, &folder(&dir)).unwrap_err();
         assert!(err.to_string().contains("invalid playlist name"), "{err}");
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -278,10 +330,47 @@ esac
 exit 0"#,
         );
         let dir = bin.parent().unwrap().to_path_buf();
-        let said = load_with(&bin.to_string_lossy(), &folder(&dir)).unwrap();
+        let said = load_with(&bin.to_string_lossy(), SLACK, SLACK, &folder(&dir)).unwrap();
         assert!(said.starts_with("Imported 24 tracks"), "{said}");
         assert!(said.contains("start cliamp"), "{said}");
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /* One call and no arguments, because cliamp owns what "resume" means for
+       whatever it has loaded. Getting this wrong is silent: the key would
+       appear to do nothing rather than report anything. */
+    #[test]
+    fn toggling_asks_cliamp_once_and_says_nothing_on_success() {
+        let (bin, log) = stub("toggle", "exit 0");
+        let dir = bin.parent().unwrap().to_path_buf();
+        toggle_with(&bin.to_string_lossy(), SLACK).unwrap();
+        assert_eq!(calls(&log), ["toggle|"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A refused toggle carries cliamp's own words, not a guess at the cause.
+    #[test]
+    fn a_refused_toggle_is_reported() {
+        let (bin, _log) = stub("badtoggle", "echo 'cliamp is not running' >&2; exit 1");
+        let dir = bin.parent().unwrap().to_path_buf();
+        let err = toggle_with(&bin.to_string_lossy(), SLACK).unwrap_err();
+        assert!(err.to_string().contains("not running"), "{err}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /* cliamp reports whatever it has loaded, and that is as often a radio
+       stream as a file. A URL has no folder, and treating one as a path would
+       mark whichever library row happened to sit at its last segment. */
+    #[test]
+    fn only_a_local_track_belongs_to_a_folder() {
+        assert_eq!(
+            folder_of(Some("/music/Focus/01 - A.opus")),
+            Some(PathBuf::from("/music/Focus"))
+        );
+        assert_eq!(folder_of(Some("https://radio.cliamp.stream/lofi/stream")), None);
+        assert_eq!(folder_of(Some("relative/01 - A.opus")), None);
+        assert_eq!(folder_of(Some("")), None);
+        assert_eq!(folder_of(None), None);
     }
 
     /* The .m3u8 is the whole input, so its absence has to stop this before any

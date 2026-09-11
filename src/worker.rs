@@ -723,7 +723,7 @@ fn serve(
        second channel. */
     let mut watch = Watch::default();
     loop {
-        if let Some(now) = watch.poll(player::installed(), player::running()) {
+        if let Some(now) = watch.poll(player::probe()) {
             let _ = tx.send(Msg::Player(now));
         }
         let cmd = match cmds.recv_timeout(PROBE) {
@@ -761,6 +761,10 @@ fn serve(
             }
             Cmd::Artist(targets) => {
                 report(tx, artist(cfg, tx, tracks, &asker, &targets));
+                None
+            }
+            Cmd::Toggle => {
+                report(tx, player::toggle());
                 None
             }
             Cmd::Play(folder) => {

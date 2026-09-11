@@ -246,6 +246,21 @@ call and file write. Nothing that blocks touches the render loop.
   `running`, not merely installed. They drifted apart once because `finish`
   runs before `serve` and so cannot read `App.player`, and the result was the
   same action hidden on one screen and offered on the next.
+- **`space` is library-only.** On the track list it marks a row, and that is
+  what `targets()` and every bulk command read, so the transport key had to go
+  where `space` was still free. That is also the screen showing what cliamp is
+  doing.
+- **The stub tests set their own timeouts.** macOS charges for the first exec
+  of a newly written executable, which is what every stub is, and borrowing
+  cliamp's 2s `IPC` bound made them fail about one run in three. Those tests
+  check argv and control flow, never latency.
+- **cliamp names the track, never the playlist.** `status --json` carries
+  `track.path` and no playlist name at all, so the library row is matched by
+  the folder that path sits in. A radio stream's path is a URL, which is why
+  only a leading slash counts as a folder.
+- **`status --json` is parsed, not exit-code checked.** A stopped cliamp prints
+  its "not running" line instead of JSON, so a failed parse is the same answer
+  and one probe covers both whether it is up and what it is playing.
 - **`serve` polls cliamp between commands rather than on a thread of its own.**
   `recv_timeout` is what makes that free, and `serve` idling is exactly when
   `p` is live: during a run the keys are dead, so a fresher answer would be one

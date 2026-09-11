@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use std::sync::mpsc::Sender;
 
@@ -145,18 +145,25 @@ pub enum Player {
     Running,
 }
 
-impl Player {
-    /// The two probes are separate because only one of them is worth caching:
-    /// what is on PATH cannot change within a session, and whether cliamp is
-    /// up changes from another window while earworm watches.
-    pub fn seen(installed: bool, running: bool) -> Self {
-        match (installed, running) {
-            (false, _) => Player::Missing,
-            (true, false) => Player::Stopped,
-            (true, true) => Player::Running,
-        }
-    }
+/// What cliamp is doing, as one value so the poll behind it emits one message.
+#[derive(Clone, PartialEq, Eq, Debug, Default)]
+pub struct Playback {
+    pub player: Player,
+    /// Folder of the track cliamp has loaded, when it is a local file. cliamp
+    /// reports the track and never the playlist, so this is what says which
+    /// library row is the one on air; a radio stream has no folder.
+    pub folder: Option<PathBuf>,
+    pub playing: bool,
+}
 
+impl Playback {
+    /// Whether this row is the one cliamp has loaded.
+    pub fn on(&self, folder: &Path) -> bool {
+        self.folder.as_deref() == Some(folder)
+    }
+}
+
+impl Player {
     /// Whether a playlist can be handed over right now.
     pub fn ready(self) -> bool {
         self == Player::Running
@@ -166,12 +173,11 @@ impl Player {
 /// Remembers what was last reported, so the three-second poll behind it costs
 /// one message per change rather than one per tick.
 #[derive(Default)]
-pub struct Watch(Option<Player>);
+pub struct Watch(Option<Playback>);
 
 impl Watch {
-    pub fn poll(&mut self, installed: bool, running: bool) -> Option<Player> {
-        let now = Player::seen(installed, running);
-        (self.0.replace(now) != Some(now)).then_some(now)
+    pub fn poll(&mut self, now: Playback) -> Option<Playback> {
+        (self.0.replace(now.clone()) != Some(now.clone())).then_some(now)
     }
 }
 
@@ -208,6 +214,8 @@ pub enum Cmd {
     /// Hand a folder's .m3u8 to cliamp. Carries the folder rather than meaning
     /// "the open one", so the library can play a row without opening it.
     Play(PathBuf),
+    /// Play/pause whatever cliamp has loaded, which need not be one of ours.
+    Toggle,
 }
 
 pub enum Prompt {
@@ -267,7 +275,7 @@ pub enum Msg {
     /// The folder the run is writing into, once one is known.
     Folder(PathBuf),
     /// Sent only when it changes, since the worker re-checks on a timer.
-    Player(Player),
+    Player(Playback),
     Tracks(Vec<Track>),
     Progress {
         index: usize,
@@ -410,7 +418,7 @@ pub struct App {
     /// Where the open run wrote, for handing to an external player. Set by
     /// `Msg::Folder`, since the UI only ever sees a track's path by chance.
     pub folder: Option<PathBuf>,
-    pub player: Player,
+    pub playback: Playback,
     pub tracks: Vec<Track>,
     pub logs: Vec<String>,
     pub view: View,
@@ -461,7 +469,7 @@ impl App {
             flash_until: None,
             playlist: String::new(),
             folder: None,
-            player: Player::default(),
+            playback: Playback::default(),
             tracks: Vec::new(),
             logs: Vec::new(),
             view: View::Tracks,
@@ -519,7 +527,7 @@ impl App {
             }
             Msg::Playlist(p) => self.playlist = p,
             Msg::Folder(f) => self.folder = Some(f),
-            Msg::Player(state) => self.player = state,
+            Msg::Player(now) => self.playback = now,
             Msg::Tracks(t) => self.tracks = t,
             Msg::Progress { index, percent } => {
                 if let Some(t) = self.track_mut(index) {
@@ -711,7 +719,7 @@ impl App {
     /// Whether `p` is worth offering: cliamp has to be up to be handed a
     /// playlist, and a key that only ever errors is worse than no key.
     pub fn can_play(&self) -> bool {
-        self.player.ready()
+        self.playback.player.ready()
     }
 
     pub fn can_command(&self) -> bool {
@@ -1254,23 +1262,36 @@ mod tests {
         assert!(app.folder.is_none(), "the last playlist's folder stayed behind");
     }
 
-    /* The `seen` guard is the only thing between a three-second poll and a
-       message every three seconds for the life of the session, and dropping it
-       breaks nothing visible. */
+    fn at(player: Player, folder: Option<&str>, playing: bool) -> Playback {
+        Playback {
+            player,
+            folder: folder.map(PathBuf::from),
+            playing,
+        }
+    }
+
+    /* The guard inside `Watch` is the only thing between a three-second poll
+       and a message every three seconds for the life of the session, and
+       dropping it breaks nothing visible. */
     #[test]
     fn the_player_watch_reports_changes_and_nothing_else() {
         let mut watch = Watch::default();
-        assert_eq!(watch.poll(true, true), Some(Player::Running), "the first look is news");
-        assert_eq!(watch.poll(true, true), None, "an unchanged state was re-sent");
-        assert_eq!(watch.poll(true, true), None);
+        let up = || at(Player::Running, Some("/music/Focus"), true);
+        assert_eq!(watch.poll(up()), Some(up()), "the first look is news");
+        assert_eq!(watch.poll(up()), None, "an unchanged state was re-sent");
+        assert_eq!(watch.poll(up()), None);
 
-        assert_eq!(watch.poll(true, false), Some(Player::Stopped), "cliamp quitting went unsaid");
-        assert_eq!(watch.poll(true, false), None);
-        assert_eq!(watch.poll(true, true), Some(Player::Running), "cliamp starting went unsaid");
+        // The folder alone moving is a change: it is what marks the row.
+        let moved = at(Player::Running, Some("/music/Road trip"), true);
+        assert_eq!(watch.poll(moved.clone()), Some(moved), "a new playlist went unsaid");
 
-        // Not installed outranks whatever the running probe came back with.
-        assert_eq!(watch.poll(false, true), Some(Player::Missing));
-        assert_eq!(watch.poll(false, false), None);
+        // So is pausing, with everything else the same.
+        let paused = at(Player::Running, Some("/music/Road trip"), false);
+        assert_eq!(watch.poll(paused.clone()), Some(paused), "pausing went unsaid");
+
+        let gone = at(Player::Stopped, None, false);
+        assert_eq!(watch.poll(gone.clone()), Some(gone), "cliamp quitting went unsaid");
+        assert_eq!(watch.poll(at(Player::Stopped, None, false)), None);
     }
 
     /// `p` is offered on exactly one of the three, and only that one.
@@ -1279,6 +1300,19 @@ mod tests {
         assert!(Player::Running.ready());
         assert!(!Player::Stopped.ready());
         assert!(!Player::Missing.ready());
+    }
+
+    /* cliamp reports the track and never the playlist, so the row is matched
+       by the folder the track sits in. A radio stream belongs to none. */
+    #[test]
+    fn only_the_loaded_folder_is_on_air() {
+        let now = at(Player::Running, Some("/music/Focus"), true);
+        assert!(now.on(Path::new("/music/Focus")));
+        assert!(!now.on(Path::new("/music/Road trip")));
+        assert!(!now.on(Path::new("/music")), "the parent claimed the track");
+
+        let stream = at(Player::Running, None, true);
+        assert!(!stream.on(Path::new("/music/Focus")), "a stream marked a row");
     }
 
     fn shelf(name: &str) -> Shelf {

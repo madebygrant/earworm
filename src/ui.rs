@@ -361,6 +361,13 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
                     Style::new().fg(GREEN),
                 ),
                 Span::styled(format!(" {name}{:pad$}", ""), Style::new().fg(CREAM)),
+                /* Two cells whether or not anything is playing, so the columns
+                   after it do not step sideways as cliamp starts and stops. */
+                match (app.playback.on(&shelf.path), app.playback.playing) {
+                    (true, true) => Span::styled(" ▶", Style::new().fg(GREEN)),
+                    (true, false) => dim(" ⏸"),
+                    (false, _) => Span::raw("  "),
+                },
                 dim(format!("  {:>4} tracks", shelf.tracks)),
             ];
             /* Files the manifest lists that are no longer there, which a sync
@@ -591,7 +598,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     /* Absent entirely when cliamp is not installed, since a player nobody has
        is not news. Installed but stopped is worth saying: it is the answer to
        "where did `p` go". */
-    match app.player {
+    match app.playback.player {
         Player::Running => hints.push(("   ♪ cliamp".to_string(), Style::new().fg(GREEN))),
         Player::Stopped => hints.push(("   ♪ cliamp off".to_string(), Style::new().fg(DIM))),
         Player::Missing => {}
@@ -663,6 +670,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
         rows.extend([("open", "enter", "read this playlist off disk")]);
         if app.can_play() {
             rows.push(("play", "p", "hand this playlist to cliamp"));
+            rows.push(("", "space", "play/pause cliamp"));
         }
         rows.extend([
             ("sync", "R", "sync every playlist"),
@@ -1022,6 +1030,92 @@ mod tests {
             .collect()
     }
 
+    /* cliamp reports a track and never a playlist, so the row is found by the
+       folder that track sits in. Worth marking: the library is a list of
+       folders that otherwise gives no clue which one is on air. */
+    #[test]
+    fn the_library_marks_the_folder_cliamp_is_playing() {
+        let screen = |folder: Option<&str>, playing: bool| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(tx, "settings".into());
+            app.apply(Msg::Library { shelves: shelves(), show: true });
+            app.intro_done = true;
+            app.apply(Msg::Player(crate::app::Playback {
+                player: crate::app::Player::Running,
+                folder: folder.map(std::path::PathBuf::from),
+                playing,
+            }));
+            let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+            terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (2..4)
+                .map(|y| {
+                    (0..80)
+                        .map(|x| buffer[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // shelves() is Focus then Road trip; only the second is playing.
+        let rows = screen(Some("/music/Road trip"), true);
+        assert!(!rows[0].contains('▶'), "the wrong row was marked: {rows:?}");
+        assert!(rows[1].contains('▶'), "the playing row is unmarked: {rows:?}");
+
+        let paused = screen(Some("/music/Road trip"), false);
+        assert!(paused[1].contains('⏸'), "loaded but stopped went unmarked: {paused:?}");
+        assert!(!paused[1].contains('▶'), "{paused:?}");
+
+        // A radio stream sits in no folder and must claim no row.
+        let stream = screen(None, true);
+        assert!(!stream.join("").contains('▶'), "a stream marked a row: {stream:?}");
+
+        /* The marker holds two cells whether or not it is there, or every
+           column after it steps sideways as cliamp starts and stops. */
+        let idle = screen(None, false);
+        // Cells, not bytes: the marker is three bytes and one column.
+        let col = |r: &str| r[..r.find("tracks").unwrap()].chars().count();
+        assert_eq!(col(&rows[1]), col(&idle[1]), "the counts moved");
+    }
+
+    /* Both cliamp keys are library-only and both need it running, so the help
+       has to stop offering them the moment it is not. */
+    #[test]
+    fn the_library_help_offers_the_cliamp_keys_only_while_it_runs() {
+        let help = |player: crate::app::Player| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(tx, "settings".into());
+            app.apply(Msg::Library { shelves: shelves(), show: true });
+            app.intro_done = true;
+            app.show_help = true;
+            app.apply(Msg::Player(crate::app::Playback {
+                player,
+                ..Default::default()
+            }));
+            let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..24)
+                .map(|y| {
+                    (0..80)
+                        .map(|x| buffer[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let up = help(crate::app::Player::Running);
+        assert!(up.contains("play/pause cliamp"), "{up}");
+        assert!(up.contains("hand this playlist to cliamp"), "{up}");
+
+        let down = help(crate::app::Player::Stopped);
+        assert!(!down.contains("play/pause cliamp"), "{down}");
+        assert!(!down.contains("hand this playlist to cliamp"), "{down}");
+        // The rest of the library keys are unaffected.
+        assert!(down.contains("read this playlist off disk"), "{down}");
+    }
+
     /* Everything on this screen comes from the manifests, and the sync time is
        the only thing that says whether a folder still matches its playlist. */
     #[test]
@@ -1237,7 +1331,10 @@ mod tests {
             let mut app = App::new(tx, "settings".into());
             app.tracks = spread();
             app.done = Some(Ok("finished".into()));
-            app.apply(Msg::Player(state));
+            app.apply(Msg::Player(crate::app::Playback {
+                player: state,
+                ..Default::default()
+            }));
             app.show_help = true;
             let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
             terminal.draw(|f| super::draw(f, &mut app)).unwrap();

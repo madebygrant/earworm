@@ -156,6 +156,7 @@ to act on:
 | `j` `k` `↑` `↓` `g` `G` | move |
 | `enter` | open this playlist from disk |
 | `p` | play the folder under the cursor in cliamp (only while it is running) |
+| `space` | play/pause cliamp (only while it is running) |
 | `R` | sync every playlist |
 | `n` | sync a new URL |
 | `l` | toggle the yt-dlp output pane |
@@ -309,6 +310,16 @@ folder name. A folder called `Focus` would otherwise destroy a `Focus`
 playlist you had built in cliamp by hand. The prefix keeps them together in
 cliamp's listing, and the tag is a hash of the folder's path, so two `--dir`
 roots that both hold a `Focus` get a playlist each.
+
+`space` on the library screen is play/pause, which cliamp applies to whatever
+it has loaded, earworm's or not. It is free there, unlike on the track list
+where it marks a row.
+
+In the library, the folder cliamp has loaded is marked `▶` while it plays and
+`⏸` when it is loaded but stopped, so a list of folders says which one is on
+air. cliamp reports the track and never the playlist, so the row is found by
+the folder that track sits in; a radio stream belongs to no folder and marks
+nothing.
 
 `cliamp load` talks to a running instance over a socket, so earworm never
 launches it and never takes the terminal. `♪ cliamp` in green in the status bar

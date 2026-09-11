@@ -283,6 +283,9 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 app.send(Cmd::Open(folder));
             }
         }
+        /* Free here, unlike on the track list where it marks a row, and this
+           is the screen that already says what cliamp is doing. */
+        KeyCode::Char(' ') if app.can_browse() && app.can_play() => app.send(Cmd::Toggle),
         KeyCode::Char('p') if app.can_browse() && app.can_play() => {
             if let Some(folder) = app.selected_shelf().map(|s| s.path.clone()) {
                 app.send(Cmd::Play(folder));
