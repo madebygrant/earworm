@@ -75,12 +75,10 @@ fn encode(value: &str) -> String {
 
 /// std has no timeout on `output()`, and a wedged fpcalc would stall the run on
 /// one unreadable file.
-fn run_bounded(cmd: &mut Command, limit: Duration) -> Option<std::process::Output> {
-    let mut child = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
+/// The caller sets the stdio, since which streams are worth capturing is the
+/// caller's business and a piped stream nobody drains can fill and block.
+pub fn run_bounded(cmd: &mut Command, limit: Duration) -> Option<std::process::Output> {
+    let mut child = cmd.spawn().ok()?;
     let deadline = Instant::now() + limit;
     loop {
         match child.try_wait() {
@@ -98,7 +96,11 @@ fn run_bounded(cmd: &mut Command, limit: Duration) -> Option<std::process::Outpu
 
 fn fingerprint(path: &Path) -> Option<(i64, String)> {
     let out = run_bounded(
-        Command::new("fpcalc").arg("-json").arg(path),
+        Command::new("fpcalc")
+            .arg("-json")
+            .arg(path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
         FPCALC_TIMEOUT,
     )?;
     if !out.status.success() {

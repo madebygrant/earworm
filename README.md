@@ -17,6 +17,7 @@ Three external binaries, all on PATH:
 | `yt-dlp` | `yt-dlp` | downloading and extracting audio |
 | `ffmpeg` | `ffmpeg` | opus conversion, thumbnail embedding |
 | `fpcalc` | `chromaprint` | acoustic fingerprinting (optional) |
+| `cliamp` | `cliamp` | playing a finished playlist (optional) |
 
 ```sh
 brew install yt-dlp ffmpeg chromaprint
@@ -53,6 +54,11 @@ earworm --list                           # what is already on disk, then exit
 Tracks land in `<dir>/<playlist name>/`, named `NN - Artist - Title.opus` once
 earworm is confident of the tags, next to a `cover.jpg` (or `.png`) and
 `<playlist name>.m3u8`.
+
+Reading a playlist takes a second or so, and the screen has nothing to say
+until it comes back, so that is where the wordmark animates in. It runs once
+per session and holds for about two seconds, over the library screen too. Any
+key skips it, and a track list or a question it is hiding ends it outright.
 
 Run without a URL and earworm opens the library: one row per playlist folder
 already under `--dir`. With nothing downloaded yet it asks for a link instead.
@@ -131,6 +137,7 @@ changing nothing.
 | `c` | choose cover art (after the run) |
 | `r` | retry every failed track (after the run) |
 | `S` | sync the open playlist against its saved URL |
+| `p` | play this playlist in cliamp (only while cliamp is running) |
 | `space` | mark or unmark the track under the cursor |
 | `m` | mark every track sharing that track's status |
 | `a` | mark every row the filter shows (at the pick gate) |
@@ -148,6 +155,7 @@ to act on:
 | --- | --- |
 | `j` `k` `↑` `↓` `g` `G` | move |
 | `enter` | open this playlist from disk |
+| `p` | play the folder under the cursor in cliamp (only while it is running) |
 | `R` | sync every playlist |
 | `n` | sync a new URL |
 | `l` | toggle the yt-dlp output pane |
@@ -203,8 +211,8 @@ still showing.
 
 ### Choosing what to download
 
-Every run pauses between reading the playlist and downloading it, and hands you
-the list:
+Every run but `--resync` pauses between reading the playlist and downloading
+it, and hands you the list:
 
 ```
  PICK  158 of 361 selected       space  ·  a all  ·  enter downloads  ·  esc none
@@ -218,15 +226,16 @@ start unselected, since nothing was going to fetch them.
 `space` toggles one, `m` toggles every track sharing its status, `a` toggles
 every row the filter shows, and `/` narrows the list the same as ever, so
 `/sheeran` then `a` picks one artist. Enter starts the download; Esc downloads
-nothing and carries on, which still tags and playlists what is already in the
-folder.
+nothing and carries on, still tagging what is already in the folder and
+writing the `.m3u8`.
 
 Tracks you leave out get a `skipped` row and a line in the summary. They are
-not failures, and nothing deletes or re-tags them: run again and they download.
+not failures, and nothing deletes or re-tags them. Run again and they
+download.
 
-`--no-pick` skips the gate, for when you already know you want everything.
-`earworm --resync` never gates, since it walks the whole library unattended and
-a question per folder is the one thing that would stop it.
+`--no-pick` skips the gate too, for when you already know you want everything.
+The `--resync` exception is there because it walks the whole library
+unattended, and a question per folder is the one thing that would stop it.
 
 ### Fixing several tracks at once
 
@@ -261,7 +270,7 @@ When there is room, a pane beside the rows lists that folder's tracks, with
 anything the manifest names that is no longer on disk marked `!` in amber. That
 turns the `2 missing` on the row into something you can act on without opening
 the folder. It is read-only and starts from the top, with a count of what it
-could not fit; below about 100 columns it makes way for the rows themselves.
+could not fit. Below about 100 columns it makes way for the rows themselves.
 
 Only one playlist is on screen at a time, because a track's number is its
 position in its own playlist and two playlists both have a track 1.
@@ -276,8 +285,37 @@ logged and skipped rather than stopping the rest.
 
 Folders downloaded before earworm started recording the URL have no entry, so
 they need one sync by URL before `--resync` picks them up. Playlists are
-visited in folder-name order, and the rows on screen are one playlist at a
-time, since a track's number is its position in its own playlist.
+visited in folder-name order, one at a time on screen for the same reason the
+library opens one folder at a time.
+
+### Playing what you just downloaded
+
+With [cliamp](https://docs.cliamp.stream) running, `p` hands the folder's
+`.m3u8` to it, and the finish menu offers the same thing as a row. It works
+from the library screen too, so you can play a folder without opening it.
+
+earworm imports the `.m3u8` rather than the folder, because that file is its
+own answer about what is in the playlist and in what order, with departed
+tracks already left out. cliamp reads the tags earworm wrote, so tracks show up
+as `Caravan - Thelonious Monk` rather than as filenames.
+
+`cliamp playlist import` refuses a name it already holds, so earworm deletes
+that playlist first and imports over it. A re-sync therefore refreshes the copy
+in cliamp instead of failing on a stale one. The delete fails when there is
+nothing to delete, which is the ordinary case and not an error.
+
+Playlists land in cliamp as `earworm - <folder> (<tag>)`, never as the bare
+folder name. A folder called `Focus` would otherwise destroy a `Focus`
+playlist you had built in cliamp by hand. The prefix keeps them together in
+cliamp's listing, and the tag is a hash of the folder's path, so two `--dir`
+roots that both hold a `Focus` get a playlist each.
+
+`cliamp load` talks to a running instance over a socket, so earworm never
+launches it and never takes the terminal. `♪ cliamp` in green in the status bar
+means it is up and `p` will play. `♪ cliamp off` in grey means installed but
+stopped, and `p` is withdrawn rather than left there to fail. With cliamp not
+installed, neither appears. earworm re-checks every few seconds while idle, so
+starting cliamp in another window brings the key back.
 
 ### Retrying failures
 

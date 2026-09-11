@@ -2,14 +2,16 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 use std::sync::mpsc::{self, Receiver, Sender};
 
 use anyhow::{Context, Result, bail};
 
-use crate::app::{Asker, Cmd, Escape, Msg, Reply, Shelf, Status, Track};
+use crate::app::{Asker, Cmd, Escape, Msg, Reply, Shelf, Status, Track, Watch};
 use crate::config::{self, Config};
 use crate::lookup;
 use crate::manifest;
+use crate::player;
 use crate::tag::{self, CoverState};
 use crate::ytdlp;
 
@@ -171,6 +173,14 @@ fn finish(
        successful one, and `main` reports the exit status from this. */
     let mut result: Result<String, String> = result.map_err(|e| e.to_string());
     loop {
+        /* Both resolved each pass, and deliberately not cached: syncing another
+           playlist inside this loop moves the folder, and cliamp is started and
+           stopped from another window while this menu sits open. The row has to
+           mean what `p` means, or the same action is offered on one screen and
+           hidden on the next. */
+        let playable = folder_of(tracks)
+            .filter(|f| player::playlist_file(f).is_file())
+            .filter(|_| player::running());
         let _ = tx.send(Msg::Done {
             result: result.clone(),
             stage: "finished",
@@ -183,13 +193,35 @@ fn finish(
             Ok(summary) => ("finished", summary.clone()),
             Err(err) => ("failed", err.clone()),
         };
-        let options = vec![
-            "keep this open".to_string(),
-            "sync another playlist".into(),
-            "quit".into(),
-        ];
-        match asker.choose_noted(title, &note, options) {
-            Some(1) => {
+        /* Labels and answers built together: the row for cliamp is only there
+           when cliamp is, and a bare index would then mean a different thing
+           depending on what is installed. */
+        let mut rows: Vec<(String, Answer)> = vec![("keep this open".into(), Answer::Keep)];
+        if playable.is_some() {
+            rows.push(("play it in cliamp".into(), Answer::Play));
+        }
+        rows.push(("sync another playlist".into(), Answer::Another));
+        rows.push(("quit".into(), Answer::Quit));
+
+        let options: Vec<String> = rows.iter().map(|(label, _)| label.clone()).collect();
+        let chosen = asker
+            .choose_noted(title, &note, options)
+            .and_then(|n| rows.get(n).map(|(_, answer)| *answer));
+        match chosen {
+            Some(Answer::Play) => {
+                if let Some(folder) = playable.clone() {
+                    match player::load(&folder) {
+                        Ok(said) => {
+                            let _ = tx.send(Msg::Flash(said));
+                        }
+                        Err(err) => {
+                            let _ = tx.send(Msg::Log(format!("cliamp: {err}")));
+                            let _ = tx.send(Msg::Flash(format!("cliamp: {err}")));
+                        }
+                    }
+                }
+            }
+            Some(Answer::Another) => {
                 // Cancelling the URL question goes back here, not out, and
                 // leaves the last run's outcome exactly as it was.
                 let Some(url) = prompt_url(tx, Escape::Keep) else {
@@ -201,7 +233,7 @@ fn finish(
                 let gate = cfg.pick;
                 result = pipeline(cfg, tx, cancel, tracks, gate).map_err(|e| e.to_string());
             }
-            Some(2) => {
+            Some(Answer::Quit) => {
                 let _ = tx.send(Msg::Quit);
                 return false;
             }
@@ -209,6 +241,14 @@ fn finish(
             _ => return true,
         }
     }
+}
+
+#[derive(Clone, Copy)]
+enum Answer {
+    Keep,
+    Play,
+    Another,
+    Quit,
 }
 
 /// Every playlist folder already under `--dir`, in name order. Read from the
@@ -268,6 +308,7 @@ fn open_shelf(
 
     let _ = tx.send(Msg::Restart);
     let _ = tx.send(Msg::Playlist(shelf.name.clone()));
+    let _ = tx.send(Msg::Folder(shelf.path.clone()));
     cfg.url = shelf.url.clone();
     tracks.clear();
 
@@ -472,6 +513,9 @@ fn pipeline(
         .unwrap_or_default();
     if !playlist.is_empty() {
         let _ = tx.send(Msg::Playlist(playlist.clone()));
+        if let Some(folder) = folder_of(tracks) {
+            let _ = tx.send(Msg::Folder(folder));
+        }
     }
     note_departures(cfg, tx, listing.complete, tracks);
     let _ = tx.send(Msg::Tracks(tracks.clone()));
@@ -673,7 +717,21 @@ fn serve(
         tx: tx.clone(),
         enabled: true,
     };
-    while let Ok(cmd) = cmds.recv() {
+    /* Polled here rather than on a timer of its own, because `serve` idling is
+       exactly when `p` is live: during a run the keys are dead anyway, and a
+       third thread to answer a question nobody can act on is not worth the
+       second channel. */
+    let mut watch = Watch::default();
+    loop {
+        if let Some(now) = watch.poll(player::installed(), player::running()) {
+            let _ = tx.send(Msg::Player(now));
+        }
+        let cmd = match cmds.recv_timeout(PROBE) {
+            Ok(cmd) => cmd,
+            // Only the far end hanging up ends the loop; a timeout re-checks.
+            Err(mpsc::RecvTimeoutError::Timeout) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => return,
+        };
         /* Some commands edit what is on screen and some replace it. Only the
            ones that went to the network have an outcome worth a question at
            the end, which is what `synced` carries. */
@@ -705,6 +763,18 @@ fn serve(
                 report(tx, artist(cfg, tx, tracks, &asker, &targets));
                 None
             }
+            Cmd::Play(folder) => {
+                match player::load(&folder) {
+                    Ok(said) => {
+                        let _ = tx.send(Msg::Flash(said));
+                    }
+                    Err(err) => {
+                        let _ = tx.send(Msg::Flash(format!("cliamp: {err}")));
+                        let _ = tx.send(Msg::Log(format!("cliamp: {err}")));
+                    }
+                }
+                None
+            }
         };
 
         if let Some(result) = synced {
@@ -721,6 +791,10 @@ fn serve(
         let _ = tx.send(Msg::Idle);
     }
 }
+
+/// How often `serve` re-checks cliamp while it has nothing else to do. A probe
+/// is about 11ms, so this is a rounding error against an idle screen.
+const PROBE: Duration = Duration::from_secs(3);
 
 fn report(tx: &Sender<Msg>, done: Result<()>) {
     if let Err(err) = done {

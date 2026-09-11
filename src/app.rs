@@ -135,6 +135,46 @@ pub struct Shelf {
     pub files: Vec<(String, bool)>,
 }
 
+/// What earworm knows about cliamp. `Missing` is also the starting guess, so
+/// nothing about the player is claimed before it has been looked for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Player {
+    #[default]
+    Missing,
+    Stopped,
+    Running,
+}
+
+impl Player {
+    /// The two probes are separate because only one of them is worth caching:
+    /// what is on PATH cannot change within a session, and whether cliamp is
+    /// up changes from another window while earworm watches.
+    pub fn seen(installed: bool, running: bool) -> Self {
+        match (installed, running) {
+            (false, _) => Player::Missing,
+            (true, false) => Player::Stopped,
+            (true, true) => Player::Running,
+        }
+    }
+
+    /// Whether a playlist can be handed over right now.
+    pub fn ready(self) -> bool {
+        self == Player::Running
+    }
+}
+
+/// Remembers what was last reported, so the three-second poll behind it costs
+/// one message per change rather than one per tick.
+#[derive(Default)]
+pub struct Watch(Option<Player>);
+
+impl Watch {
+    pub fn poll(&mut self, installed: bool, running: bool) -> Option<Player> {
+        let now = Player::seen(installed, running);
+        (self.0.replace(now) != Some(now)).then_some(now)
+    }
+}
+
 /// Which screen has the keys. The library is a screen and not a prompt because
 /// its rows stay open: opening one and pressing Esc comes back to it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -165,6 +205,9 @@ pub enum Cmd {
     Swap(Vec<usize>),
     /// One artist across many tracks, for a compilation the lookup split up.
     Artist(Vec<usize>),
+    /// Hand a folder's .m3u8 to cliamp. Carries the folder rather than meaning
+    /// "the open one", so the library can play a row without opening it.
+    Play(PathBuf),
 }
 
 pub enum Prompt {
@@ -221,6 +264,10 @@ pub enum Msg {
     /// saying and not worth leaving on the header for the rest of the session.
     Flash(String),
     Playlist(String),
+    /// The folder the run is writing into, once one is known.
+    Folder(PathBuf),
+    /// Sent only when it changes, since the worker re-checks on a timer.
+    Player(Player),
     Tracks(Vec<Track>),
     Progress {
         index: usize,
@@ -270,6 +317,9 @@ pub enum Msg {
 /// Prompts are answered by the UI thread, so a question blocks only the worker.
 /// Long enough to read a filename in, short enough not to outlive interest.
 const FLASH: Duration = Duration::from_secs(4);
+
+/// Long enough to read the word, short enough that nobody reaches for a key.
+pub const INTRO: Duration = Duration::from_millis(1900);
 
 pub struct Asker {
     pub tx: Sender<Msg>,
@@ -357,6 +407,10 @@ pub struct App {
     resting: String,
     flash_until: Option<Instant>,
     pub playlist: String,
+    /// Where the open run wrote, for handing to an external player. Set by
+    /// `Msg::Folder`, since the UI only ever sees a track's path by chance.
+    pub folder: Option<PathBuf>,
+    pub player: Player,
     pub tracks: Vec<Track>,
     pub logs: Vec<String>,
     pub view: View,
@@ -388,6 +442,10 @@ pub struct App {
     /// reply channel here is what makes the keys mean "choose" for as long as
     /// the question is open, and dropping it answers `Cancel`.
     pub picking: Option<Sender<Reply>>,
+    /// Wall clock, not `tick`: the intro has to run at the same speed on a
+    /// terminal that redraws on every message and one that sits idle.
+    pub started: Instant,
+    pub intro_done: bool,
     pub quit: bool,
 }
 
@@ -402,6 +460,8 @@ impl App {
             resting: "starting".into(),
             flash_until: None,
             playlist: String::new(),
+            folder: None,
+            player: Player::default(),
             tracks: Vec::new(),
             logs: Vec::new(),
             view: View::Tracks,
@@ -419,8 +479,24 @@ impl App {
             input: String::new(),
             done: None,
             picking: None,
+            started: Instant::now(),
+            intro_done: false,
             quit: false,
         }
+    }
+
+    /* Holds its full window rather than yielding to the library, which on a
+       bare start is ready in milliseconds and would leave the intro unseen.
+       Nothing is waiting on the user behind a list. A prompt is the exception:
+       the worker is blocked on an answer, and hiding the question is not
+       polish. Everything else here is content worth more than an animation. */
+    pub fn intro(&self) -> bool {
+        !self.intro_done
+            && self.tracks.is_empty()
+            && self.prompt.is_none()
+            && self.done.is_none()
+            && !self.show_help
+            && self.started.elapsed() < INTRO
     }
 
     pub fn apply(&mut self, msg: Msg) {
@@ -442,6 +518,8 @@ impl App {
                 self.flash_until = Some(Instant::now() + FLASH);
             }
             Msg::Playlist(p) => self.playlist = p,
+            Msg::Folder(f) => self.folder = Some(f),
+            Msg::Player(state) => self.player = state,
             Msg::Tracks(t) => self.tracks = t,
             Msg::Progress { index, percent } => {
                 if let Some(t) = self.track_mut(index) {
@@ -518,6 +596,7 @@ impl App {
                 self.tracks.clear();
                 self.marked.clear();
                 self.playlist.clear();
+                self.folder = None;
                 self.cursor = 0;
                 self.follow = true;
                 /* A filter from the last playlist would hide most of the next
@@ -627,6 +706,12 @@ impl App {
             self.marked.clear();
             self.follow = true;
         }
+    }
+
+    /// Whether `p` is worth offering: cliamp has to be up to be handed a
+    /// playlist, and a key that only ever errors is worse than no key.
+    pub fn can_play(&self) -> bool {
+        self.player.ready()
     }
 
     pub fn can_command(&self) -> bool {
@@ -1154,6 +1239,46 @@ mod tests {
         app.apply(Msg::Restart);
         assert!(app.filter.is_empty());
         assert!(!app.typing_filter);
+    }
+
+    /* `p` plays `folder`, and a second playlist in the same session reuses the
+       App: a folder left over from the last run would play its tracks under
+       the new run's name. */
+    #[test]
+    fn the_open_folder_does_not_survive_a_new_playlist() {
+        let mut app = app_with(&[Status::Ok]);
+        app.apply(Msg::Folder(PathBuf::from("/music/Focus")));
+        assert_eq!(app.folder.as_deref(), Some(std::path::Path::new("/music/Focus")));
+
+        app.apply(Msg::Restart);
+        assert!(app.folder.is_none(), "the last playlist's folder stayed behind");
+    }
+
+    /* The `seen` guard is the only thing between a three-second poll and a
+       message every three seconds for the life of the session, and dropping it
+       breaks nothing visible. */
+    #[test]
+    fn the_player_watch_reports_changes_and_nothing_else() {
+        let mut watch = Watch::default();
+        assert_eq!(watch.poll(true, true), Some(Player::Running), "the first look is news");
+        assert_eq!(watch.poll(true, true), None, "an unchanged state was re-sent");
+        assert_eq!(watch.poll(true, true), None);
+
+        assert_eq!(watch.poll(true, false), Some(Player::Stopped), "cliamp quitting went unsaid");
+        assert_eq!(watch.poll(true, false), None);
+        assert_eq!(watch.poll(true, true), Some(Player::Running), "cliamp starting went unsaid");
+
+        // Not installed outranks whatever the running probe came back with.
+        assert_eq!(watch.poll(false, true), Some(Player::Missing));
+        assert_eq!(watch.poll(false, false), None);
+    }
+
+    /// `p` is offered on exactly one of the three, and only that one.
+    #[test]
+    fn only_a_running_player_is_ready() {
+        assert!(Player::Running.ready());
+        assert!(!Player::Stopped.ready());
+        assert!(!Player::Missing.ready());
     }
 
     fn shelf(name: &str) -> Shelf {

@@ -7,7 +7,7 @@ use ratatui::widgets::{
     ScrollbarState,
 };
 
-use crate::app::{App, Prompt, Shelf, Status, View};
+use crate::app::{App, Player, Prompt, Shelf, Status, View};
 use crate::manifest;
 
 use crate::theme::{self, AMBER, CREAM, DIM, GOLD, GREEN, INK, RED, RULE, SURFACE};
@@ -22,6 +22,13 @@ fn dim(text: impl Into<String>) -> Span<'static> {
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    // Takes the whole frame: a header above it would be the thing you read.
+    if app.intro() {
+        draw_background(frame);
+        draw_intro(frame, app.started.elapsed().as_millis() as u64);
+        return;
+    }
+
     let [header, rule, body, footrule, status] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(1),
@@ -70,6 +77,101 @@ fn draw_background(frame: &mut Frame) {
             let bg = theme::background(x - area.left(), y - area.top(), area.width, area.height);
             buffer[(x, y)].set_bg(bg);
         }
+    }
+}
+
+/// Five rows per glyph, all five columns wide, for `EARWORM`.
+const GLYPHS: [[&str; 5]; 7] = [
+    ["█████", "█    ", "████ ", "█    ", "█████"],
+    [" ███ ", "█   █", "█████", "█   █", "█   █"],
+    ["████ ", "█   █", "████ ", "█  █ ", "█   █"],
+    ["█   █", "█   █", "█ █ █", "██ ██", "█   █"],
+    [" ███ ", "█   █", "█   █", "█   █", " ███ "],
+    ["████ ", "█   █", "████ ", "█  █ ", "█   █"],
+    ["█   █", "██ ██", "█ █ █", "█   █", "█   █"],
+];
+const MARK_WIDTH: u16 = 41;
+const MARK_HEIGHT: u16 = 5;
+/// One glyph lands every 90ms, each fading in over the 220ms after its turn.
+const LETTER: u64 = 90;
+const FADE: f32 = 220.0;
+const WAVE: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+
+/* Drawn from the elapsed milliseconds alone, so it runs at the same speed
+   whether the event loop is idling at its poll timeout or spinning on
+   messages, and skipping it costs nothing that was ever computed. */
+fn draw_intro(frame: &mut Frame, ms: u64) {
+    let area = frame.area();
+    // Below this the wordmark would wrap into nonsense, so only the wave runs.
+    let big = area.width >= MARK_WIDTH + 2 && area.height >= MARK_HEIGHT + 6;
+    let mark_rows = if big { MARK_HEIGHT } else { 1 };
+    let block = mark_rows + 4;
+    if area.height < block {
+        return;
+    }
+
+    let top = area.y + (area.height - block) / 2;
+    // Clamped, or a Rect wider than the frame reaches past the buffer.
+    let width = if big { MARK_WIDTH } else { 7 }.min(area.width);
+    let left = area.x + (area.width - width) / 2;
+
+    if big {
+        for row in 0..MARK_HEIGHT {
+            let mut spans = Vec::new();
+            for (n, glyph) in GLYPHS.iter().enumerate() {
+                let due = n as u64 * LETTER;
+                if ms < due {
+                    break;
+                }
+                if n > 0 {
+                    spans.push(Span::raw(" "));
+                }
+                let lit = theme::glow((ms - due) as f32 / FADE);
+                spans.push(Span::styled(glyph[row as usize], Style::new().fg(lit)));
+            }
+            frame.render_widget(
+                Paragraph::new(Line::from(spans)),
+                Rect::new(left, top + row, width, 1),
+            );
+        }
+    } else {
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                "earworm",
+                Style::new().fg(theme::glow(ms as f32 / FADE)),
+            ))),
+            Rect::new(left, top, width, 1),
+        );
+    }
+
+    /* Starts once the last letter has landed and grows in, so the eye follows
+       the word first and the wave second rather than competing for both. */
+    let wave_at = GLYPHS.len() as u64 * LETTER;
+    if ms > wave_at && area.width >= 8 {
+        let grown = ((ms - wave_at) as f32 / 400.0).min(1.0);
+        let phase = ms as f32 / 90.0;
+        let span = width as usize;
+        let wave: String = (0..span)
+            .map(|x| {
+                let height = (phase - x as f32 / 2.6).sin() * 3.5 * grown + 3.5;
+                WAVE[(height.round().max(0.0) as usize).min(7)]
+            })
+            .collect();
+        frame.render_widget(
+            Paragraph::new(Line::from(Span::styled(wave, Style::new().fg(AMBER)))),
+            Rect::new(left, top + mark_rows + 1, width, 1),
+        );
+    }
+
+    // Last, so it reads as a signature rather than part of the animation.
+    if ms > wave_at + 250 {
+        let sign = format!("youtube playlists, tagged  ·  v{}", env!("CARGO_PKG_VERSION"));
+        let sign = truncate(&sign, area.width as usize);
+        let at = area.x + (area.width - sign.chars().count() as u16) / 2;
+        frame.render_widget(
+            Paragraph::new(Line::from(dim(sign))),
+            Rect::new(at, top + mark_rows + 3, area.right() - at, 1),
+        );
     }
 }
 
@@ -486,6 +588,14 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         hints.push(("   R resync all".to_string(), Style::new().fg(DIM)));
         hints.push(("   n new URL".to_string(), Style::new().fg(DIM)));
     }
+    /* Absent entirely when cliamp is not installed, since a player nobody has
+       is not news. Installed but stopped is worth saying: it is the answer to
+       "where did `p` go". */
+    match app.player {
+        Player::Running => hints.push(("   ♪ cliamp".to_string(), Style::new().fg(GREEN))),
+        Player::Stopped => hints.push(("   ♪ cliamp off".to_string(), Style::new().fg(DIM))),
+        Player::Missing => {}
+    }
     hints.push(("   h keys".to_string(), Style::new().fg(DIM)));
     let reserved: usize = hints.iter().map(|(t, _)| t.chars().count()).sum();
 
@@ -550,8 +660,11 @@ fn draw_help(frame: &mut Frame, app: &App) {
         ("", "g G", "first, last"),
     ];
     if app.view == View::Library {
+        rows.extend([("open", "enter", "read this playlist off disk")]);
+        if app.can_play() {
+            rows.push(("play", "p", "hand this playlist to cliamp"));
+        }
         rows.extend([
-            ("open", "enter", "read this playlist off disk"),
             ("sync", "R", "sync every playlist"),
             ("", "n", "sync a new URL"),
             ("view", "l", "yt-dlp output"),
@@ -582,6 +695,11 @@ fn draw_help(frame: &mut Frame, app: &App) {
                 ("", "c", "choose cover art"),
                 ("", "r", "retry failures"),
                 ("", "S", "sync this playlist"),
+            ]);
+            if app.can_play() {
+                rows.push(("", "p", "play it in cliamp"));
+            }
+            rows.extend([
                 ("marked", "s", "swap artist and title"),
                 ("", "A", "set one artist"),
             ]);
@@ -680,7 +798,7 @@ fn draw_prompt(frame: &mut Frame, app: &App) {
             Prompt::Choice { escape, .. } => {
                 format!("j/k select   enter confirm   {}", escape.hint())
             }
-            Prompt::Input { escape, .. } => {
+            crate::app::Prompt::Input { escape, .. } => {
                 format!("enter confirm   ^u clear   ^w word   {}", escape.hint())
             }
         },
@@ -888,6 +1006,8 @@ mod tests {
             show: true,
         });
         app.shelf = shelf;
+        // These test the library screen, which the intro now sits in front of.
+        app.intro_done = true;
         let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
         terminal.draw(|f| super::draw(f, &mut app)).unwrap();
         let buffer = terminal.backend().buffer().clone();
@@ -1107,6 +1227,49 @@ mod tests {
         assert_eq!(rule, "─".repeat(60));
     }
 
+    /* `p` errors unless cliamp is up, so it is offered only then, and the
+       status bar has to say why it went rather than leaving a key that was
+       there a moment ago unexplained. */
+    #[test]
+    fn the_play_key_and_its_indicator_follow_cliamp() {
+        let bar = |state: crate::app::Player| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(tx, "settings".into());
+            app.tracks = spread();
+            app.done = Some(Ok("finished".into()));
+            app.apply(Msg::Player(state));
+            app.show_help = true;
+            let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+            terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let screen: String = (0..24)
+                .map(|y| {
+                    (0..100)
+                        .map(|x| buffer[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (screen, app.can_play())
+        };
+
+        let (running, can) = bar(crate::app::Player::Running);
+        assert!(can, "cliamp was up and p was still refused");
+        assert!(running.contains("♪ cliamp"), "no indicator: {running}");
+        assert!(!running.contains("cliamp off"), "{running}");
+        assert!(running.contains("play it in cliamp"), "the key went unlisted");
+
+        let (stopped, can) = bar(crate::app::Player::Stopped);
+        assert!(!can, "p was offered with nothing to hand it to");
+        assert!(stopped.contains("♪ cliamp off"), "no reason given: {stopped}");
+        assert!(!stopped.contains("play it in cliamp"), "the key is still listed");
+
+        // Nobody needs telling about a player they have not installed.
+        let (missing, can) = bar(crate::app::Player::Missing);
+        assert!(!can);
+        assert!(!missing.contains("cliamp"), "{missing}");
+    }
+
     /* The keys mean something different while the pick is open and the worker
        is blocked on the answer, so the band has to say both what is selected
        and what Enter will do. */
@@ -1191,6 +1354,7 @@ mod tests {
         });
         assert!(app.can_browse(), "n would do nothing on an empty library");
 
+        app.intro_done = true;
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
         terminal.draw(|f| super::draw(f, &mut app)).unwrap();
         let buffer = terminal.backend().buffer().clone();
@@ -1388,5 +1552,129 @@ mod tests {
         }
         assert_eq!(bar(0, 8).0, "");
         assert_eq!(bar(100, 8).1, "");
+    }
+
+    fn intro_rows(ms: u64, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal
+            .draw(|f| {
+                super::draw_background(f);
+                super::draw_intro(f, ms);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /* Driven by elapsed milliseconds and not by `tick`, so it has to land the
+       same way whether the loop is idling at its poll timeout or spinning on
+       messages. These are the three moments the animation is made of. */
+    #[test]
+    fn the_intro_reveals_the_wordmark_then_the_wave_then_the_signature() {
+        let early = intro_rows(100, 64, 14).join("\n");
+        assert!(early.contains("█████"), "no wordmark at all: {early:?}");
+        assert!(!early.contains("tagged"), "the signature came in first");
+
+        let landed = intro_rows(1400, 64, 14).join("\n");
+        // Every letter of EARWORM, which is the row the crossbars all sit on.
+        assert!(
+            landed.lines().any(|l| l.matches('█').count() > 20),
+            "the wordmark never filled out: {landed:?}"
+        );
+        assert!(
+            landed.lines().any(|l| l.chars().any(|c| super::WAVE.contains(&c))),
+            "no wave: {landed:?}"
+        );
+        assert!(landed.contains("youtube playlists, tagged"), "{landed:?}");
+
+        // The reveal is left to right, so an early frame is strictly shorter.
+        let widest = |rows: Vec<String>| rows.iter().map(|r| r.chars().count()).max().unwrap_or(0);
+        assert!(
+            widest(intro_rows(100, 64, 14)) < widest(intro_rows(700, 64, 14)),
+            "the letters did not land one at a time"
+        );
+    }
+
+    /* The wordmark is 41 columns and would wrap into nonsense below that, and
+       the frame can be any size at all while a terminal is being dragged. */
+    #[test]
+    fn the_intro_survives_any_size_it_is_given() {
+        for (w, h) in [(1u16, 1u16), (3, 5), (8, 4), (20, 9), (43, 10), (64, 14), (400, 90)] {
+            let rows = intro_rows(1400, w, h);
+            assert_eq!(rows.len(), h as usize, "at {w}x{h}");
+            assert!(
+                rows.iter().all(|r| r.chars().count() <= w as usize),
+                "a row ran past the frame at {w}x{h}: {rows:?}"
+            );
+        }
+        // Too narrow for the block letters, so the plain word stands in.
+        assert!(intro_rows(1400, 30, 12).join("\n").contains("earworm"));
+    }
+
+    /* It covers the scan and nothing else: anything worth reading outranks it,
+       and a key skips it, or the animation is in the way rather than polish. */
+    #[test]
+    fn the_intro_gives_way_to_anything_real() {
+        let fresh = || {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            App::new(tx, "settings".into())
+        };
+        assert!(fresh().intro(), "a bare start had nothing else to show");
+
+        let mut skipped = fresh();
+        skipped.intro_done = true;
+        assert!(!skipped.intro(), "a key did not skip it");
+
+        let mut running = fresh();
+        running.tracks = spread();
+        assert!(!running.intro(), "it sat over the track list");
+
+        let mut helping = fresh();
+        helping.show_help = true;
+        assert!(!helping.intro(), "it sat under the help modal");
+
+        /* The library is ready in milliseconds on a bare start, so yielding to
+           it is how the intro went unseen for anyone who runs `earworm` alone.
+           Nothing is waiting on the user behind a list, so it holds. */
+        let mut browsing = fresh();
+        browsing.apply(Msg::Library { shelves: shelves(), show: true });
+        assert_eq!(browsing.view, crate::app::View::Library);
+        assert!(browsing.intro(), "the library cut the intro short again");
+
+        /* A prompt is the exception: the worker is blocked on an answer, and
+           a question the user cannot see is not polish. */
+        let mut asked = fresh();
+        let (reply, _back) = std::sync::mpsc::channel();
+        asked.apply(Msg::Ask(
+            crate::app::Prompt::Input {
+                header: "YouTube playlist URL".into(),
+                value: String::new(),
+                escape: crate::app::Escape::Quit,
+            },
+            reply,
+        ));
+        assert!(!asked.intro(), "it hid the question the worker is waiting on");
+
+        let mut finished = fresh();
+        finished.done = Some(Ok("finished".into()));
+        assert!(!finished.intro(), "it outlived the run");
+
+        // And the frame it leaves behind is the ordinary one, header included.
+        let mut app = fresh();
+        app.tracks = spread();
+        let mut terminal = Terminal::new(TestBackend::new(64, 14)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let top: String = (0..64)
+            .map(|x| terminal.backend().buffer()[(x, 0)].symbol().to_string())
+            .collect();
+        assert!(top.contains("earworm  ·"), "{top:?}");
     }
 }

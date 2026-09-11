@@ -2,6 +2,7 @@ mod app;
 mod config;
 mod lookup;
 mod manifest;
+mod player;
 mod tag;
 mod theme;
 mod ui;
@@ -113,7 +114,10 @@ fn run(
         terminal.draw(|frame| ui::draw(frame, app))?;
         app.tick = app.tick.wrapping_add(1);
 
-        if event::poll(Duration::from_millis(120))?
+        /* The intro is the only thing on screen that moves between messages,
+           so it is the only thing that needs frames faster than the idle poll. */
+        let wait = if app.intro() { 33 } else { 120 };
+        if event::poll(Duration::from_millis(wait))?
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
@@ -124,6 +128,12 @@ fn run(
 }
 
 fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    /* Swallows the key rather than also acting on it: skipping an animation
+       must not double as a command the user never saw the screen for. */
+    if app.intro() {
+        app.intro_done = true;
+        return;
+    }
     if app.prompt.is_some() {
         handle_prompt_key(app, code, mods);
         return;
@@ -177,6 +187,11 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         }
         KeyCode::Char('r') if app.can_command() => app.send(Cmd::Retry),
         KeyCode::Char('S') if app.can_command() => app.send(Cmd::SyncOne),
+        KeyCode::Char('p') if app.can_command() && app.can_play() => {
+            if let Some(folder) = app.folder.clone() {
+                app.send(Cmd::Play(folder));
+            }
+        }
         KeyCode::Char(' ') => app.toggle_mark(),
         KeyCode::Char('m') => app.mark_like_cursor(),
         KeyCode::Char('s') if app.can_command() => {
@@ -266,6 +281,11 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Enter if app.can_browse() => {
             if let Some(folder) = app.selected_shelf().map(|s| s.path.clone()) {
                 app.send(Cmd::Open(folder));
+            }
+        }
+        KeyCode::Char('p') if app.can_browse() && app.can_play() => {
+            if let Some(folder) = app.selected_shelf().map(|s| s.path.clone()) {
+                app.send(Cmd::Play(folder));
             }
         }
         KeyCode::Char('R') if app.can_browse() => app.send(Cmd::ResyncAll),

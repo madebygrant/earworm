@@ -30,6 +30,14 @@ const FAR: (u8, u8, u8) = (18, 1, 22);
 /// Where the CSS stop sits: past it the whole corner is flat `FAR`.
 const STOP: f32 = 0.76;
 
+/// Intro letters land rather than blink on, fading from the rule colour up to
+/// gold over their own short window.
+pub fn glow(t: f32) -> Color {
+    let t = t.clamp(0.0, 1.0);
+    let mix = |a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * t).round() as u8;
+    Color::Rgb(mix(92, 230), mix(84, 211), mix(66, 138))
+}
+
 /// Text on a filled band, where the gradient is covered and cream would glare.
 pub const INK: Color = Color::Rgb(24, 18, 16);
 
