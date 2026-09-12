@@ -8,6 +8,10 @@ Deezer, writes Vorbis tags, fetches cover art and writes an `.m3u8`. When it
 can't work out a track it asks rather than writing a tag it doesn't believe,
 and you can still fix any track's artist, title or cover after the run.
 
+![A playlist open in earworm: the track list on the left, the selected track's
+tags and file path in a pane on the right, and the run's settings along the
+header](docs/images/earworm.png)
+
 ## Requirements
 
 Three external binaries, all on PATH:
@@ -181,6 +185,14 @@ changing nothing.
 
 ## Keys
 
+`h` or `?` lists every key that works on the screen you are on, with the
+status words grouped by what to do about them and the settings this run is
+using at the bottom.
+
+![The keys overlay: keys grouped by what they do, then the status words
+grouped into confirmed tags, guesses worth a look, tracks this run did not
+touch, and failures](docs/images/keys.png)
+
 | Key | Action |
 | --- | --- |
 | `j` `k` `↑` `↓` | move |
@@ -229,6 +241,7 @@ to act on:
 | `j` `k` `↑` `↓` `g` `G` | move |
 | `^d` `^u` `PgDn` `PgUp` | move by a screenful |
 | `enter` | open this playlist from disk |
+| `e` | rename this playlist |
 | `O` | open this folder in the file manager |
 | `/` | filter the folders by name |
 | `o` | order: name, last synced, most missing |
@@ -245,6 +258,18 @@ A run longer than half a minute rings the terminal bell when it settles,
 which is the point at which you have gone to do something else. `notify = false`
 or `--no-notify` turns it off. The opening animation has the same pair,
 `intro = false` and `--no-intro`.
+
+`e` on the library renames a playlist. The folder is named from the playlist's
+title on YouTube, and that name is chosen again on every download, so the
+rename is recorded in `.earworm` as a `#name` header and the next sync writes
+back into the folder you named rather than re-creating the old one beside it.
+The `.m3u8` inside is renamed to match; the tracks' own tags are left alone, so
+the album tag keeps the name the playlist had when they were written.
+
+A folder renamed outside earworm has no such header, so the next sync would
+download the playlist again under its original name. Press `e` on it and hit
+Enter on the name it already shows: nothing moves, and the header is written.
+Playlists you have never renamed need nothing doing to them.
 
 `O` on the library hands the folder to the platform's file manager, `open` on
 macOS and `xdg-open` elsewhere. Everything downstream of earworm happens in a
@@ -414,6 +439,10 @@ something. Bulk edits rename and rewrite the playlist just as a single edit
 does.
 
 ### The library
+
+![The library screen: three playlist folders with their track counts, missing
+files and last sync, and a pane listing the selected folder's
+tracks](docs/images/library.png)
 
 `earworm` with no URL lists what is already on disk: each folder's name, how
 many tracks are in it, how many the manifest lists that are no longer there,

@@ -14,6 +14,11 @@ const URL: &str = "#url";
 /// Unix seconds of the last sync, as a second `#` header. Stored raw so the
 /// reader never has to agree with the writer about a date format or a zone.
 const SYNCED: &str = "#synced";
+/// The folder this playlist lives in, once somebody has chosen it. Without
+/// this the folder is named from the playlist's title on every download, so a
+/// rename would be undone by the next sync: yt-dlp would write the upstream
+/// name again and the whole playlist would arrive beside the renamed copy.
+const FOLDER: &str = "#name";
 
 pub fn path(folder: &Path) -> PathBuf {
     folder.join(NAME)
@@ -37,6 +42,10 @@ pub struct Sidecar {
     /// Unix seconds of the last sync, or `None` for a folder last written
     /// before that header existed.
     pub synced: Option<u64>,
+    /// The folder name to keep using, for a playlist somebody has renamed.
+    /// `None` means the folder is still whatever the playlist is called
+    /// upstream, which is what yt-dlp will name it again.
+    pub name: Option<String>,
     /// In the order the file holds them, files that have since been deleted
     /// included. `read` drops both the order and the deleted ones.
     pub entries: Vec<(String, PathBuf)>,
@@ -46,6 +55,7 @@ pub fn load(folder: &Path) -> Sidecar {
     let mut found = Sidecar {
         url: None,
         synced: None,
+        name: None,
         entries: Vec::new(),
     };
     let Ok(text) = std::fs::read_to_string(path(folder)) else {
@@ -55,6 +65,7 @@ pub fn load(folder: &Path) -> Sidecar {
         match key {
             URL => found.url = Some(value.trim().to_string()).filter(|v| !v.is_empty()),
             SYNCED => found.synced = value.trim().parse().ok(),
+            FOLDER => found.name = Some(value.trim().to_string()).filter(|v| !v.is_empty()),
             // A header this reader predates, which is why they carry a `#`.
             _ if key.starts_with('#') => {}
             _ => found.entries.push((key.to_string(), folder.join(value))),
@@ -74,7 +85,21 @@ pub fn write(
     url: &str,
     entries: impl Iterator<Item = (String, PathBuf)>,
 ) -> std::io::Result<()> {
-    body(folder, url, load(folder).synced, entries)
+    let was = load(folder);
+    body(folder, url, was.synced, was.name, entries)
+}
+
+/// Records the folder a renamed playlist is to keep, leaving everything else
+/// the sidecar holds exactly as it was.
+pub fn set_name(folder: &Path, name: &str) -> std::io::Result<()> {
+    let was = load(folder);
+    body(
+        folder,
+        was.url.as_deref().unwrap_or_default(),
+        was.synced,
+        Some(name.to_string()),
+        was.entries.into_iter(),
+    )
 }
 
 /// Rewrites the entries and stamps this moment as the last sync.
@@ -83,7 +108,7 @@ pub fn write_synced(
     url: &str,
     entries: impl Iterator<Item = (String, PathBuf)>,
 ) -> std::io::Result<()> {
-    body(folder, url, Some(now()), entries)
+    body(folder, url, Some(now()), load(folder).name, entries)
 }
 
 fn now() -> u64 {
@@ -111,6 +136,7 @@ fn body(
     folder: &Path,
     url: &str,
     synced: Option<u64>,
+    name: Option<String>,
     entries: impl Iterator<Item = (String, PathBuf)>,
 ) -> std::io::Result<()> {
     let mut body = String::new();
@@ -119,6 +145,9 @@ fn body(
     }
     if let Some(at) = synced {
         body.push_str(&format!("{SYNCED}\t{at}\n"));
+    }
+    if let Some(name) = name.filter(|n| !n.contains(['\t', '\n'])) {
+        body.push_str(&format!("{FOLDER}\t{name}\n"));
     }
     for (id, file) in entries {
         let Some(name) = file.file_name().map(|n| n.to_string_lossy().to_string()) else {
@@ -142,6 +171,39 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /* The folder is named from the playlist's title on every download, so a
+       rename only survives if the sidecar says what the folder is called. */
+    #[test]
+    fn a_recorded_name_survives_every_other_write_to_the_sidecar() {
+        let dir = scratch("named");
+        std::fs::write(dir.join("01 - A.opus"), "x").unwrap();
+        let entry = || [("id1".to_string(), dir.join("01 - A.opus"))].into_iter();
+
+        write_synced(&dir, "https://example.com", entry()).unwrap();
+        assert_eq!(load(&dir).name, None, "a folder nobody renamed claims a name");
+
+        set_name(&dir, "Morning").unwrap();
+        let after = load(&dir);
+        assert_eq!(after.name.as_deref(), Some("Morning"));
+        // Everything else the sidecar held is still there.
+        assert_eq!(after.url.as_deref(), Some("https://example.com"));
+        assert!(after.synced.is_some(), "the sync time went with the rename");
+        assert_eq!(after.entries.len(), 1);
+
+        /* Every later write has to carry it: a tag edit or a sync that
+           dropped the header would put the next download back under the
+           upstream title, beside the folder that was renamed. */
+        write(&dir, "https://example.com", entry()).unwrap();
+        assert_eq!(load(&dir).name.as_deref(), Some("Morning"));
+        write_synced(&dir, "https://example.com", entry()).unwrap();
+        assert_eq!(load(&dir).name.as_deref(), Some("Morning"));
+
+        // A reader that predates the header still loads the entries.
+        let text = std::fs::read_to_string(path(&dir)).unwrap();
+        assert!(text.contains("#name\tMorning"), "{text}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

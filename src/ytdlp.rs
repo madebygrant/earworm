@@ -23,18 +23,29 @@ pub fn stop() {
 
 const TITLE_CLEANUP: &str = " *[\\(\\[][^)\\]]*(?i:official|lyric|audio|video|visualiser|visualizer|hd|4k|remaster)[^)\\]]*[\\)\\]]";
 
-fn output_template(dir: &Path, ext: &str) -> String {
+fn output_template(cfg: &Config, ext: &str) -> String {
     format!(
-        "{}/%(playlist)s/%(playlist_index)02d - %(title)s.{ext}",
-        dir.display()
+        "{}/{}/%(playlist_index)02d - %(title)s.{ext}",
+        cfg.dir.display(),
+        folder_field(cfg)
     )
+}
+
+/* The playlist's own title, unless this run belongs to a folder somebody has
+   named: then the name is a literal, and `%` in it has to be escaped or
+   yt-dlp reads it as the start of a field. */
+fn folder_field(cfg: &Config) -> String {
+    match &cfg.folder {
+        Some(name) => name.replace('%', "%%"),
+        None => "%(playlist)s".to_string(),
+    }
 }
 
 /// The scan predicts the filenames the download will write, so both have to
 /// agree about the format: the download names it and the scan needs the
 /// extension it lands on.
 fn scan_template(cfg: &Config) -> String {
-    output_template(&cfg.dir, crate::config::extension(&cfg.format))
+    output_template(cfg, crate::config::extension(&cfg.format))
 }
 
 pub struct Listing {
@@ -235,14 +246,14 @@ pub fn run(cfg: &Config, tracks: &mut [Track], tx: &Sender<Msg>) -> Result<()> {
         cmd.arg("--output")
             .arg(format!("thumbnail:{}/%(id)s.%(ext)s", dir.display()));
         cmd.arg("--output").arg(format!(
-            "pl_thumbnail:{}/%(playlist)s/cover.%(ext)s",
-            cfg.dir.display()
+            "pl_thumbnail:{}/{}/cover.%(ext)s",
+            cfg.dir.display(),
+            folder_field(cfg)
         ));
     }
 
     cmd.arg("--download-archive").arg(&guard.archive);
-    cmd.arg("--output")
-        .arg(output_template(&cfg.dir, "%(ext)s"));
+    cmd.arg("--output").arg(output_template(cfg, "%(ext)s"));
     cmd.args(&cfg.extra);
     cmd.arg(&cfg.url);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -314,6 +325,31 @@ pub fn run(cfg: &Config, tracks: &mut [Track], tx: &Sender<Msg>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /* Without this the folder is named from the playlist's title on every
+       download, so a renamed folder is synced back under the old name and
+       the whole playlist arrives beside the renamed copy. */
+    #[test]
+    fn a_named_folder_is_what_the_download_writes_into() {
+        let mut cfg = crate::worker::tests::config(true);
+        cfg.dir = PathBuf::from("/music");
+
+        let upstream = output_template(&cfg, "opus");
+        assert!(upstream.contains("/%(playlist)s/"), "{upstream}");
+
+        cfg.folder = Some("Morning".into());
+        let pinned = output_template(&cfg, "opus");
+        assert!(pinned.starts_with("/music/Morning/"), "{pinned}");
+        assert!(!pinned.contains("%(playlist)s"), "{pinned}");
+        // The rest of the name is still yt-dlp's to fill in.
+        assert!(pinned.contains("%(playlist_index)02d - %(title)s.opus"), "{pinned}");
+
+        /* A literal name goes into a template, where `%` opens a field: a
+           playlist called "100% Hits" would otherwise take the folder
+           somewhere nobody asked for. */
+        cfg.folder = Some("100% Hits".into());
+        assert!(output_template(&cfg, "opus").contains("/100%% Hits/"));
+    }
 
     /* A predicted filename that misses the extension makes every track look
        absent, so the run downloads a folder it already has. Driven through a

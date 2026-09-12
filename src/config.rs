@@ -256,6 +256,12 @@ pub struct Config {
     pub dir: PathBuf,
     /// yt-dlp's name for the format, not the extension. See `FORMATS`.
     pub format: String,
+    /* The folder this run must write into, for a playlist somebody has
+       renamed. `None` is every other run, where yt-dlp names the folder from
+       the playlist's title. Not a setting and not in the file: it belongs to
+       the playlist being synced, and `Msg::Restart` territory rather than
+       config, which is why every path that starts a run sets or clears it. */
+    pub folder: Option<String>,
     /// Where a setting changed in the tool gets written back. `None` under
     /// --no-config, which asked for the file to be left out of the run and
     /// so cannot be the place a choice is remembered.
@@ -329,6 +335,7 @@ impl Config {
         Ok(Config {
             url: cli.url.unwrap_or_default(),
             dir: expand(&dir),
+            folder: None,
             format,
             config_file,
             parse: off("no_parse", file.parse),

@@ -187,6 +187,17 @@ pub fn running() -> bool {
     probe().player.ready()
 }
 
+/* The stored name carries both the folder's name and a hash of its path, so
+   a rename leaves the old entry in cliamp's store for good: nothing else will
+   ever name it again. Best effort, like the delete inside `load_with`: cliamp
+   not being there is the ordinary case, not a failure worth reporting. */
+pub fn forget(folder: &Path) {
+    if !installed() {
+        return;
+    }
+    let _ = cliamp(BIN, STORE, &["playlist", "delete", &stored(folder)]);
+}
+
 pub fn load(folder: &Path) -> Result<String> {
     load_with(BIN, STORE, IPC, folder)
 }

@@ -259,6 +259,8 @@ fn finish(
                 let _ = tx.send(Msg::Restart);
                 tracks.clear();
                 cfg.url = url;
+                // As in `start_url`: this playlist is not the last one.
+                cfg.folder = None;
                 let gate = cfg.pick;
                 result = pipeline(cfg, tx, cancel, tracks, gate).map_err(|e| e.to_string());
             }
@@ -358,6 +360,9 @@ fn open_shelf(
     let _ = tx.send(Msg::Playlist(shelf.name.clone()));
     let _ = tx.send(Msg::Folder(shelf.path.clone()));
     cfg.url = shelf.url.clone();
+    /* Carried onto the config so a later `S` writes back into this folder
+       rather than into whatever the playlist is called upstream. */
+    cfg.folder = manifest::load(&shelf.path).name;
     tracks.clear();
 
     let mut missing = 0;
@@ -522,6 +527,7 @@ fn resync(
         tracks.clear();
         let _ = tx.send(Msg::Restart);
         cfg.url = shelf.url.clone();
+        cfg.folder = manifest::load(&shelf.path).name;
 
         match pipeline(cfg, tx, cancel, tracks, false) {
             Ok(summary) => {
@@ -758,6 +764,100 @@ fn tag_tracks(
    file rather than living in this process. Nothing already downloaded is
    converted: the manifest names those files by the name they have, so they
    stay downloaded and stay in the format they arrived in. */
+/* The folder name is yt-dlp's `%(playlist)s`, which means it is chosen again
+   on every download: renaming it without recording the choice would last
+   until the next sync and then arrive back as a second folder. The `#name`
+   header is what makes it stick, and `cfg.folder` is what reads it. */
+fn rename_shelf(
+    cfg: &mut Config,
+    tx: &Sender<Msg>,
+    asker: &Asker,
+    tracks: &[Track],
+    folder: &Path,
+) -> Result<()> {
+    let current = folder
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .context("that folder has no name to change")?;
+    let Some(name) = asker.input_noted(
+        "Playlist name",
+        "renames the folder and its .m3u8  ·  tags are left alone",
+        &current,
+        Escape::Keep,
+    ) else {
+        return cancelled(tx);
+    };
+    let name = name.trim().to_string();
+    if name.is_empty() {
+        let _ = tx.send(Msg::Flash(format!("still called {current}")));
+        return Ok(());
+    }
+    /* Confirming the name a folder already has is how one renamed outside
+       earworm gets pinned. Nothing moves; the header is the whole point,
+       because without it the next sync fetches the playlist again under the
+       title it has upstream and leaves this folder sitting beside it. */
+    if name == current {
+        if manifest::load(folder).name.is_some() {
+            let _ = tx.send(Msg::Flash(format!("already keeping {name}")));
+            return Ok(());
+        }
+        manifest::set_name(folder, &name).with_context(|| {
+            format!("recording the name in {}", manifest::path(folder).display())
+        })?;
+        pin_open_run(cfg, tracks, folder, &name);
+        let _ = tx.send(Msg::Flash(format!("keeping the name {name}")));
+        return Ok(());
+    }
+    /* A separator would move the folder somewhere else entirely and a leading
+       dot would hide it, neither of which is what renaming means. */
+    if name.contains(['/', '\\']) || name.starts_with('.') {
+        bail!("a playlist name cannot contain a slash or start with a dot");
+    }
+    let parent = folder.parent().context("that folder has nowhere to sit")?;
+    let to = parent.join(&name);
+    if to.exists() {
+        bail!("{name} is already a folder here  ·  pick another name");
+    }
+
+    /* Before the move, since the stored name is built from the path this
+       folder has now: afterwards there is nothing left that names it. */
+    player::forget(folder);
+    std::fs::rename(folder, &to)
+        .with_context(|| format!("renaming {} to {name}", folder.display()))?;
+
+    /* The .m3u8 is named after its folder and `last_playlist` finds it that
+       way. Its entries are relative, so the move itself left them valid. */
+    let old_playlist = to.join(format!("{current}.m3u8"));
+    if old_playlist.is_file() {
+        let _ = std::fs::rename(&old_playlist, to.join(format!("{name}.m3u8")));
+    }
+    manifest::set_name(&to, &name)
+        .with_context(|| format!("recording the name in {}", manifest::path(&to).display()))?;
+
+    if pin_open_run(cfg, tracks, folder, &name) {
+        // The run on screen is this folder, so it has moved under it.
+        let _ = tx.send(Msg::Playlist(name.clone()));
+        let _ = tx.send(Msg::Folder(to.clone()));
+    }
+    let _ = tx.send(Msg::Library {
+        shelves: library(&cfg.dir),
+        show: false,
+    });
+    let _ = tx.send(Msg::Flash(format!("renamed to {name}")));
+    Ok(())
+}
+
+/* The open run has to follow its own folder: `S` would otherwise sync the
+   playlist back under the name it has upstream and leave this folder behind
+   as a copy. Reopening any other folder reads the header instead. */
+fn pin_open_run(cfg: &mut Config, tracks: &[Track], folder: &Path, name: &str) -> bool {
+    let ours = folder_of(tracks).as_deref() == Some(folder);
+    if ours {
+        cfg.folder = Some(name.to_string());
+    }
+    ours
+}
+
 fn set_format(cfg: &mut Config, tx: &Sender<Msg>, asker: &Asker) -> Result<()> {
     let options: Vec<String> = config::FORMATS
         .iter()
@@ -863,6 +963,10 @@ fn serve(
                 report(tx, set_format(cfg, tx, &asker));
                 None
             }
+            Cmd::Rename(folder) => {
+                report(tx, rename_shelf(cfg, tx, &asker, tracks, &folder));
+                None
+            }
             Cmd::Reveal(folder) => {
                 match player::reveal(&folder) {
                     Ok(said) => {
@@ -956,6 +1060,9 @@ fn start_url(
     let _ = tx.send(Msg::Restart);
     tracks.clear();
     cfg.url = url;
+    /* Load-bearing: a new playlist has no folder of its own yet, and the last
+       one's would pull every track of this one into that folder. */
+    cfg.folder = None;
     let gate = cfg.pick;
     Some(pipeline(cfg, tx, cancel, tracks, gate))
 }
@@ -1767,6 +1874,221 @@ pub mod tests {
        result from the text on screen turned a failed run into a successful
        one, so `earworm; echo $?` reported 0 after a playlist that could not
        be read. Reachable by backing out of "sync another playlist". */
+    /* The rename is the easy half: what makes it stick is the header, which
+       is what stops the next sync writing the playlist back under the name
+       YouTube gives it, beside the folder that was renamed. */
+    #[test]
+    fn renaming_a_playlist_moves_the_folder_and_records_the_name() {
+        let root = scratch("rename");
+        let from = root.join("Chill Evenings");
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::write(from.join("01 - A.opus"), "audio").unwrap();
+        std::fs::write(
+            from.join("Chill Evenings.m3u8"),
+            "#EXTM3U\n#EXTINF:1,A\n01 - A.opus\n",
+        )
+        .unwrap();
+        manifest::write_synced(
+            &from,
+            "https://example.com",
+            [("id1".to_string(), from.join("01 - A.opus"))].into_iter(),
+        )
+        .unwrap();
+
+        let mut cfg = config(true);
+        cfg.dir = root.clone();
+        let (tx, rx) = channel();
+        let asker = Asker {
+            tx: tx.clone(),
+            enabled: true,
+        };
+        let tracks: Vec<Track> = Vec::new();
+
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| rename_shelf(&mut cfg, &tx, &asker, &tracks, &from));
+            while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
+                if let Msg::Ask(crate::app::Prompt::Input { value, .. }, reply) = msg {
+                    // Prefilled with the name it has, which is what an edit is.
+                    assert_eq!(value, "Chill Evenings");
+                    reply.send(Reply::Text("Evenings".into())).unwrap();
+                    break;
+                }
+            }
+            worker.join().unwrap().unwrap();
+        });
+
+        let to = root.join("Evenings");
+        assert!(to.is_dir(), "the folder did not move");
+        assert!(!from.exists(), "the old folder is still there");
+        assert!(to.join("01 - A.opus").is_file(), "the tracks went missing");
+
+        /* Named after its folder, and `last_playlist` finds it that way; its
+           entries are relative, so the move itself left them valid. */
+        assert!(to.join("Evenings.m3u8").is_file(), "the .m3u8 kept the old name");
+        let listed = std::fs::read_to_string(to.join("Evenings.m3u8")).unwrap();
+        assert!(listed.contains("01 - A.opus"), "{listed}");
+
+        let after = manifest::load(&to);
+        assert_eq!(after.name.as_deref(), Some("Evenings"));
+        assert_eq!(after.url.as_deref(), Some("https://example.com"), "the URL went");
+        assert_eq!(after.entries.len(), 1, "the entries went");
+
+        // And the library the UI is about to draw is the renamed one.
+        let shelves: Vec<Shelf> = rx
+            .try_iter()
+            .filter_map(|m| match m {
+                Msg::Library { shelves, .. } => Some(shelves),
+                _ => None,
+            })
+            .last()
+            .expect("the library was never refreshed");
+        assert_eq!(shelves.iter().map(|s| s.name.clone()).collect::<Vec<_>>(), ["Evenings"]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /* A folder renamed in a file manager is already off its upstream title
+       and nothing records that, so the next sync fetches the playlist again
+       under the old name. Confirming the name it has is how it gets pinned,
+       and it is the one case where the answer is not a change. */
+    #[test]
+    fn confirming_the_name_a_folder_has_pins_it_without_moving_anything() {
+        let root = scratch("pinsame");
+        let folder = root.join("Evenings");
+        std::fs::create_dir_all(&folder).unwrap();
+        let track = folder.join("01 - A.opus");
+        std::fs::write(&track, "audio").unwrap();
+        manifest::write(
+            &folder,
+            "https://example.com",
+            [("id1".to_string(), track.clone())].into_iter(),
+        )
+        .unwrap();
+
+        let answer = |folder: &Path| {
+            let mut cfg = config(true);
+            cfg.dir = root.clone();
+            let (tx, rx) = channel();
+            let asker = Asker {
+                tx: tx.clone(),
+                enabled: true,
+            };
+            let tracks: Vec<Track> = Vec::new();
+            std::thread::scope(|scope| {
+                let worker = scope.spawn(|| rename_shelf(&mut cfg, &tx, &asker, &tracks, folder));
+                while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
+                    if let Msg::Ask(_, reply) = msg {
+                        reply.send(Reply::Text("Evenings".into())).unwrap();
+                        break;
+                    }
+                }
+                worker.join().unwrap().unwrap();
+                rx.try_iter()
+                    .filter_map(|m| match m {
+                        Msg::Flash(said) => Some(said),
+                        _ => None,
+                    })
+                    .last()
+                    .unwrap_or_default()
+            })
+        };
+
+        let said = answer(&folder);
+        assert_eq!(manifest::load(&folder).name.as_deref(), Some("Evenings"));
+        assert!(said.contains("keeping the name Evenings"), "{said}");
+        // Nothing moved, and nothing else in the sidecar was lost.
+        assert!(folder.is_dir() && track.is_file());
+        assert_eq!(manifest::load(&folder).url.as_deref(), Some("https://example.com"));
+        assert_eq!(manifest::load(&folder).entries.len(), 1);
+
+        /* Already pinned, so there is nothing to do; it still says so, since
+           a key that goes quiet reads as a key that is broken. */
+        let again = answer(&folder);
+        assert!(again.contains("already keeping Evenings"), "{again}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /* The header is only worth writing if something reads it. This is the
+       line that does: without it `S` on a renamed folder downloads the
+       playlist back under the name YouTube gives it. */
+    #[test]
+    fn opening_a_renamed_folder_pins_the_sync_to_it() {
+        let root = scratch("pin");
+        let folder = root.join("Evenings");
+        std::fs::create_dir_all(&folder).unwrap();
+        let track = folder.join("01 - A.opus");
+        std::fs::write(&track, "audio").unwrap();
+        manifest::write(&folder, "https://example.com", [("id1".to_string(), track.clone())].into_iter())
+            .unwrap();
+        let shelf = Shelf {
+            path: folder.clone(),
+            name: "Evenings".into(),
+            url: "https://example.com".into(),
+            tracks: 1,
+            missing: 0,
+            synced: None,
+            files: Vec::new(),
+        };
+
+        // Nobody has renamed it, so the folder is still the playlist's own
+        // name and a stale pin from an earlier folder has to be cleared.
+        let mut cfg = config(true);
+        cfg.dir = root.clone();
+        cfg.folder = Some("Something Else".into());
+        let mut tracks = Vec::new();
+        open_shelf(&mut cfg, &channel().0, &mut tracks, &shelf).unwrap();
+        assert_eq!(cfg.folder, None, "a folder kept the last one's name");
+
+        manifest::set_name(&folder, "Evenings").unwrap();
+        let mut tracks = Vec::new();
+        open_shelf(&mut cfg, &channel().0, &mut tracks, &shelf).unwrap();
+        assert_eq!(cfg.folder.as_deref(), Some("Evenings"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /* A name that is a path is a move, and one starting with a dot is a
+       folder nobody will see again. Neither is what renaming means. */
+    #[test]
+    fn a_rename_refuses_a_name_that_is_not_one() {
+        let root = scratch("renamebad");
+        let from = root.join("Focus");
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::create_dir_all(root.join("Taken")).unwrap();
+
+        let tried = |answer: &str| {
+            let mut cfg = config(true);
+            cfg.dir = root.clone();
+            let (tx, rx) = channel();
+            let asker = Asker {
+                tx: tx.clone(),
+                enabled: true,
+            };
+            let tracks: Vec<Track> = Vec::new();
+            std::thread::scope(|scope| {
+                let worker = scope.spawn(|| rename_shelf(&mut cfg, &tx, &asker, &tracks, &from));
+                while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
+                    if let Msg::Ask(_, reply) = msg {
+                        reply.send(Reply::Text(answer.into())).unwrap();
+                        break;
+                    }
+                }
+                worker.join().unwrap()
+            })
+        };
+
+        for bad in ["../elsewhere", ".hidden"] {
+            let err = tried(bad).unwrap_err().to_string();
+            assert!(err.contains("slash or start with a dot"), "{bad}: {err}");
+        }
+        let clash = tried("Taken").unwrap_err().to_string();
+        assert!(clash.contains("already a folder here"), "{clash}");
+        assert!(from.is_dir(), "a refused rename moved the folder anyway");
+
+        // The same name is not an error, it is nothing to do.
+        assert!(tried("Focus").is_ok());
+        assert!(from.is_dir());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     /* A message that says only what went wrong leaves the reader to work out
        what to do, and every one of these is reachable by pressing a key. */
     #[test]
@@ -2734,6 +3056,7 @@ pub mod tests {
             pick: true,
             intro: true,
             notify: true,
+            folder: None,
             extra: Vec::new(),
             acoustid_key: None,
         }

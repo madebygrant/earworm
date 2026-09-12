@@ -6,6 +6,7 @@ use ratatui::widgets::{
     Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
     ScrollbarState,
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{self, App, Confirm, Player, Prompt, Shelf, Status, View};
 use crate::manifest;
@@ -22,6 +23,14 @@ const MISSING_WIDTH: usize = 13;
 /// to recognise a song, short enough that it is not what pushed the counts
 /// off the row.
 const NOW_PLAYING: usize = 28;
+
+/* Columns, not characters. A Korean or Japanese glyph takes two cells and a
+   combining mark takes none, so a column padded to a character count is as
+   ragged as the title in it is wide: every CJK row in a list overshoots by
+   its own length and the dim columns after it step out of line. */
+fn cols(text: &str) -> usize {
+    UnicodeWidthStr::width(text)
+}
 
 fn dim(text: impl Into<String>) -> Span<'static> {
     Span::styled(text.into(), Style::new().fg(DIM))
@@ -229,7 +238,7 @@ fn draw_intro(frame: &mut Frame, ms: u64) {
     if ms > wave_at + 250 {
         let sign = format!("youtube playlists, tagged  ·  v{}", env!("CARGO_PKG_VERSION"));
         let sign = truncate(&sign, area.width as usize);
-        let at = area.x + (area.width - sign.chars().count() as u16) / 2;
+        let at = area.x + (area.width - cols(&sign) as u16) / 2;
         frame.render_widget(
             Paragraph::new(Line::from(dim(sign))),
             Rect::new(at, top + mark_rows + 3, area.right() - at, 1),
@@ -261,14 +270,14 @@ fn draw_band(frame: &mut Frame, area: Rect, left: String, mut right: String) {
     } else {
         Style::new().fg(INK).bg(GOLD)
     };
-    let used = left.chars().count();
+    let used = cols(&left);
     let mut spans = vec![Span::styled(left, band.add_modifier(Modifier::BOLD))];
     /* Paragraph styles only the cells it writes, so the padding is what keeps
        the gradient out. It runs to the full width even when that costs the
        hint: a torn band reads as a rendering fault. */
     let rest = width.saturating_sub(used);
-    let gap = if used + right.chars().count() <= width {
-        rest - right.chars().count()
+    let gap = if used + cols(&right) <= width {
+        rest - cols(&right)
     } else {
         right.clear();
         rest
@@ -378,8 +387,8 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         right.push(dim(app.settings.clone()));
     }
 
-    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
-    let wanted: usize = right.iter().map(|s| s.content.chars().count()).sum();
+    let used: usize = spans.iter().map(|s| cols(&s.content)).sum();
+    let wanted: usize = right.iter().map(|s| cols(&s.content)).sum();
     let width = area.width as usize;
     // Dropped whole rather than truncated: half a progress bar is a lie.
     if used + wanted + 2 <= width {
@@ -411,7 +420,7 @@ fn bar(percent: u16, width: usize) -> (String, String) {
             done.push(['─', '╴', '╴', '╌', '╌', '╍', '╍', '━'][part]);
         }
     }
-    let rest = width.saturating_sub(done.chars().count());
+    let rest = width.saturating_sub(cols(&done));
     (done, "─".repeat(rest))
 }
 
@@ -470,7 +479,7 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
     app.viewport = area.height as usize;
     let longest = rows
         .iter()
-        .map(|pos| app.library[*pos].name.chars().count())
+        .map(|pos| cols(&app.library[*pos].name))
         .max()
         .unwrap_or(0);
     let name_width = longest.min(width.saturating_sub(40).max(12));
@@ -480,7 +489,7 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|row| {
             let (row, shelf) = (*row, &app.library[*row]);
             let name = truncate(&shelf.name, name_width);
-            let pad = name_width.saturating_sub(name.chars().count());
+            let pad = name_width.saturating_sub(cols(&name));
             let mut spans = vec![
                 Span::styled(
                     if row == selected { "▌" } else { " " },
@@ -705,7 +714,7 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
        line up instead of stepping in and out with each title's length. */
     let longest = rows
         .iter()
-        .map(|pos| app.tracks[*pos].name.chars().count())
+        .map(|pos| cols(&app.tracks[*pos].name))
         .max()
         .unwrap_or(0);
     let name_width = longest.min(width.saturating_sub(STATUS_WIDTH + 9).max(12));
@@ -757,7 +766,7 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
             }
             let tail = bits.join("  ");
             let name = truncate(&track.name, name_width);
-            let pad = name_width.saturating_sub(name.chars().count());
+            let pad = name_width.saturating_sub(cols(&name));
             spans.push(Span::styled(format!("  {name}"), row_style(selected)));
             if !tail.is_empty() {
                 spans.push(dim(format!("{:pad$}  {tail}", "")));
@@ -906,15 +915,15 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     /* Room for the widest two statuses plus their counts, or the tally goes
        and the hint that displaced it is one `h` away anyway. */
     const TALLY_FLOOR: usize = 24;
-    let taken: usize = hints.iter().map(|(t, _)| t.chars().count()).sum();
-    let wanted: usize = extra.iter().map(|(t, _)| t.chars().count()).sum();
+    let taken: usize = hints.iter().map(|(t, _)| cols(t)).sum();
+    let wanted: usize = extra.iter().map(|(t, _)| cols(t)).sum();
     if taken + wanted + TALLY_FLOOR <= width {
         // Ahead of `h keys`, which is the last word on every screen.
         let tail = hints.split_off(hints.len() - 1);
         hints.extend(extra);
         hints.extend(tail);
     }
-    let reserved: usize = hints.iter().map(|(t, _)| t.chars().count()).sum();
+    let reserved: usize = hints.iter().map(|(t, _)| cols(t)).sum();
 
     /* The hints are the part you cannot recover by looking elsewhere, so both
        the summary and the tally give way before they do. Every status in the
@@ -928,7 +937,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             .map(|(status, count)| (status, format!("{count} {}  ", status.label())))
             .collect()
     };
-    let total: usize = tally.iter().map(|(_, t)| t.chars().count()).sum();
+    let total: usize = tally.iter().map(|(_, t)| cols(t)).sum();
     let budget = width.saturating_sub(reserved);
     // One cell for the ellipsis, and only when something is actually dropped.
     let limit = budget.saturating_sub(if 1 + total > budget { 1 } else { 0 });
@@ -937,11 +946,11 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let mut used = 1;
     let mut dropped = false;
     for (status, text) in tally {
-        if used + text.chars().count() > limit {
+        if used + cols(&text) > limit {
             dropped = true;
             break;
         }
-        used += text.chars().count();
+        used += cols(&text);
         spans.push(Span::styled(text, Style::new().fg(status.color())));
     }
     if dropped && used < budget {
@@ -976,7 +985,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         }
         None => (String::new(), Style::new()),
     };
-    let pad = room.saturating_sub(middle.chars().count());
+    let pad = room.saturating_sub(cols(&middle));
     spans.push(Span::styled(middle, style));
     spans.push(Span::raw(" ".repeat(pad)));
     for (text, style) in hints {
@@ -998,6 +1007,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
         rows.extend([
             ("open", "enter", "read this playlist off disk"),
             ("", "O", "this folder in the file manager"),
+            ("name", "e", "rename this playlist"),
             ("find", "/", "filter by name"),
             ("", "o", "order: name, last synced, most missing"),
         ]);
@@ -1126,10 +1136,13 @@ fn draw_help(frame: &mut Frame, app: &App) {
                     Style::new().fg(status.color()),
                 ));
             }
+            /* Two columns of air whatever the row holds: `no match` is
+               eight characters in a nine-wide cell, so a full row ran its
+               gloss straight into the last status word. */
             spans.push(dim(format!(
                 "{:pad$}{gloss}",
                 "",
-                pad = (slots - statuses.len()) * 9
+                pad = (slots - statuses.len()) * 9 + 2
             )));
             lines.push(Line::from(spans));
         }
@@ -1322,13 +1335,25 @@ fn truncate(text: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
     }
-    if text.chars().count() <= width {
+    if cols(text) <= width {
         return text.to_string();
     }
-    text.chars()
-        .take(width.saturating_sub(1))
-        .collect::<String>()
-        + "…"
+    /* Stops before a glyph that would straddle the edge rather than spilling
+       a column into the next field, so the result can come back one column
+       short. Every caller pads to the column count, which absorbs that. */
+    let room = width - 1;
+    let mut out = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + w > room {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    out.push('…');
+    out
 }
 
 /// Greedy word wrap, hard-splitting any single word too long for the box.
@@ -1341,7 +1366,7 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     }
     let indent: String = text.chars().take_while(|c| *c == ' ').collect();
     if !indent.is_empty() {
-        let room = width.saturating_sub(indent.chars().count()).max(1);
+        let room = width.saturating_sub(indent.len()).max(1);
         let mut lines = wrap(&text[indent.len()..], room);
         lines[0] = format!("{indent}{}", lines[0]);
         return lines;
@@ -1350,15 +1375,16 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
     let mut line = String::new();
     for word in text.split(' ') {
         let mut word = word;
-        while word.chars().count() > width {
+        // A word with no break in it, which a path or a CJK title often is.
+        while cols(word) > width {
             if !line.is_empty() {
                 out.push(std::mem::take(&mut line));
             }
-            let head: String = word.chars().take(width).collect();
+            let head = take_cols(word, width);
             word = &word[head.len()..];
             out.push(head);
         }
-        let joined = line.chars().count() + 1 + word.chars().count();
+        let joined = cols(&line) + 1 + cols(word);
         if !line.is_empty() && joined > width {
             out.push(std::mem::take(&mut line));
         }
@@ -1367,7 +1393,33 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
         }
         line.push_str(word);
     }
-    out.push(line);
+    /* A word that filled whole lines by itself leaves nothing here, and a
+       blank row at the end of a popup is a row it did not need. An empty
+       input still gets its one line, since callers expect one. */
+    if !line.is_empty() || out.is_empty() {
+        out.push(line);
+    }
+    out
+}
+
+/// As much of `text` as fits in `width` columns, never splitting a glyph
+/// across the edge.
+fn take_cols(text: &str, width: usize) -> String {
+    let mut out = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + w > width {
+            break;
+        }
+        out.push(c);
+        used += w;
+    }
+    /* A width of one against a two-column glyph would otherwise take nothing
+       and loop forever; one glyph over the edge is the lesser fault. */
+    if out.is_empty() {
+        out.extend(text.chars().next());
+    }
     out
 }
 
@@ -1505,6 +1557,15 @@ mod tests {
         assert!(long.contains("Prescription for Sleep"), "{long:?}");
         assert!(!long.contains("Arrangement"), "the title ran the length it liked: {long:?}");
 
+        /* A CJK title is twice the columns of its characters, and the bar
+           budgets by columns: counted as characters it fitted on paper and
+           pushed `h keys` off the end of the real row. */
+        /* Matched on the ASCII half: a double-width glyph occupies one cell
+           and leaves the next one blank, so the joined row reads "시 작". */
+        let korean = bar(120, Some("시작 - Gaho"));
+        assert!(korean.contains("Gaho"), "{korean:?}");
+        assert!(korean.contains("h keys"), "the last hint was pushed off: {korean:?}");
+
         let tight = bar(64, Some("Vogel im Käfig"));
         assert!(!tight.contains("Vogel"), "the title pushed the counts off: {tight:?}");
         assert!(tight.contains("120 ok"), "{tight:?}");
@@ -1608,6 +1669,113 @@ mod tests {
         assert!(screen.contains("YouTube playlist URL"), "{screen}");
         assert!(screen.contains("a playlist or a single video"), "{screen}");
         assert!(screen.contains("esc quits"), "{screen}");
+    }
+
+    /* The widest status is `no match` at eight characters in a nine-wide
+       cell, so a row holding three of them ran the gloss into the last word
+       and read as "no match a guess, worth a look". */
+    #[test]
+    fn the_status_legend_keeps_its_glosses_clear_of_the_words() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.tracks = spread();
+        app.done = Some(Ok(String::new()));
+        app.intro_done = true;
+        app.show_help = true;
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let screen: Vec<String> = (0..40)
+            .map(|y| (0..120).map(|x| buffer[(x, y)].symbol().to_string()).collect())
+            .collect();
+
+        let row = screen
+            .iter()
+            .find(|r| r.contains("a guess, worth a look"))
+            .expect("the legend did not draw");
+        assert!(row.contains("no match  "), "the gloss is touching the word: {row:?}");
+        /* The other three rows of the same block, taken by position: their
+           glosses are words that also appear among the key descriptions. */
+        let at = screen.iter().position(|r| r == row).unwrap();
+        for (n, gloss) in [(-1i32, "confirmed"), (1, "not touched this run"), (2, "l has the reason")]
+        {
+            let line = &screen[(at as i32 + n) as usize];
+            let found = line.find(gloss).unwrap_or_else(|| panic!("{gloss}: {line:?}"));
+            assert!(line[..found].ends_with("  "), "{gloss}: {line:?}");
+        }
+    }
+
+    /* A Korean or Japanese glyph takes two cells, so a column padded to a
+       character count is as ragged as the titles in it are wide: the dim
+       columns after the name stepped out of line by the length of every CJK
+       title on the screen. */
+    #[test]
+    fn a_column_of_cjk_titles_lines_up_with_an_ascii_one() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.tracks = vec![
+            track_named(1, "시작 - Gaho"),
+            track_named(2, "Your Existence - Wonstein"),
+            track_named(3, "우리가 헤어져야 했던 이유 - BIBI"),
+            track_named(4, "Flower - Yoonmirae"),
+        ];
+        for track in &mut app.tracks {
+            track.status = Status::Have;
+            track.source = "on disk".into();
+        }
+        app.done = Some(Ok(String::new()));
+        app.intro_done = true;
+        let mut terminal = Terminal::new(TestBackend::new(90, 10)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        /* Which cell the source column starts in. Measured per cell and not
+           by a string offset: a double-width glyph occupies one cell and
+           leaves the next one empty, so a position in the joined string is
+           not a position on the screen, which is the bug itself. */
+        let starts: Vec<usize> = (2..6)
+            .map(|y| {
+                let cells: Vec<String> =
+                    (0..90).map(|x| buffer[(x, y)].symbol().to_string()).collect();
+                let at = |from: usize| {
+                    (from..cells.len() - 7)
+                        .find(|x| cells[*x..*x + 7].concat() == "on disk")
+                        .expect("no source column on this row")
+                };
+                // The second one: the first is the status word in its column.
+                at(at(0) + 7)
+            })
+            .collect();
+        assert_eq!(
+            starts.iter().collect::<std::collections::HashSet<_>>().len(),
+            1,
+            "the source column is ragged: {starts:?}"
+        );
+    }
+
+    /// Cutting a title by characters overshoots its column by every
+    /// double-width glyph in it, and can leave half a glyph on the edge.
+    #[test]
+    fn truncation_and_wrapping_count_columns() {
+        assert_eq!(super::cols("시작"), 4);
+        assert_eq!(super::cols("Gaho"), 4);
+
+        // Eight columns is four of these, and the ellipsis costs one.
+        let cut = super::truncate("시작하는 우리", 8);
+        assert!(super::cols(&cut) <= 8, "{cut} is {} columns", super::cols(&cut));
+        assert!(cut.ends_with('…'), "{cut}");
+        // A title that already fits is left exactly as it is.
+        assert_eq!(super::truncate("시작", 4), "시작");
+
+        for line in super::wrap("우리가 헤어져야 했던 이유 - BIBI", 12) {
+            assert!(super::cols(&line) <= 12, "{line} is {} columns", super::cols(&line));
+        }
+        /* One column against a two-column glyph: one glyph over the edge is
+           the lesser fault, and taking nothing would never terminate. */
+        assert_eq!(super::wrap("시작", 1), vec!["시", "작"]);
+        // A word that filled its lines exactly leaves no blank row behind.
+        assert_eq!(super::wrap("abcdef", 3), vec!["abc", "def"]);
+        assert_eq!(super::wrap("", 5), vec![""], "callers expect one line");
     }
 
     /* The row truncates `was` at 32 characters, and the part it cuts is

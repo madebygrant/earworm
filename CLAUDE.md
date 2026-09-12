@@ -579,6 +579,29 @@ call and file write. Nothing that blocks touches the render loop.
   `♪ cliamp ▶` or `⏸` rather than leaving the transport to the colour. A
   terminal without colour, and a reader who cannot separate amber from dim,
   see the same states everyone else does.
+- **A playlist's folder is `%(playlist)s`, chosen again on every download.**
+  So renaming it is not a display change: without the `#name` header the next
+  sync writes the upstream title again and the whole playlist lands beside the
+  renamed folder. `manifest::set_name` records it, `open_shelf` and `resync`
+  read it onto `cfg.folder`, and `output_template` is where it takes effect.
+  Every path that starts a run sets or clears `cfg.folder`: a new URL must
+  clear it, or that playlist is pulled into the last one's folder.
+- **Confirming the name a folder already has writes the header.** It is the
+  only way a folder renamed in a file manager can be pinned, and it is the one
+  answer to that prompt that is not a change. Already pinned says so rather
+  than going quiet.
+- **A recorded name goes into a yt-dlp template, where `%` opens a field.**
+  `folder_field` escapes it, or a playlist called `100% Hits` writes somewhere
+  nobody asked for.
+- **`manifest::write` and `write_synced` carry the name through.** A tag edit
+  or a sync that dropped the header would quietly un-rename the folder at the
+  next download.
+- **The rename drops cliamp's stored copy first.** The stored name is built
+  from the folder's name and the hash of its path, so after the move nothing
+  names the old entry and it would sit in cliamp's store for good.
+- **The `.m3u8` is renamed with the folder and never rewritten.** It is named
+  after its folder, `last_playlist` finds it that way, and its entries are
+  relative, so the move itself leaves them valid.
 - **`O` reveals, `o` orders.** The sort came first and a key that means two
   things on one screen is worse than a new one.
 - **`player::reveal` takes the binary, like the cliamp calls do.** A test that
@@ -588,6 +611,23 @@ call and file write. Nothing that blocks touches the render loop.
 
 ### Text, subprocesses and keys
 
+- **A column is not a character.** `cols()` is `unicode-width`, and every
+  padding, truncation, wrap and width budget on screen goes through it. Padded
+  to a character count, a column is ragged by the width of whatever CJK is in
+  it: one Korean title threw the dim columns after it out by its own length,
+  and the status bar, budgeting the same way, pushed `h keys` off the end of a
+  row it believed still had room. The caret stays a char index, because typing
+  moves by character and not by column.
+- **`truncate` stops before a glyph that would straddle the edge,** so it can
+  come back a column short rather than spilling into the next field. Callers
+  pad to the column count, which absorbs it.
+- **`take_cols` always takes at least one glyph.** A width of one against a
+  two-column glyph would otherwise take nothing, and `wrap`'s loop would never
+  end.
+- **A `TestBackend` row is cells, not a string.** A double-width glyph fills
+  one cell and leaves the next blank, so `row.find("…")` on the joined string
+  is not a column and an assertion built on it cannot see this bug at all.
+  Compare cell by cell, or assert on the ASCII half.
 - **Byte indexing over a lowercased copy of a string is wrong.**
   `to_lowercase()` doesn't preserve byte length (U+212A shrinks, U+0130 grows).
   Work in chars.

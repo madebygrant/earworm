@@ -246,6 +246,9 @@ pub enum Cmd {
     /// Put the last tag write back. One level: the point is the edit you
     /// have just seen land on the row, not a history to walk.
     Undo,
+    /// Rename a playlist's folder. Carries the folder rather than the row,
+    /// for the same reason `Open` does.
+    Rename(PathBuf),
     /// Hand a folder to the platform's file manager. Everything downstream of
     /// earworm happens there or in a player, and the alternative is retyping
     /// a path the screen is already showing.

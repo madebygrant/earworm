@@ -490,6 +490,14 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         /* `O` and not `o`, which already cycles the order. Everything
            downstream of earworm happens in a file manager or a player, and
            the alternative is retyping a path the screen is showing. */
+        /* `e` edits a track on the other screen, so it edits the playlist
+           here: this list's rows are folders, and the name is all there is
+           on one to change. */
+        KeyCode::Char('e') if app.can_browse() => {
+            if let Some(folder) = app.selected_shelf().map(|s| s.path.clone()) {
+                app.send(Cmd::Rename(folder));
+            }
+        }
         KeyCode::Char('O') if app.can_browse() => {
             if let Some(folder) = app.selected_shelf().map(|s| s.path.clone()) {
                 app.send(Cmd::Reveal(folder));
