@@ -4,7 +4,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 
 use crate::app::{Msg, Status, Track};
 use crate::config::Config;
@@ -49,7 +49,15 @@ pub struct Listing {
 /// One request instead of one per video, which is a second rather than half a
 /// minute; the paths match what the real download computes.
 pub fn scan(cfg: &Config) -> Result<Listing> {
-    let out = Command::new("yt-dlp")
+    scan_with("yt-dlp", cfg)
+}
+
+/// Takes the binary so a test can hand it a stub and read back the arguments
+/// this actually ran with. The predicted filename is the whole point of the
+/// scan, and a test of the helper that builds the template passes whatever
+/// the call site chooses to do with it.
+fn scan_with(bin: &str, cfg: &Config) -> Result<Listing> {
+    let out = Command::new(bin)
         .args([
             "--skip-download",
             "--quiet",
@@ -66,7 +74,7 @@ pub fn scan(cfg: &Config) -> Result<Listing> {
         .args(&cfg.extra)
         .arg(&cfg.url)
         .output()
-        .context("yt-dlp not found on PATH")?;
+        .map_err(|e| anyhow::anyhow!(crate::deps::launch_error(bin, &e)))?;
 
     let mut tracks = Vec::new();
     for line in String::from_utf8_lossy(&out.stdout).lines() {
@@ -117,7 +125,10 @@ pub fn scan(cfg: &Config) -> Result<Listing> {
             .rev()
             .find(|l| !l.trim().is_empty())
             .unwrap_or("no detail from yt-dlp");
-        bail!("could not read the playlist: {}", detail.trim());
+        bail!(
+            "could not read the playlist: {}  ·  check the link is public",
+            detail.trim()
+        );
     }
     Ok(Listing {
         tracks,
@@ -236,7 +247,9 @@ pub fn run(cfg: &Config, tracks: &mut [Track], tx: &Sender<Msg>) -> Result<()> {
     cmd.arg(&cfg.url);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    let mut child = cmd.spawn().context("yt-dlp not found on PATH")?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow::anyhow!(crate::deps::launch_error("yt-dlp", &e)))?;
     CHILD.store(child.id(), Ordering::SeqCst);
 
     let errors = child.stderr.take().unwrap();
@@ -293,7 +306,7 @@ pub fn run(cfg: &Config, tracks: &mut [Track], tx: &Sender<Msg>) -> Result<()> {
     CHILD.store(0, Ordering::SeqCst);
     let _ = pump.join();
     if !status.success() {
-        bail!("yt-dlp exited with {status}");
+        bail!("yt-dlp exited with {status}  ·  l has its output");
     }
     Ok(())
 }
@@ -303,15 +316,60 @@ mod tests {
     use super::*;
 
     /* A predicted filename that misses the extension makes every track look
-       absent, so the run downloads a folder it already has. */
+       absent, so the run downloads a folder it already has. Driven through a
+       stub rather than against `scan_template`: asserting on the helper left
+       the call site free to pass anything, which is exactly the regression
+       this is here to catch. */
     #[test]
     fn the_scan_predicts_filenames_in_the_chosen_format() {
-        let mut cfg = crate::worker::tests::config(true);
-        cfg.dir = PathBuf::from("/tmp/music");
-        cfg.format = "vorbis".into();
-        assert!(scan_template(&cfg).ends_with(".ogg"), "{}", scan_template(&cfg));
-        cfg.format = "opus".into();
-        assert!(scan_template(&cfg).ends_with(".opus"), "{}", scan_template(&cfg));
+        let output_for = |format: &str| {
+            let dir = std::env::temp_dir()
+                .join(format!("earworm-scan-{format}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let bin = dir.join("yt-dlp");
+            let log = dir.join("log");
+            // One argument per line: a template carries spaces, so a
+            // space-joined line could not be split back into arguments.
+            std::fs::write(
+                &bin,
+                format!(
+                    "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\" >> \"{}\"; done\n\
+                     printf 'id1\t1\tTitle\t{}\n'\n",
+                    log.display(),
+                    dir.join("music").join("track").display()
+                ),
+            )
+            .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+
+            let mut cfg = crate::worker::tests::config(true);
+            cfg.dir = dir.join("music");
+            cfg.format = format.into();
+            scan_with(&bin.display().to_string(), &cfg).unwrap();
+
+            let args: Vec<String> = std::fs::read_to_string(&log)
+                .unwrap()
+                .lines()
+                .map(str::to_string)
+                .collect();
+            let at = args
+                .iter()
+                .position(|a| a == "--output")
+                .expect("the scan named no output template");
+            let template = args[at + 1].clone();
+            let _ = std::fs::remove_dir_all(&dir);
+            template
+        };
+
+        for (format, ext) in [("vorbis", ".ogg"), ("opus", ".opus"), ("mp3", ".mp3")] {
+            let template = output_for(format);
+            assert!(template.ends_with(ext), "{format} scanned for {template}");
+        }
     }
 
     /* The archive is what keeps yt-dlp off a track the run was not asked for,

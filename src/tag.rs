@@ -190,7 +190,7 @@ pub fn identify(
     if cfg.fix
         && asker.enabled
         && unresolved
-        && let Some(typed) = manual(path, asker, &out.artist, &out.title)
+        && let Some(typed) = manual(path, asker, &out.artist, &out.title, index)
     {
         out.status = Status::Manual;
         out.source = "typed".into();
@@ -203,10 +203,21 @@ pub fn identify(
     Ok(out)
 }
 
-fn manual(path: &Path, asker: &Asker, artist: &str, title: &str) -> Option<Match> {
+fn manual(path: &Path, asker: &Asker, artist: &str, title: &str, index: usize) -> Option<Match> {
     let name = path.file_name()?.to_string_lossy().to_string();
-    let new_artist = asker.input(&format!("Artist for {name}"), artist)?;
-    let new_title = asker.input(&format!("Title for {name}"), title)?;
+    let answers = asker.form(
+        &format!("track {index}"),
+        &name,
+        vec![
+            ("artist".into(), artist.to_string()),
+            ("title".into(), title.to_string()),
+        ],
+        crate::app::Escape::Skip,
+    )?;
+    let [new_artist, new_title] = answers.as_slice() else {
+        return None;
+    };
+    let (new_artist, new_title) = (new_artist.clone(), new_title.clone());
     if new_artist.is_empty() || new_title.is_empty() {
         return None;
     }
@@ -300,20 +311,32 @@ mod tests {
     use super::{image_extension, open, read, set_fields};
     use std::path::{Path, PathBuf};
 
-    /// Silent, untagged and in whatever container the codec implies, which is
-    /// the case `with_tag` has to insert a tag for.
-    fn bare(at: &Path, codec: &str) -> Option<()> {
+    /* Silent, untagged and in whatever container the codec implies, which is
+       the case `with_tag` has to insert a tag for. Several candidates per
+       format because the encoder's name is a property of the ffmpeg build:
+       this one has no `libvorbis` and ships the native `vorbis` instead. */
+    fn bare(at: &Path, codecs: &[&str]) -> Option<()> {
+        codecs.iter().any(|codec| encode(at, codec)).then_some(())
+    }
+
+    fn encode(at: &Path, codec: &str) -> bool {
         let mut cmd = std::process::Command::new("ffmpeg");
-        cmd.args(["-v", "error", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono"])
+        // Stereo: ffmpeg's own vorbis encoder refuses anything else.
+        cmd.args(["-v", "error", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo"])
             .args(["-t", "0.2", "-map_metadata", "-1", "-c:a", codec])
+            // That encoder is also marked experimental in some builds.
+            .args(["-strict", "-2"])
             /* Otherwise ffmpeg stamps an encoder tag of its own and the file
                arrives already tagged, which is not the case under test. */
             .args(["-fflags", "+bitexact", "-flags:a", "+bitexact"]);
-        // The only one of the three that can be written with no tag at all.
+        // The only one of them that can be written with no tag at all.
         if codec == "libmp3lame" {
             cmd.args(["-id3v2_version", "0", "-write_id3v1", "0"]);
         }
-        cmd.arg("-y").arg(at).status().ok()?.success().then_some(())
+        cmd.arg("-y")
+            .arg(at)
+            .status()
+            .is_ok_and(|status| status.success())
     }
 
     /* A tag type the container does not take is refused outright, and a file
@@ -325,16 +348,30 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("earworm-tagtypes-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let mut untagged = 0;
-        for (codec, ext) in [("libmp3lame", "mp3"), ("aac", "m4a"), ("flac", "flac")] {
-            let file: PathBuf = dir.join(format!("track.{ext}"));
-            if bare(&file, codec).is_none() {
+        // Named rather than counted: every container but mp3 carries a tag
+        // block by definition, so this says which fixture is doing the work.
+        let mut untagged: Vec<&str> = Vec::new();
+        /* Driven off FORMATS, so a format added to the table without a
+           container earworm can tag fails here rather than at the end of
+           somebody's download. */
+        for (format, ext) in crate::config::FORMATS {
+            let codecs: &[&str] = match format {
+                "opus" => &["libopus", "opus"],
+                "m4a" => &["aac", "libfdk_aac"],
+                "mp3" => &["libmp3lame", "mp3"],
+                "flac" => &["flac"],
+                "vorbis" => &["libvorbis", "vorbis"],
+                "alac" => &["alac"],
+                other => panic!("{other} has no codec here, so nothing tests its container"),
+            };
+            let file: PathBuf = dir.join(format!("{format}.{ext}"));
+            if bare(&file, codecs).is_none() {
                 eprintln!("skipped {ext}: ffmpeg could not write it");
                 continue;
             }
             use lofty::file::TaggedFileExt;
             if open(&file).unwrap().primary_tag().is_none() {
-                untagged += 1;
+                untagged.push(format);
             }
             set_fields(&file, "Kraftwerk", "Autobahn").unwrap_or_else(|e| panic!("{ext}: {e}"));
             let back = read(&file).unwrap();
@@ -342,7 +379,7 @@ mod tests {
         }
         /* The branch under test only runs for a file with no tag, so a
            fixture that arrives tagged would pass while saying nothing. */
-        assert!(untagged > 0, "every fixture came with a tag already");
+        assert!(!untagged.is_empty(), "every fixture came with a tag already");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

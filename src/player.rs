@@ -18,6 +18,9 @@ const IPC: Duration = Duration::from_secs(2);
 /// Importing reads the tags off every file, which for a long playlist is
 /// genuinely slow, and killing it part-way would leave cliamp's store torn.
 const STORE: Duration = Duration::from_secs(30);
+/// The opener hands off to a desktop process and returns; on a machine with
+/// no session behind it, `xdg-open` is the one that sits there instead.
+const OPEN: Duration = Duration::from_secs(5);
 
 /// The `.m3u8` earworm writes beside a folder's tracks.
 pub fn playlist_file(folder: &Path) -> PathBuf {
@@ -81,11 +84,17 @@ pub fn probe() -> Playback {
     if !installed() {
         return Playback::default();
     }
-    let text = cliamp(BIN, IPC, &["status", "--json"]).map_or_else(String::new, |(_, s)| s);
+    read_status(&cliamp(BIN, IPC, &["status", "--json"]).map_or_else(String::new, |(_, s)| s))
+}
+
+/* Kept apart from the process so the shape cliamp actually emits can be
+   tested as text: `probe` reaches a socket, and a test of it would be a test
+   of whether this machine happens to have cliamp up. */
+fn read_status(text: &str) -> Playback {
     /* Parsed rather than exit-code checked: a stopped cliamp prints its "not
        running" line instead of JSON, so failing to parse is the same answer
        and one probe covers both questions. */
-    let Ok(state) = serde_json::from_str::<Value>(&text) else {
+    let Ok(state) = serde_json::from_str::<Value>(text) else {
         return Playback {
             player: Player::Stopped,
             ..Playback::default()
@@ -94,6 +103,13 @@ pub fn probe() -> Playback {
     Playback {
         player: Player::Running,
         folder: folder_of(state.pointer("/track/path").and_then(Value::as_str)),
+        /* cliamp's own title, which is the tags it read rather than the
+           filename: for a track earworm wrote, that is the corrected name. */
+        track: state
+            .pointer("/track/title")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .filter(|t| !t.trim().is_empty()),
         playing: state.get("state").and_then(Value::as_str) == Some("playing"),
     }
 }
@@ -109,13 +125,57 @@ fn folder_of(path: Option<&str>) -> Option<PathBuf> {
 /// Play/pause, which cliamp applies to whatever it has loaded. Nothing is
 /// reported back: `serve` re-probes the moment it finishes with a command, so
 /// the indicator is the answer.
+/* The platform's own opener, which is the only thing that knows what the
+   user's file manager is. Not on the UI thread: it is a subprocess like every
+   other, and `xdg-open` on a machine with no desktop session can sit there. */
+pub fn reveal(folder: &Path) -> Result<String> {
+    let Some(bin) = opener() else {
+        bail!("no file manager to open this with  ·  the path is in the header");
+    };
+    reveal_with(bin, folder)
+}
+
+/// The platform's opener, or `None` where there is not one to name.
+fn opener() -> Option<&'static str> {
+    if cfg!(target_os = "macos") {
+        Some("open")
+    } else if cfg!(target_os = "linux") {
+        Some("xdg-open")
+    } else {
+        None
+    }
+}
+
+/* Takes the binary, like the cliamp calls do: a test that ran the real one
+   would open a window on the machine running the suite. */
+fn reveal_with(bin: &str, folder: &Path) -> Result<String> {
+    let name = folder
+        .file_name()
+        .map_or_else(|| folder.display().to_string(), |n| n.to_string_lossy().into());
+    match lookup::run_bounded(
+        Command::new(bin)
+            .arg(folder)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+        OPEN,
+    ) {
+        None => bail!("{bin} did not answer  ·  the path is in the header"),
+        Some(out) if !out.status.success() => {
+            let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            let detail = if said.is_empty() { format!("{bin} refused it") } else { said };
+            bail!("{detail}");
+        }
+        Some(_) => Ok(format!("opened {name} in the file manager")),
+    }
+}
+
 pub fn toggle() -> Result<()> {
     toggle_with(BIN, IPC)
 }
 
 fn toggle_with(bin: &str, limit: Duration) -> Result<()> {
     match cliamp(bin, limit, &["toggle"]) {
-        None => bail!("cliamp did not answer"),
+        None => bail!("cliamp did not answer  ·  check it is still running"),
         Some((false, why)) => bail!("{why}"),
         Some((true, _)) => Ok(()),
     }
@@ -138,16 +198,16 @@ pub fn load(folder: &Path) -> Result<String> {
 fn load_with(bin: &str, store: Duration, ipc: Duration, folder: &Path) -> Result<String> {
     let playlist = playlist_file(folder);
     if !playlist.is_file() {
-        bail!("no .m3u8 to play; run with --no-m3u8 off");
+        bail!("no .m3u8 in this folder  ·  sync it again without --no-m3u8");
     }
     let Some(file) = playlist.to_str() else {
-        bail!("playlist path is not valid UTF-8");
+        bail!("playlist path is not valid UTF-8  ·  rename the folder and sync again");
     };
     let name = stored(folder);
 
     let _ = cliamp(bin, store, &["playlist", "delete", &name]);
     let imported = match cliamp(bin, store, &["playlist", "import", "--name", &name, file]) {
-        None => bail!("cliamp did not answer"),
+        None => bail!("cliamp did not answer  ·  check it is still running"),
         Some((false, why)) => bail!("{why}"),
         // cliamp counted the tracks it took, which is better than a guess.
         Some((true, said)) => said,
@@ -175,6 +235,91 @@ mod tests {
 
     /// A stand-in `cliamp` that logs its argv and exits by the rules given as
     /// `case` lines, so the call sequence can be asserted without cliamp.
+    /* The payload cliamp actually emits, kept verbatim: the folder says which
+       library row is on air and the title is the only thing that says which
+       song, which is the question anyone has of a player. */
+    #[test]
+    fn a_status_payload_gives_up_the_folder_the_title_and_the_transport() {
+        let json = r#"{
+          "ok": true,
+          "state": "paused",
+          "track": {
+            "title": "Vogel im Käfig - Attack on Titan Jazz",
+            "path": "/Users/me/Music/Attack on Titan/05 - Jazz - Vogel im Käfig.opus",
+            "duration_secs": 457,
+            "index": 4
+          },
+          "position": 54.781,
+          "total": 16
+        }"#;
+        let now = read_status(json);
+        assert_eq!(now.player, Player::Running);
+        assert!(!now.playing, "paused was read as playing");
+        assert_eq!(now.folder.as_deref(), Some(Path::new("/Users/me/Music/Attack on Titan")));
+        assert_eq!(now.track.as_deref(), Some("Vogel im Käfig - Attack on Titan Jazz"));
+
+        let playing = read_status(&json.replace("\"paused\"", "\"playing\""));
+        assert!(playing.playing);
+
+        /* A stopped cliamp prints its own line instead of JSON, and that is
+           the same answer as a failed parse. */
+        let stopped = read_status("cliamp is not running\n");
+        assert_eq!(stopped.player, Player::Stopped);
+        assert_eq!(stopped.track, None);
+
+        // A stream has a URL for a path and no folder behind it.
+        let stream = read_status(r#"{"state":"playing","track":{"title":"BBC 6","path":"https://stream"}}"#);
+        assert_eq!(stream.folder, None);
+        assert_eq!(stream.track.as_deref(), Some("BBC 6"));
+
+        // Nothing loaded at all, which is not the same as nothing playing.
+        let idle = read_status(r#"{"state":"stopped"}"#);
+        assert_eq!(idle.player, Player::Running);
+        assert_eq!(idle.track, None);
+    }
+
+    /* Driven through a stub, because running the real opener would put a
+       window on the screen of whoever is running the suite. What matters is
+       that the folder is what gets handed over, and that a refusal comes
+       back as the opener's own reason rather than as silence. */
+    #[test]
+    fn revealing_a_folder_hands_it_to_the_platforms_opener() {
+        let (bin, log) = stub("reveal", "exit 0");
+        let folder = bin.parent().unwrap().join("Focus");
+        std::fs::create_dir_all(&folder).unwrap();
+
+        let said = reveal_with(&bin.display().to_string(), &folder).unwrap();
+        // Pipe-delimited by the stub, since a path can carry spaces.
+        assert_eq!(calls(&log), vec![format!("{}|", folder.display())]);
+        // Named by the folder, since the whole path is already on screen.
+        assert!(said.contains("opened Focus in the file manager"), "{said}");
+
+        let (angry, _) = stub("revealfail", "echo 'no application knows this' >&2; exit 1");
+        let err = reveal_with(&angry.display().to_string(), &folder)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no application knows this"), "{err}");
+
+        /* Every platform earworm runs on has one; the message only exists so
+           a third never silently does nothing. */
+        assert_eq!(opener().is_some(), cfg!(any(target_os = "macos", target_os = "linux")));
+        let _ = std::fs::remove_dir_all(bin.parent().unwrap());
+    }
+
+    /* Nothing on this path can be fixed by reading it twice: both messages
+       have to name what to do about them. */
+    #[test]
+    fn the_handoff_errors_say_what_to_do_about_them() {
+        let dir = std::env::temp_dir().join(format!("earworm-nom3u8-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("Focus")).unwrap();
+        let err = load_with("cliamp", IPC, IPC, &dir.join("Focus"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("sync it again without --no-m3u8"), "{err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn stub(tag: &str, body: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("earworm-player-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);

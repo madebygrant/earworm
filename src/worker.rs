@@ -87,8 +87,15 @@ fn prompt_url(tx: &Sender<Msg>, escape: Escape) -> Option<String> {
     };
     let mut header = "YouTube playlist URL".to_string();
     let mut typed = String::new();
+    /* The first thing a new user is ever asked, on a screen with nothing else
+       on it yet. Both facts they need before typing: that one video is a
+       valid answer, and what the only other key does. */
+    let note = match escape {
+        Escape::Quit => "a playlist or a single video  ·  esc quits",
+        _ => "a playlist or a single video",
+    };
     loop {
-        let answer = asker.input_with(&header, &typed, escape)?;
+        let answer = asker.input_noted(&header, note, &typed, escape)?;
         if let Some(url) = youtube_url(&answer) {
             return Some(url);
         }
@@ -196,11 +203,33 @@ fn finish(
         /* Labels and answers built together: the row for cliamp is only there
            when cliamp is, and a bare index would then mean a different thing
            depending on what is installed. */
-        let mut rows: Vec<(String, Answer)> = vec![("keep this open".into(), Answer::Keep)];
+        /* First, ahead of keeping the menu open: when the run left guesses
+           behind, looking at them is the thing the run is asking for, and
+           Enter on it still starts no work and ends no session. */
+        let mut rows: Vec<(String, Answer)> = Vec::new();
+        let looking = tracks.iter().filter(|t| t.status.wants_a_look()).count();
+        if looking > 0 {
+            let plural = if looking == 1 { "track" } else { "tracks" };
+            rows.push((
+                format!("review {looking} {plural} worth a look"),
+                Answer::Review,
+            ));
+        }
+        rows.push(("keep this open".into(), Answer::Keep));
         if playable.is_some() {
             rows.push(("play it in cliamp".into(), Answer::Play));
         }
         rows.push(("sync another playlist".into(), Answer::Another));
+        /* "Next time as flac" is a thought people have at the end of a run,
+           on a screen where `f` means follow. Only with a file to write it
+           to: without one the choice would last until the tool closed, which
+           is not what "next time" means. */
+        if cfg.config_file.is_some() {
+            rows.push((
+                format!("format for next time  ({})", cfg.format),
+                Answer::Format,
+            ));
+        }
         rows.push(("quit".into(), Answer::Quit));
 
         let options: Vec<String> = rows.iter().map(|(label, _)| label.clone()).collect();
@@ -233,6 +262,20 @@ fn finish(
                 let gate = cfg.pick;
                 result = pipeline(cfg, tx, cancel, tracks, gate).map_err(|e| e.to_string());
             }
+            /* Closes the menu like Keep does: the answer is on the list
+               behind it, and nothing more is being asked of the worker. */
+            Some(Answer::Review) => {
+                let _ = tx.send(Msg::Review);
+                return true;
+            }
+            /* Straight back to the menu, which now says the new format:
+               the question it was asked from is still the open one. */
+            Some(Answer::Format) => {
+                if let Err(err) = set_format(cfg, tx, &asker) {
+                    let _ = tx.send(Msg::Flash(format!("failed: {err}")));
+                    let _ = tx.send(Msg::Log(err.to_string()));
+                }
+            }
             Some(Answer::Quit) => {
                 let _ = tx.send(Msg::Quit);
                 return false;
@@ -246,6 +289,8 @@ fn finish(
 #[derive(Clone, Copy)]
 enum Answer {
     Keep,
+    Review,
+    Format,
     Play,
     Another,
     Quit,
@@ -303,7 +348,10 @@ fn open_shelf(
 ) -> Result<String> {
     let entries = manifest::entries(&shelf.path);
     if entries.is_empty() {
-        bail!("{} has no tracks recorded in its manifest", shelf.name);
+        bail!(
+            "{} has no tracks recorded in its manifest  ·  sync it to fill one in",
+            shelf.name
+        );
     }
 
     let _ = tx.send(Msg::Restart);
@@ -504,7 +552,7 @@ fn pipeline(
     tracks: &mut Vec<Track>,
     gate: bool,
 ) -> Result<String> {
-    let _ = tx.send(Msg::Stage("reading playlist".into()));
+    let _ = tx.send(Msg::Stage("listing playlist".into()));
     let listing = ytdlp::scan(cfg)?;
     *tracks = listing.tracks;
 
@@ -526,7 +574,7 @@ fn pipeline(
 
     let have = tracks.iter().filter(|t| t.status == Status::Have).count();
     let _ = tx.send(Msg::Stage(format!(
-        "downloading  ({have} of {} already on disk)",
+        "fetching  ({have} of {} already on disk)",
         tracks.len()
     )));
 
@@ -539,7 +587,7 @@ fn pipeline(
         let _ = tx.send(Msg::Log(format!("download: {warning}")));
     }
 
-    let _ = tx.send(Msg::Stage("identifying".into()));
+    let _ = tx.send(Msg::Stage("tagging".into()));
     let asker = Asker {
         tx: tx.clone(),
         enabled: cfg.fix,
@@ -726,15 +774,22 @@ fn set_format(cfg: &mut Config, tx: &Sender<Msg>, asker: &Asker) -> Result<()> {
         return Ok(());
     };
     let picked = config::FORMATS[choice].0;
-    cfg.format = picked.to_string();
-    // Or the help overlay keeps reporting the format the run started with.
-    let _ = tx.send(Msg::Settings(cfg.describe()));
+    let settle = |cfg: &mut Config| {
+        cfg.format = picked.to_string();
+        // Or the help overlay keeps reporting the format the run began with.
+        let _ = tx.send(Msg::Settings(cfg.describe()));
+    };
 
     let Some(path) = cfg.config_file.clone() else {
+        settle(cfg);
         let _ = tx.send(Msg::Flash(format!("format: {picked}, this run only")));
         return Ok(());
     };
+    /* Before the run adopts it: a failed save used to leave the session on
+       the new format while reporting that nothing had been remembered, so
+       the next download disagreed with both the message and the file. */
     config::save_format(&path, picked)?;
+    settle(cfg);
     let _ = tx.send(Msg::Log(format!("format {picked} written to {}", path.display())));
     let _ = tx.send(Msg::Flash(format!("format: {picked}, remembered")));
     Ok(())
@@ -756,6 +811,9 @@ fn serve(
        third thread to answer a question nobody can act on is not worth the
        second channel. */
     let mut watch = Watch::default();
+    /* Lives for the session rather than per command, since that is what `u`
+       means: the last tag write, whichever command made it. */
+    let mut held: Option<Undo> = None;
     loop {
         if let Some(now) = watch.poll(player::probe()) {
             let _ = tx.send(Msg::Player(now));
@@ -778,7 +836,11 @@ fn serve(
             Cmd::ResyncAll => Some(resync(cfg, tx, cancel, tracks, library(&cfg.dir))),
             Cmd::Url => start_url(cfg, tx, cancel, tracks),
             Cmd::Edit(index) => {
-                report(tx, edit(cfg, tx, tracks, &asker, index));
+                report(tx, edit(cfg, tx, tracks, &asker, &mut held, index));
+                None
+            }
+            Cmd::Undo => {
+                report(tx, undo(cfg, tx, tracks, &mut held));
                 None
             }
             Cmd::Cover(index) => {
@@ -790,15 +852,27 @@ fn serve(
                 None
             }
             Cmd::Swap(targets) => {
-                report(tx, swap(cfg, tx, tracks, &targets));
+                report(tx, swap(cfg, tx, tracks, &mut held, &targets));
                 None
             }
             Cmd::Artist(targets) => {
-                report(tx, artist(cfg, tx, tracks, &asker, &targets));
+                report(tx, artist(cfg, tx, tracks, &asker, &mut held, &targets));
                 None
             }
             Cmd::Format => {
                 report(tx, set_format(cfg, tx, &asker));
+                None
+            }
+            Cmd::Reveal(folder) => {
+                match player::reveal(&folder) {
+                    Ok(said) => {
+                        let _ = tx.send(Msg::Flash(said));
+                    }
+                    Err(err) => {
+                        let _ = tx.send(Msg::Flash(format!("failed: {err}")));
+                        let _ = tx.send(Msg::Log(err.to_string()));
+                    }
+                }
                 None
             }
             Cmd::Toggle => {
@@ -895,7 +969,7 @@ fn sync_open(
     tracks: &mut Vec<Track>,
 ) -> Result<String> {
     if cfg.url.is_empty() {
-        bail!("this playlist has no saved URL to sync from");
+        bail!("this playlist has no saved URL to sync from  ·  n syncs one by URL");
     }
     let _ = tx.send(Msg::Restart);
     tracks.clear();
@@ -983,6 +1057,54 @@ fn retry(
     Ok(())
 }
 
+/* One level and the values themselves rather than a diff: the edit worth
+   taking back is the one just watched landing on the row, and a stack of them
+   would be a second history to keep in step with the files on disk. */
+pub struct Undo {
+    /// How the UI names it on the status bar, so `u` says what it would do.
+    what: String,
+    /// Track index, artist and title as they were before the write.
+    fields: Vec<(usize, String, String)>,
+}
+
+/// Tells the UI what `u` would put back, or that there is nothing. A key the
+/// bar cannot say is live is a key nobody presses.
+fn offer_undo(tx: &Sender<Msg>, undo: &Option<Undo>) {
+    let _ = tx.send(Msg::Undoable(undo.as_ref().map(|u| u.what.clone())));
+}
+
+/// Puts the last tag write back and then has nothing left to offer: one
+/// level means one level, and a `u` that redid the edit would be a toggle
+/// wearing the name of an undo.
+fn undo(cfg: &Config, tx: &Sender<Msg>, tracks: &mut [Track], held: &mut Option<Undo>) -> Result<()> {
+    let Some(Undo { what, fields }) = held.take() else {
+        return Ok(());
+    };
+    offer_undo(tx, held);
+    let mut back = 0;
+    for (index, artist, title) in fields {
+        let Some(pos) = tracks.iter().position(|t| t.index == index) else {
+            continue;
+        };
+        /* "undone" and not the source the track had before: somebody typed
+           these values back, which is exactly as much as the tags are worth
+           now. The status word is provenance, and restoring `ok` would claim
+           a lookup that is no longer what is in the file. */
+        match write_track(cfg, tx, tracks, pos, artist, title, "undone") {
+            Ok(()) => back += 1,
+            Err(err) => {
+                let _ = tx.send(Msg::Log(format!("undo: track {index}: {err}")));
+            }
+        }
+    }
+    if back > 0 {
+        save_manifest(cfg, tracks);
+        write_playlist(cfg, tracks)?;
+    }
+    let _ = tx.send(Msg::Flash(format!("undid {what}")));
+    Ok(())
+}
+
 /// Writes one track's tags and brings everything that follows from them back
 /// into line: the row, the filename, and the name the playlist will use.
 fn write_track(
@@ -996,7 +1118,10 @@ fn write_track(
 ) -> Result<()> {
     let path = tracks[pos].path.clone().context("track has no file")?;
     if !path.is_file() {
-        bail!("track {} was never downloaded", tracks[pos].index);
+        bail!(
+            "track {} was never downloaded  ·  r retries the failures",
+            tracks[pos].index
+        );
     }
     tag::set_fields(&path, &artist, &title)?;
 
@@ -1036,12 +1161,16 @@ fn bulk(
     cfg: &Config,
     tx: &Sender<Msg>,
     tracks: &mut [Track],
+    held: &mut Option<Undo>,
     targets: &[usize],
     what: &str,
     mut fields: impl FnMut(&Track) -> (String, String),
 ) -> Result<()> {
     let mut changed = 0;
     let mut failed = 0;
+    // Collected as the write succeeds, so a track that could not be written
+    // is not one `u` claims to put back.
+    let mut before: Vec<(usize, String, String)> = Vec::new();
     for target in targets {
         let Some(pos) = tracks.iter().position(|t| t.index == *target) else {
             continue;
@@ -1057,8 +1186,16 @@ fn bulk(
             let _ = tx.send(Msg::Log(format!("{what}: track {target} has no {missing}")));
             continue;
         }
+        let was = (
+            tracks[pos].index,
+            tracks[pos].artist.clone(),
+            tracks[pos].title.clone(),
+        );
         match write_track(cfg, tx, tracks, pos, artist, title, what) {
-            Ok(()) => changed += 1,
+            Ok(()) => {
+                changed += 1;
+                before.push(was);
+            }
             Err(err) => {
                 failed += 1;
                 let _ = tx.send(Msg::Log(format!("{what}: track {target}: {err}")));
@@ -1073,6 +1210,12 @@ fn bulk(
         save_manifest(cfg, tracks);
         write_playlist(cfg, tracks)?;
         let _ = tx.send(Msg::Unmark);
+        let plural = if changed == 1 { "track" } else { "tracks" };
+        *held = Some(Undo {
+            what: format!("{what} {changed} {plural}"),
+            fields: before,
+        });
+        offer_undo(tx, held);
     }
     let _ = tx.send(Msg::Flash(match failed {
         0 => format!("{what} {changed} tracks"),
@@ -1081,8 +1224,14 @@ fn bulk(
     Ok(())
 }
 
-fn swap(cfg: &Config, tx: &Sender<Msg>, tracks: &mut [Track], targets: &[usize]) -> Result<()> {
-    bulk(cfg, tx, tracks, targets, "swapped", |track| {
+fn swap(
+    cfg: &Config,
+    tx: &Sender<Msg>,
+    tracks: &mut [Track],
+    held: &mut Option<Undo>,
+    targets: &[usize],
+) -> Result<()> {
+    bulk(cfg, tx, tracks, held, targets, "swapped", |track| {
         (track.title.clone(), track.artist.clone())
     })
 }
@@ -1092,6 +1241,7 @@ fn artist(
     tx: &Sender<Msg>,
     tracks: &mut [Track],
     asker: &Asker,
+    held: &mut Option<Undo>,
     targets: &[usize],
 ) -> Result<()> {
     // Prefilled from the first target, since the usual case is correcting a
@@ -1106,9 +1256,9 @@ fn artist(
         return cancelled(tx);
     };
     if new.is_empty() {
-        bail!("artist cannot be empty");
+        bail!("artist cannot be empty  ·  type a name, or esc leaves them alone");
     }
-    bulk(cfg, tx, tracks, targets, "set artist on", |track| {
+    bulk(cfg, tx, tracks, held, targets, "set artist on", |track| {
         (new.clone(), track.title.clone())
     })
 }
@@ -1118,25 +1268,48 @@ fn edit(
     tx: &Sender<Msg>,
     tracks: &mut [Track],
     asker: &Asker,
+    held: &mut Option<Undo>,
     index: usize,
 ) -> Result<()> {
     let Some(pos) = tracks.iter().position(|t| t.index == index) else {
         return Ok(());
     };
-    let Some(artist) = asker.input(&format!("Artist for track {index}"), &tracks[pos].artist)
-    else {
+    /* The video title is what the correction is being made against, so it
+       goes in the form rather than being something to remember from the row
+       underneath the popup. */
+    let was = tracks[pos].was.clone();
+    let Some(answers) = asker.form(
+        &format!("track {index}"),
+        &was,
+        vec![
+            ("artist".into(), tracks[pos].artist.clone()),
+            ("title".into(), tracks[pos].title.clone()),
+        ],
+        Escape::Skip,
+    ) else {
         return cancelled(tx);
     };
-    let Some(title) = asker.input(&format!("Title for track {index}"), &tracks[pos].title) else {
+    let [artist, title] = answers.as_slice() else {
         return cancelled(tx);
     };
+    let (artist, title) = (artist.clone(), title.clone());
     if artist.is_empty() || title.is_empty() {
-        bail!("artist and title cannot be empty");
+        bail!("artist and title cannot be empty  ·  esc leaves the track alone");
     }
 
+    let was = (
+        tracks[pos].index,
+        tracks[pos].artist.clone(),
+        tracks[pos].title.clone(),
+    );
     write_track(cfg, tx, tracks, pos, artist, title, "typed")?;
     save_manifest(cfg, tracks);
     write_playlist(cfg, tracks)?;
+    *held = Some(Undo {
+        what: format!("the edit of track {index}"),
+        fields: vec![was],
+    });
+    offer_undo(tx, held);
     let _ = tx.send(Msg::Flash(format!("saved track {index}")));
     Ok(())
 }
@@ -1257,7 +1430,7 @@ fn cover(
     };
     let folder = folder_of(tracks).context("no folder to write a cover into")?;
 
-    let _ = tx.send(Msg::Stage("looking for artwork".into()));
+    let _ = tx.send(Msg::Stage("finding artwork".into()));
     let found = lookup::artwork(
         &tracks[pos].artist,
         &tracks[pos].title,
@@ -1278,7 +1451,7 @@ fn cover(
 
     let image = match source {
         Pick::Url(url) => {
-            let _ = tx.send(Msg::Stage("downloading artwork".into()));
+            let _ = tx.send(Msg::Stage("fetching artwork".into()));
             lookup::fetch(url).context("could not download that cover")?
         }
         Pick::Keep => return cancelled(tx),
@@ -1287,7 +1460,7 @@ fn cover(
                 return cancelled(tx);
             };
             if typed.is_empty() {
-                bail!("no file given");
+                bail!("no file given  ·  type a path to an image, or esc keeps the cover");
             }
             let path = config::expand(&typed);
             std::fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?
@@ -1594,6 +1767,184 @@ pub mod tests {
        result from the text on screen turned a failed run into a successful
        one, so `earworm; echo $?` reported 0 after a playlist that could not
        be read. Reachable by backing out of "sync another playlist". */
+    /* A message that says only what went wrong leaves the reader to work out
+       what to do, and every one of these is reachable by pressing a key. */
+    #[test]
+    fn the_errors_a_user_can_reach_end_with_the_next_step() {
+        let dir = scratch("fixes");
+        let mut cfg = config(true);
+        cfg.url.clear();
+        let mut tracks = Vec::new();
+
+        let no_url = sync_open(&mut cfg, &channel().0, &AtomicBool::new(false), &mut tracks)
+            .unwrap_err()
+            .to_string();
+        assert!(no_url.contains("n syncs one by URL"), "{no_url}");
+
+        // A folder of ours with nothing recorded in its sidecar.
+        std::fs::write(dir.join(".earworm"), "#url\thttps://example.com\n").unwrap();
+        let shelf = Shelf {
+            path: dir.clone(),
+            name: "Focus".into(),
+            url: "u".into(),
+            tracks: 0,
+            missing: 0,
+            synced: None,
+            files: Vec::new(),
+        };
+        let empty = open_shelf(&mut config(true), &channel().0, &mut tracks, &shelf)
+            .unwrap_err()
+            .to_string();
+        assert!(empty.contains("sync it to fill one in"), "{empty}");
+
+        // Not downloaded, which is what `r` is for.
+        let mut one = vec![Track::new(
+            1,
+            "id".into(),
+            "01 - A.opus".into(),
+            dir.join("01 - A.opus"),
+        )];
+        let missing = write_track(
+            &config(true),
+            &channel().0,
+            &mut one,
+            0,
+            "A".into(),
+            "B".into(),
+            "typed",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(missing.contains("r retries the failures"), "{missing}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* "Next time as flac" is a thought people have at the end of a run, on a
+       screen where `f` means follow. Only with a file to write it to: without
+       one the choice lasts until the tool closes, which is not "next time". */
+    #[test]
+    fn the_finish_menu_offers_the_format_only_with_a_config_to_remember_it() {
+        let rows = |config_file: Option<PathBuf>| {
+            let (tx, rx) = mpsc::channel();
+            let cancel = AtomicBool::new(false);
+            let mut cfg = config(true);
+            cfg.config_file = config_file;
+            let mut tracks: Vec<Track> = Vec::new();
+            std::thread::scope(|scope| {
+                let worker =
+                    scope.spawn(|| finish(&mut cfg, &tx, &cancel, &mut tracks, Ok("done".into())));
+                let mut asked = Vec::new();
+                while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
+                    if let Msg::Ask(crate::app::Prompt::Choice { options, .. }, reply) = msg {
+                        asked = options;
+                        // Esc: keeps the menu open and ends the loop.
+                        reply.send(Reply::Cancel).unwrap();
+                        break;
+                    }
+                }
+                assert!(worker.join().unwrap());
+                asked
+            })
+        };
+
+        let with = rows(Some(PathBuf::from("/tmp/earworm-test.toml")));
+        assert!(
+            with.iter().any(|r| r.starts_with("format for next time")),
+            "{with:?}"
+        );
+        // It says which format, or "next time" is a choice made blind.
+        assert!(with.iter().any(|r| r.contains("(opus)")), "{with:?}");
+
+        let without = rows(None);
+        assert!(
+            !without.iter().any(|r| r.contains("format")),
+            "offered to remember a choice with nowhere to write it: {without:?}"
+        );
+    }
+
+    /* The setting and the file have to agree. A failed save used to leave the
+       session on the new format while reporting that nothing was remembered,
+       so the next download disagreed with both the message and the config. */
+    #[test]
+    fn a_format_that_could_not_be_saved_is_not_adopted_for_the_run() {
+        let dir = scratch("setformat");
+        let path = dir.join("config.toml");
+        // Already broken, so the save refuses before it writes anything.
+        std::fs::write(&path, "nonsense\n").unwrap();
+
+        let (tx, rx) = channel();
+        let mut cfg = config(true);
+        cfg.config_file = Some(path.clone());
+        assert_eq!(cfg.format, "opus");
+
+        let asker = Asker {
+            tx: tx.clone(),
+            enabled: true,
+        };
+        let failed = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| set_format(&mut cfg, &tx, &asker));
+            while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
+                if let Msg::Ask(_, reply) = msg {
+                    // flac, which is not what the run started on.
+                    let flac = config::FORMATS.iter().position(|(n, _)| *n == "flac").unwrap();
+                    reply.send(Reply::Choice(flac)).unwrap();
+                    break;
+                }
+            }
+            worker.join().unwrap()
+        });
+
+        let err = failed.unwrap_err().to_string();
+        assert!(err.contains("does not parse"), "{err}");
+        assert_eq!(cfg.format, "opus", "the run took a format the file never got");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "nonsense\n");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_finish_menu_leads_with_the_guesses_the_run_left() {
+        let (tx, rx) = mpsc::channel();
+        let cancel = AtomicBool::new(false);
+        let mut cfg = config(true);
+        let mut tracks: Vec<Track> = [Status::Ok, Status::Kept, Status::Weak]
+            .into_iter()
+            .enumerate()
+            .map(|(n, status)| {
+                let mut track =
+                    Track::new(n + 1, "id".into(), "name".into(), PathBuf::from("/tmp/x.opus"));
+                track.status = status;
+                track
+            })
+            .collect();
+
+        let (asked, reviewed) = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| finish(&mut cfg, &tx, &cancel, &mut tracks, Ok("done".into())));
+            let mut asked = Vec::new();
+            let mut reviewed = false;
+            // Bounded: a menu that stopped offering the row would otherwise
+            // leave this waiting for a message nothing is going to send.
+            while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
+                match msg {
+                    Msg::Ask(crate::app::Prompt::Choice { options, .. }, reply) => {
+                        asked = options;
+                        // The first row, which is where the review has to be.
+                        reply.send(Reply::Choice(0)).unwrap();
+                    }
+                    Msg::Review => reviewed = true,
+                    _ => {}
+                }
+                if reviewed {
+                    break;
+                }
+            }
+            assert!(worker.join().unwrap(), "reviewing ended the session");
+            (asked, reviewed)
+        });
+
+        assert!(reviewed, "the first row did something else");
+        assert_eq!(asked.first().map(String::as_str), Some("review 2 tracks worth a look"), "{asked:?}");
+    }
+
     #[test]
     fn a_failed_run_stays_failed_through_the_finish_menu() {
         let (tx, rx) = mpsc::channel();
@@ -1916,6 +2267,74 @@ pub mod tests {
             assert!(logged[0].contains("not in this listing"), "{:?}", logged[0]);
             std::fs::remove_dir_all(&dir).unwrap();
         }
+    }
+
+    /* The one thing earworm does that is both easy to get wrong and
+       immediate. A swap over two tracks, because the bulk path is where the
+       previous values are hardest to keep hold of: they have to be read off
+       each track before it is written and dropped for any that failed. */
+    #[test]
+    fn undo_puts_the_tags_a_bulk_change_wrote_over_back() {
+        let dir = scratch("undo");
+        let one = dir.join("01 - A.opus");
+        let two = dir.join("02 - B.opus");
+        if tiny_opus(&one).is_none() || tiny_opus(&two).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let mut tracks = vec![
+            Track::new(1, "a".into(), "01 - A.opus".into(), one),
+            Track::new(2, "b".into(), "02 - B.opus".into(), two),
+        ];
+        for (pos, (artist, title)) in [("Neu!", "Hallogallo"), ("Can", "Vitamin C")]
+            .into_iter()
+            .enumerate()
+        {
+            tracks[pos].artist = artist.into();
+            tracks[pos].title = title.into();
+            tracks[pos].listed = true;
+        }
+        let cfg = config(false);
+        let (tx, rx) = channel();
+        let mut held: Option<Undo> = None;
+
+        swap(&cfg, &tx, &mut tracks, &mut held, &[1, 2]).unwrap();
+        assert_eq!(tracks[0].artist, "Hallogallo", "the swap did not happen");
+        let offered: Vec<Option<String>> = rx
+            .try_iter()
+            .filter_map(|m| match m {
+                Msg::Undoable(what) => Some(what),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            offered.last().cloned().flatten().as_deref(),
+            Some("swapped 2 tracks"),
+            "the key was never offered: {offered:?}"
+        );
+
+        undo(&cfg, &tx, &mut tracks, &mut held).unwrap();
+        assert_eq!(tracks[0].artist, "Neu!");
+        assert_eq!(tracks[0].title, "Hallogallo");
+        assert_eq!(tracks[1].artist, "Can");
+        // The file itself, not only the row: an undo that leaves the tags on
+        // disk swapped has undone the half nobody can check.
+        let info = tag::read(tracks[0].path.as_deref().unwrap()).unwrap();
+        assert_eq!((info.artist.as_str(), info.title.as_str()), ("Neu!", "Hallogallo"));
+
+        /* One level means one level: a second `u` that redid the swap would
+           be a toggle wearing the name of an undo. */
+        assert!(held.is_none(), "a second undo is still on offer");
+        let cleared: Vec<Option<String>> = rx
+            .try_iter()
+            .filter_map(|m| match m {
+                Msg::Undoable(what) => Some(what),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cleared.first(), Some(&None), "the bar still offers u: {cleared:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// A real opus file, since `tag::set_fields` has to succeed for the code
@@ -2309,9 +2728,12 @@ pub mod tests {
             config_file: None,
             resync: false,
             list: false,
+            check: false,
             rename,
             album: true,
             pick: true,
+            intro: true,
+            notify: true,
             extra: Vec::new(),
             acoustid_key: None,
         }

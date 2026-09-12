@@ -7,18 +7,32 @@ use ratatui::widgets::{
     ScrollbarState,
 };
 
-use crate::app::{App, Player, Prompt, Shelf, Status, View};
+use crate::app::{self, App, Confirm, Player, Prompt, Shelf, Status, View};
 use crate::manifest;
 
-use crate::theme::{self, AMBER, CREAM, DIM, GOLD, GREEN, INK, RED, RULE, SURFACE};
+use crate::theme::{self, AMBER, CREAM, DIM, GOLD, INK, RED, RULE, SAND, SURFACE, TEAL};
 
 const SPINNER: [&str; 8] = ["⣷", "⣯", "⣟", "⡿", "⢿", "⣻", "⣽", "⣾"];
 const STATUS_WIDTH: usize = 8;
 /// Narrowest library screen that still has room for a preview beside the rows.
 const PREVIEW_FROM: u16 = 100;
+/// Width of `  NNN missing`, held open on rows with nothing missing.
+const MISSING_WIDTH: usize = 13;
+/// As much of cliamp's track title as the bar will spend on it. Long enough
+/// to recognise a song, short enough that it is not what pushed the counts
+/// off the row.
+const NOW_PLAYING: usize = 28;
 
 fn dim(text: impl Into<String>) -> Span<'static> {
     Span::styled(text.into(), Style::new().fg(DIM))
+}
+
+/// The row under the cursor is what the next key acts on, so its name is bold
+/// as well as marked. Bold is safe here because every colour is RGB: a
+/// terminal cannot swap it for a bright ANSI variant.
+fn row_style(selected: bool) -> Style {
+    let style = Style::new().fg(CREAM);
+    if selected { style.add_modifier(Modifier::BOLD) } else { style }
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
@@ -49,8 +63,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_rule(frame, rule);
     }
     if app.show_logs && !app.logs.is_empty() {
+        let rows = app.log_rows(body.height as usize) as u16;
         let [list, logs] =
-            Layout::vertical([Constraint::Min(1), Constraint::Length(8)]).areas(body);
+            Layout::vertical([Constraint::Min(1), Constraint::Length(rows)]).areas(body);
         draw_body(frame, app, list);
         draw_logs(frame, app, logs);
     } else {
@@ -65,11 +80,58 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if app.prompt.is_some() {
         draw_prompt(frame, app);
     }
+    if let Some(what) = app.confirm {
+        draw_confirm(frame, app, what);
+    }
+    recolour(frame);
+}
+
+/* One pass over the finished buffer rather than three palettes: every colour
+   in `theme` stays one set of numbers, and a terminal that cannot render them
+   gets the nearest thing it has. Costs a walk of the cells already drawn. */
+fn recolour(frame: &mut Frame) {
+    if theme::depth() == theme::Depth::Full {
+        return;
+    }
+    let area = frame.area();
+    let buffer = frame.buffer_mut();
+    for y in area.top()..area.bottom() {
+        for x in area.left()..area.right() {
+            let cell = &mut buffer[(x, y)];
+            let (fg, bg) = (theme::shade(cell.fg), theme::shade(cell.bg));
+            cell.set_fg(fg);
+            cell.set_bg(bg);
+        }
+    }
+}
+
+/* Its own popup rather than a `Prompt`: no worker is blocked on the answer,
+   so it carries no reply channel and no cursor. The keys are spelled out
+   instead of driven, which is one row and no state. */
+fn draw_confirm(frame: &mut Frame, app: &App, what: Confirm) {
+    let Confirm::Quit = what;
+    let (done, total) = app.progress();
+    let mut lines = vec![Line::from(Span::styled(
+        format!(" {done} of {total} finished so far"),
+        Style::new().fg(CREAM),
+    ))];
+    // What it costs, not what it does: "quit?" is already in the title.
+    lines.push(Line::from(dim(" leaving now stops the download")));
+    lines.push(Line::default());
+    lines.push(Line::from(vec![
+        Span::styled(" q  quit", Style::new().fg(AMBER)),
+        dim("     esc  keep going"),
+    ]));
+    let width = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 3;
+    popup(frame, "quit?", lines, width);
 }
 
 /* Painted before anything else: every other widget styles only its foreground,
    so the gradient survives underneath them. */
 fn draw_background(frame: &mut Frame) {
+    if theme::plain() {
+        return;
+    }
     let area = frame.area();
     let buffer = frame.buffer_mut();
     for y in area.top()..area.bottom() {
@@ -191,7 +253,14 @@ fn draw_rule(frame: &mut Frame, area: Rect) {
    it impossible to miss. */
 fn draw_band(frame: &mut Frame, area: Rect, left: String, mut right: String) {
     let width = area.width as usize;
-    let band = Style::new().fg(INK).bg(GOLD);
+    /* Reversed rather than filled when there is no colour: the band is the
+       one thing on screen that must not be missable, and a mode nobody can
+       see is worse than a mode drawn in the wrong style. */
+    let band = if theme::plain() {
+        Style::new().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::new().fg(INK).bg(GOLD)
+    };
     let used = left.chars().count();
     let mut spans = vec![Span::styled(left, band.add_modifier(Modifier::BOLD))];
     /* Paragraph styles only the cells it writes, so the padding is what keeps
@@ -209,19 +278,28 @@ fn draw_band(frame: &mut Frame, area: Rect, left: String, mut right: String) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+/* One band for both narrowings and both screens: what it has to say is that
+   the list is not all of it, which is the same news whichever narrowed it. */
 fn draw_filter_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let (shown, total) = if app.view == View::Library {
+        (app.shelf_rows().len(), app.library.len())
+    } else {
+        (app.shown(), app.tracks.len())
+    };
     let caret = if app.typing_filter { "\u{2588}" } else { "" };
+    // The review has no text to show, so it names itself instead.
+    let left = if app.review && app.filter.is_empty() && !app.typing_filter {
+        " REVIEW  tracks nothing confirmed".to_string()
+    } else {
+        let word = if app.review { "REVIEW" } else { "FILTER" };
+        format!(" {word}  /{}{}", app.filter, caret)
+    };
     let right = if app.typing_filter {
         "enter keeps  ·  esc clears ".to_string()
     } else {
-        format!("{} of {} shown  ·  esc clears ", app.shown(), app.tracks.len())
+        format!("{shown} of {total} shown  ·  esc clears ")
     };
-    draw_band(
-        frame,
-        area,
-        format!(" FILTER  /{}{}", app.filter, caret),
-        right,
-    );
+    draw_band(frame, area, left, right);
 }
 
 /* Carries the filter too, since the pick band replaces it: a narrowed list
@@ -236,7 +314,7 @@ fn draw_pick_bar(frame: &mut Frame, app: &App, area: Rect) {
         frame,
         area,
         left,
-        "space  ·  a all  ·  enter downloads  ·  esc none ".to_string(),
+        "space  ·  a all  ·  i invert  ·  enter downloads  ·  esc none ".to_string(),
     );
 }
 
@@ -282,7 +360,44 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
             Style::new().fg(GOLD),
         ));
     }
+    /* The right half was empty on every screen, which is the widest unused
+       space in the layout. It holds the two things the list cannot say: how
+       far along the whole run is, and what this run is doing to the files.
+       Both give way before the left half, which names what you are looking
+       at. */
+    let mut right = Vec::new();
+    let (done, total) = app.progress();
+    if app.view == View::Tracks && total > 0 && app.done.is_none() {
+        let (filled, rest) = bar(((done * 100) / total) as u16, 10);
+        right.push(Span::styled(filled, Style::new().fg(GOLD)));
+        right.push(dim(rest));
+        if let Some(left) = app.eta() {
+            right.push(dim(format!(" {} left", brief(left))));
+        }
+    } else if app.view == View::Library || app.done.is_some() {
+        right.push(dim(app.settings.clone()));
+    }
+
+    let used: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let wanted: usize = right.iter().map(|s| s.content.chars().count()).sum();
+    let width = area.width as usize;
+    // Dropped whole rather than truncated: half a progress bar is a lie.
+    if used + wanted + 2 <= width {
+        spans.push(Span::raw(" ".repeat(width - used - wanted - 1)));
+        spans.extend(right);
+    }
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+/// Coarse on purpose: the estimate behind it is, and `4m` claims less than
+/// `4m 12s` does.
+fn brief(left: std::time::Duration) -> String {
+    let secs = left.as_secs();
+    match secs {
+        s if s < 90 => format!("{s}s"),
+        s if s < 3600 => format!("{}m", s / 60),
+        s => format!("{}h{:02}m", s / 3600, (s % 3600) / 60),
+    }
 }
 
 /// Eighth-block fill, so a bar eight cells wide still moves on every percent.
@@ -321,11 +436,23 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
 
+    let rows = app.shelf_rows();
+    if rows.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Line::from(dim(format!(
+                " nothing matches {}   esc clears it",
+                app.filter
+            )))),
+            area,
+        );
+        return;
+    }
     /* Resolved once and shared with the pane below, so the row the marker is
        on and the folder the pane describes cannot become two questions. */
-    let selected = app.shelf.min(app.library.len() - 1);
+    let at = rows.iter().position(|pos| *pos == app.shelf).unwrap_or(0);
+    let selected = rows[at];
 
-    /* The shelf row already needs name plus 28 columns of counts and sync
+    /* The shelf row already needs name plus 40 columns of counts and sync
        time, so the pane only appears where both fit without squeezing names
        down to nothing. Below that it is simply absent. */
     let area = if area.width >= PREVIEW_FROM {
@@ -340,45 +467,46 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
     };
 
     let width = area.width as usize;
-    let longest = app
-        .library
+    app.viewport = area.height as usize;
+    let longest = rows
         .iter()
-        .map(|s| s.name.chars().count())
+        .map(|pos| app.library[*pos].name.chars().count())
         .max()
         .unwrap_or(0);
-    let name_width = longest.min(width.saturating_sub(28).max(12));
+    let name_width = longest.min(width.saturating_sub(40).max(12));
 
-    let items: Vec<ListItem> = app
-        .library
+    let items: Vec<ListItem> = rows
         .iter()
-        .enumerate()
-        .map(|(row, shelf)| {
+        .map(|row| {
+            let (row, shelf) = (*row, &app.library[*row]);
             let name = truncate(&shelf.name, name_width);
             let pad = name_width.saturating_sub(name.chars().count());
             let mut spans = vec![
                 Span::styled(
                     if row == selected { "▌" } else { " " },
-                    Style::new().fg(GREEN),
+                    Style::new().fg(TEAL),
                 ),
-                Span::styled(format!(" {name}{:pad$}", ""), Style::new().fg(CREAM)),
+                // Bold as well as the marker: the bar alone is a thin signal
+                // for "this is the folder Enter opens".
+                Span::styled(format!(" {name}{:pad$}", ""), row_style(row == selected)),
                 /* Two cells whether or not anything is playing, so the columns
                    after it do not step sideways as cliamp starts and stops. */
                 match (app.playback.on(&shelf.path), app.playback.playing) {
-                    (true, true) => Span::styled(" ▶", Style::new().fg(GREEN)),
+                    (true, true) => Span::styled(" ▶", Style::new().fg(TEAL)),
                     (true, false) => dim(" ⏸"),
                     (false, _) => Span::raw("  "),
                 },
                 dim(format!("  {:>4} tracks", shelf.tracks)),
+                /* Files the manifest lists that are no longer there, which a
+                   sync would download again. Worth colour: it is the one thing
+                   on this screen that is a problem. A fixed slot either way,
+                   or the sync column steps sideways between rows. */
+                if shelf.missing > 0 {
+                    Span::styled(format!("  {:>3} missing", shelf.missing), Style::new().fg(AMBER))
+                } else {
+                    Span::raw(" ".repeat(MISSING_WIDTH))
+                },
             ];
-            /* Files the manifest lists that are no longer there, which a sync
-               would download again. Worth colour: it is the one thing on this
-               screen that is a problem. */
-            if shelf.missing > 0 {
-                spans.push(Span::styled(
-                    format!("  {} missing", shelf.missing),
-                    Style::new().fg(AMBER),
-                ));
-            }
             spans.push(dim(match shelf.synced {
                 Some(at) => format!("  synced {}", manifest::ago(at)),
                 None => "  never synced".into(),
@@ -387,12 +515,13 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let mut state = ListState::default();
-    state.select(Some(selected));
+    app.shelf_scroll = app::scroll_to(app.shelf_scroll, at, rows.len(), area.height as usize);
+    let mut state = ListState::default().with_offset(app.shelf_scroll);
+    state.select(Some(at));
     frame.render_stateful_widget(List::new(items), area, &mut state);
 
-    if app.library.len() > area.height as usize {
-        let mut bar_state = ScrollbarState::new(app.library.len()).position(selected);
+    if rows.len() > area.height as usize {
+        let mut bar_state = ScrollbarState::new(rows.len()).position(at);
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
@@ -425,15 +554,26 @@ fn draw_preview(frame: &mut Frame, shelf: &Shelf, area: Rect) {
     }
 
     let width = inner.width as usize;
-    let height = inner.height as usize;
+    /* A title line, because a bordered column of filenames floats: it says
+       nothing about which folder it belongs to or how many rows were left
+       out. The missing count is repeated here for the same reason. */
+    let head = match shelf.missing {
+        0 => format!(" {} tracks", shelf.tracks),
+        n => format!(" {} tracks  ·  {n} missing", shelf.tracks),
+    };
+    let mut lines = vec![Line::from(Span::styled(
+        truncate(&head, width),
+        Style::new().fg(if shelf.missing > 0 { AMBER } else { DIM }),
+    ))];
+    let height = (inner.height as usize).saturating_sub(1);
     // The last line goes to the tail count, so no track is silently dropped.
     let room = if shelf.files.len() > height {
-        height - 1
+        height.saturating_sub(1)
     } else {
         shelf.files.len()
     };
 
-    let mut lines: Vec<Line> = shelf.files[..room]
+    lines.extend(shelf.files[..room]
         .iter()
         .map(|(name, here)| {
             let title = name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem);
@@ -444,8 +584,7 @@ fn draw_preview(frame: &mut Frame, shelf: &Shelf, area: Rect) {
                 format!("{mark}{}", truncate(title, width.saturating_sub(1))),
                 Style::new().fg(if *here { CREAM } else { AMBER }),
             ))
-        })
-        .collect();
+        }));
     if room < shelf.files.len() {
         lines.push(Line::from(dim(format!(
             " … {} more",
@@ -455,19 +594,112 @@ fn draw_preview(frame: &mut Frame, shelf: &Shelf, area: Rect) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+/// Seconds as a clock, since a track length is read as minutes and nobody
+/// converts 251 in their head.
+fn clock(seconds: u64) -> String {
+    format!("{}:{:02}", seconds / 60, seconds % 60)
+}
+
+/// One labelled field, wrapped, with the continuation lines under the value
+/// rather than under the label.
+fn detail_rows(label: &str, value: &str, style: Style, width: usize) -> Vec<Line<'static>> {
+    const LABEL: usize = 8;
+    let room = width.saturating_sub(LABEL + 1).max(1);
+    wrap(value, room)
+        .into_iter()
+        .enumerate()
+        .map(|(n, piece)| {
+            Line::from(vec![
+                dim(format!(" {:pad$}", if n == 0 { label } else { "" }, pad = LABEL)),
+                Span::styled(piece, style),
+            ])
+        })
+        .collect()
+}
+
+/* The row truncates everything that does not fit its columns, and what it
+   truncates first is `was` at 32 characters: the video title, which is the
+   half of a wrong identification that says how it went wrong. The path is
+   never on the row at all. A wide terminal has the columns, so it says it. */
+fn draw_detail(frame: &mut Frame, track: &crate::app::Track, area: Rect) {
+    let block = Block::new()
+        .borders(Borders::LEFT)
+        .border_style(Style::new().fg(RULE));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let width = inner.width as usize;
+
+    let mut lines: Vec<Line> = wrap(&format!(" {}", track.name), width)
+        .into_iter()
+        .map(|piece| Line::from(Span::styled(piece, row_style(true))))
+        .collect();
+    lines.push(Line::default());
+    lines.extend(detail_rows(
+        "status",
+        track.status.label(),
+        Style::new().fg(track.status.color()),
+        width,
+    ));
+    let cream = Style::new().fg(CREAM);
+    let faint = Style::new().fg(DIM);
+    for (label, value) in [("artist", &track.artist), ("title", &track.title)] {
+        if !value.is_empty() {
+            lines.extend(detail_rows(label, value, cream, width));
+        }
+    }
+    if track.duration > 0 {
+        lines.extend(detail_rows("length", &clock(track.duration), faint, width));
+    }
+    for (label, value) in [("source", &track.source), ("note", &track.note)] {
+        if !value.is_empty() {
+            lines.extend(detail_rows(label, value, faint, width));
+        }
+    }
+    // The whole of it: truncating this is what the pane exists to undo.
+    if track.was != track.name {
+        lines.extend(detail_rows("was", &track.was, faint, width));
+    }
+    if let Some(path) = &track.path {
+        lines.extend(detail_rows("file", &path.display().to_string(), faint, width));
+    }
+    lines.truncate(inner.height as usize);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
-    let width = area.width as usize;
     let rows = app.rows();
     if rows.is_empty() && !app.tracks.is_empty() {
         frame.render_widget(
-            Paragraph::new(Line::from(dim(format!(
-                " nothing matches {}   esc clears it",
-                app.filter
-            )))),
+            Paragraph::new(Line::from(dim(if app.filter.is_empty() {
+                " nothing here needs a look   esc clears it".to_string()
+            } else {
+                format!(" nothing matches {}   esc clears it", app.filter)
+            }))),
             area,
         );
         return;
     }
+
+    /* Same bargain as the library's preview: the row has to keep its status
+       and tail columns, so the pane only appears where both fit. */
+    let area = if area.width >= PREVIEW_FROM {
+        let pane = (u32::from(area.width) * 2 / 5).min(46) as u16;
+        let [list, detail] =
+            Layout::horizontal([Constraint::Min(1), Constraint::Length(pane)]).areas(area);
+        if let Some(track) = app.tracks.get(app.cursor) {
+            draw_detail(frame, track, detail);
+        }
+        list
+    } else {
+        area
+    };
+
+    let width = area.width as usize;
+    // What a page key moves by, which only the layout knows.
+    app.viewport = area.height as usize;
 
     /* One name column for the whole list, so the dim source and note columns
        line up instead of stepping in and out with each title's length. */
@@ -486,7 +718,7 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
             let mut spans = vec![
                 Span::styled(
                     if selected { "▌" } else { " " },
-                    Style::new().fg(GREEN),
+                    Style::new().fg(TEAL),
                 ),
                 // Its own column, so a marked track under the cursor shows both.
                 Span::styled(
@@ -526,7 +758,7 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
             let tail = bits.join("  ");
             let name = truncate(&track.name, name_width);
             let pad = name_width.saturating_sub(name.chars().count());
-            spans.push(Span::styled(format!("  {name}"), Style::new().fg(CREAM)));
+            spans.push(Span::styled(format!("  {name}"), row_style(selected)));
             if !tail.is_empty() {
                 spans.push(dim(format!("{:pad$}  {tail}", "")));
             }
@@ -534,8 +766,16 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
         })
         .collect();
 
-    let mut state = ListState::default();
+    /* Carried across frames, or ratatui recomputes the least scroll that
+       makes the selection visible and pins the cursor to the last row. */
+    app.scroll = app::scroll_to(
+        app.scroll,
+        app.row_of_cursor(&rows).unwrap_or(0),
+        rows.len(),
+        area.height as usize,
+    );
     let at = app.row_of_cursor(&rows);
+    let mut state = ListState::default().with_offset(app.scroll);
     state.select(at);
     frame.render_stateful_widget(List::new(items), area, &mut state);
 
@@ -555,14 +795,22 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
     }
 }
 
+/* The tail is where a running job writes and where the eye goes, so that is
+   the resting position. The line worth reading is often well above it, which
+   is what `K` is for, and the head then says how far back it has gone. */
 fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
     let height = area.height.saturating_sub(1) as usize;
-    let start = app.logs.len().saturating_sub(height);
-    let mut lines = vec![Line::from(dim(" yt-dlp output"))];
+    let end = app.logs.len().saturating_sub(app.log_scroll);
+    let start = end.saturating_sub(height);
+    let below = app.logs.len() - end;
+    let mut lines = vec![Line::from(dim(match below {
+        0 => " yt-dlp output".to_string(),
+        n => format!(" yt-dlp output   {n} newer below   J K scroll"),
+    }))];
     lines.extend(
-        app.logs[start..]
+        app.logs[start..end]
             .iter()
-            .map(|l| Line::styled(format!(" {l}"), Style::new().fg(RED))),
+            .map(|l| Line::styled(format!(" {l}"), Style::new().fg(app::log_color(l)))),
     );
     frame.render_widget(Paragraph::new(lines), area);
 }
@@ -576,10 +824,25 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     if !app.logs.is_empty() {
         let count = app.logs.len();
         let plural = if count == 1 { "line" } else { "lines" };
+        /* Amber is the colour of a problem on every other screen, so it is
+           spent here only on a real one: a run that warns about one video is
+           the ordinary case and had the pane burning amber every time. */
+        let urgent = app.log_errors() && !app.show_logs;
+        /* The `!` and not the amber alone: urgency was the one thing on this
+           bar that only colour said, so a terminal without it, or a reader
+           who cannot separate amber from dim, saw an ordinary hint. It is
+           the same mark a missing file carries in the library preview. */
+        let mark = if urgent { "! " } else { "" };
         hints.push((
-            format!("   l  {count} yt-dlp {plural}"),
-            Style::new().fg(if app.show_logs { DIM } else { AMBER }),
+            format!("   {mark}l  {count} yt-dlp {plural}"),
+            Style::new().fg(if urgent { AMBER } else { DIM }),
         ));
+    }
+    /* `f` toggles silently, and the cursor being dragged to whatever is
+       downloading reads as a bug until you know a mode is doing it. A word
+       rather than a colour, so it survives a terminal without one. */
+    if app.following() {
+        hints.push(("   ⟳ following".to_string(), Style::new().fg(TEAL)));
     }
     if !app.marked.is_empty() && app.view == View::Tracks && app.picking.is_none() {
         hints.push((
@@ -590,20 +853,67 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     /* The library is the first screen a bare run shows, and a list of folders
        gives no clue that Enter opens one. The track view has a finished run
        behind it and a summary worth the same space. */
+    /* Held apart from the rest: these are the hints worth dropping, since the
+       tally beside them cannot be recovered by pressing anything, and `h`
+       still lists every key either way. */
+    let mut extra: Vec<(String, Style)> = Vec::new();
+    /* In `extra` and not beside the ♪ itself: this is the one hint whose
+       length is somebody else's song title, and the hints proper are the part
+       that never gives way to the tally. Truncated for the same reason. */
+    if let Some(track) = app.playback.track.as_ref().filter(|_| app.can_play()) {
+        extra.push((
+            format!("   {}", truncate(track, NOW_PLAYING)),
+            Style::new().fg(TEAL),
+        ));
+    }
     if app.view == View::Library {
         hints.push(("   enter open".to_string(), Style::new().fg(GOLD)));
         hints.push(("   R resync all".to_string(), Style::new().fg(DIM)));
         hints.push(("   n new URL".to_string(), Style::new().fg(DIM)));
+    } else if !app.tracks.is_empty() && app.picking.is_none() {
+        if app.can_command() {
+            extra.push(("   e edit".to_string(), Style::new().fg(GOLD)));
+            /* Named rather than a bare `u undo`: one level of undo is only
+               usable if you can see which level it is holding. */
+            if let Some(what) = &app.undoable {
+                extra.push((format!("   u undo {what}"), Style::new().fg(DIM)));
+            }
+            // Only when there is something to retry, so it reads as an
+            // answer to the failures beside it rather than as decoration.
+            if app.tracks.iter().any(|t| t.status == Status::Failed) {
+                extra.push(("   r retry".to_string(), Style::new().fg(AMBER)));
+            }
+        } else {
+            extra.push(("   / filter".to_string(), Style::new().fg(DIM)));
+        }
     }
     /* Absent entirely when cliamp is not installed, since a player nobody has
        is not news. Installed but stopped is worth saying: it is the answer to
        "where did `p` go". */
     match app.playback.player {
-        Player::Running => hints.push(("   ♪ cliamp".to_string(), Style::new().fg(GREEN))),
+        /* Which of the two it is doing, since the row in the library says so
+           and the bar is the only thing on the track list that mentions
+           cliamp at all. A glyph, so it is not teal doing the work. */
+        Player::Running => hints.push((
+            format!("   ♪ cliamp {}", if app.playback.playing { "▶" } else { "⏸" }),
+            Style::new().fg(TEAL),
+        )),
         Player::Stopped => hints.push(("   ♪ cliamp off".to_string(), Style::new().fg(DIM))),
         Player::Missing => {}
     }
     hints.push(("   h keys".to_string(), Style::new().fg(DIM)));
+
+    /* Room for the widest two statuses plus their counts, or the tally goes
+       and the hint that displaced it is one `h` away anyway. */
+    const TALLY_FLOOR: usize = 24;
+    let taken: usize = hints.iter().map(|(t, _)| t.chars().count()).sum();
+    let wanted: usize = extra.iter().map(|(t, _)| t.chars().count()).sum();
+    if taken + wanted + TALLY_FLOOR <= width {
+        // Ahead of `h keys`, which is the last word on every screen.
+        let tail = hints.split_off(hints.len() - 1);
+        hints.extend(extra);
+        hints.extend(tail);
+    }
     let reserved: usize = hints.iter().map(|(t, _)| t.chars().count()).sum();
 
     /* The hints are the part you cannot recover by looking elsewhere, so both
@@ -647,6 +957,23 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             truncate(&format!("failed: {err}"), room),
             Style::new().fg(RED),
         ),
+        /* The header counts the folders; this is what is inside them. The
+           whole library's health in one line, where the track view puts the
+           run's summary: missing files are what a sync would fetch again. */
+        None if app.view == View::Library && !app.library.is_empty() => {
+            let (tracks, missing, synced) = app.library_totals();
+            let mut text = format!("{tracks} tracks");
+            if missing > 0 {
+                text.push_str(&format!("  ·  {missing} missing"));
+            }
+            if let Some(at) = synced {
+                text.push_str(&format!("  ·  last sync {}", manifest::ago(at)));
+            }
+            (
+                truncate(&text, room),
+                Style::new().fg(if missing > 0 { AMBER } else { DIM }),
+            )
+        }
         None => (String::new(), Style::new()),
     };
     let pad = room.saturating_sub(middle.chars().count());
@@ -664,10 +991,16 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
 fn draw_help(frame: &mut Frame, app: &App) {
     let mut rows: Vec<(&str, &str, &str)> = vec![
         ("move", "j k  ↑ ↓", ""),
+        ("", "^d ^u  PgDn PgUp", "by a screenful"),
         ("", "g G", "first, last"),
     ];
     if app.view == View::Library {
-        rows.extend([("open", "enter", "read this playlist off disk")]);
+        rows.extend([
+            ("open", "enter", "read this playlist off disk"),
+            ("", "O", "this folder in the file manager"),
+            ("find", "/", "filter by name"),
+            ("", "o", "order: name, last synced, most missing"),
+        ]);
         if app.can_play() {
             rows.push(("play", "p", "hand this playlist to cliamp"));
             rows.push(("", "space", "play/pause cliamp"));
@@ -684,6 +1017,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("pick", "space", "this track"),
             ("", "m", "every track like it"),
             ("", "a", "everything the filter shows"),
+            ("", "i", "invert what is selected"),
             ("", "/", "filter by name or status"),
             ("go", "enter", "download what is selected"),
             ("", "Esc", "download nothing"),
@@ -694,9 +1028,14 @@ fn draw_help(frame: &mut Frame, app: &App) {
         rows.extend([
             ("view", "f", "follow the active track"),
             ("", "l", "yt-dlp output"),
+            ("", "L", "taller log pane"),
+            ("", "J K", "scroll the log"),
             ("", "/", "filter by name or status"),
+            ("", "v", "only the tracks nothing confirmed"),
+            ("find", "n N", "next, previous worth a look"),
             ("mark", "space", "this track"),
             ("", "m", "every track like it"),
+            ("", "M", "every track by its artist"),
         ]);
         if app.can_command() {
             rows.extend([
@@ -708,6 +1047,9 @@ fn draw_help(frame: &mut Frame, app: &App) {
             if app.can_play() {
                 rows.push(("", "p", "play it in cliamp"));
             }
+            if app.undoable.is_some() {
+                rows.push(("", "u", "undo the last tag change"));
+            }
             rows.extend([
                 ("marked", "s", "swap artist and title"),
                 ("", "A", "set one artist"),
@@ -715,15 +1057,11 @@ fn draw_help(frame: &mut Frame, app: &App) {
         } else {
             rows.push(("act", "e c r s S A", "once the run finishes"));
         }
-        rows.push((
-            "back",
-            "Esc",
-            if app.library.is_empty() {
-                "quit"
-            } else {
-                "the library"
-            },
-        ));
+        /* Only when there is one, because Esc no longer quits: a row saying
+           it does is the documentation for the behaviour that lost runs. */
+        if !app.library.is_empty() {
+            rows.push(("back", "Esc", "the library"));
+        }
         rows.push(("quit", "q  ^c", ""));
     }
 
@@ -744,18 +1082,63 @@ fn draw_help(frame: &mut Frame, app: &App) {
         })
         .collect();
 
-    lines.push(Line::default());
-
     // Wrapped to the table it sits under, or one long line sets the width.
     let settings = widest(|r| r.2.chars().count()) + key;
+    let mut tail: Vec<Line> = vec![Line::default()];
     for (n, piece) in wrap(&app.settings, settings.max(20)).into_iter().enumerate() {
-        lines.push(Line::from(vec![
+        tail.push(Line::from(vec![
             Span::styled(
                 format!(" {:group$}", if n == 0 { "run" } else { "" }),
                 Style::new().fg(DIM),
             ),
             Span::styled(piece, Style::new().fg(CREAM)),
         ]));
+    }
+
+    /* Only on the screen that has statuses, and only when the terminal has
+       the rows to spare. The keys are what the overlay is for, so the legend
+       is what gives way; and the whole popup stays two rows short of the
+       frame, because one tall enough to cover the status bar is one that
+       hides the very tally it is explaining. */
+    /* Grouped by what to do about them rather than listed one per line: the
+       question a status has to answer is "is this one I need to look at", and
+       nine glossed rows would not fit under the keys anyway. */
+    let legend: Vec<(&str, Vec<Status>, &str)> = vec![
+        ("tags", vec![Status::Ok, Status::Manual], "confirmed"),
+        ("", vec![Status::Kept, Status::Weak, Status::NoMatch], "a guess, worth a look"),
+        ("", vec![Status::Have, Status::Skipped, Status::Gone], "not touched this run"),
+        ("", vec![Status::Failed], "l has the reason"),
+    ];
+    /* Two rows of margin and the two borders, so the popup never reaches the
+       status bar: one that covers the tally is one that hides the very thing
+       it is explaining. */
+    let fits = |rows: usize| rows + 4 <= frame.area().height as usize;
+    let room = lines.len() + tail.len() + legend.len() + 1;
+    if app.view == View::Tracks && fits(room) {
+        lines.push(Line::default());
+        // Three slots whether or not a row fills them, so the glosses line up.
+        let slots = 3;
+        for (label, statuses, gloss) in legend {
+            let mut spans = vec![Span::styled(format!(" {label:group$}"), Style::new().fg(DIM))];
+            for status in &statuses {
+                spans.push(Span::styled(
+                    format!("{:<9}", status.label()),
+                    Style::new().fg(status.color()),
+                ));
+            }
+            spans.push(dim(format!(
+                "{:pad$}{gloss}",
+                "",
+                pad = (slots - statuses.len()) * 9
+            )));
+            lines.push(Line::from(spans));
+        }
+    }
+    /* Next to give way after the legend, and for the same reason: the keys
+       are what the overlay is for, and `--check` prints these settings on a
+       screen that is not fighting for rows. */
+    if fits(lines.len() + tail.len()) {
+        lines.extend(tail);
     }
 
     let content = lines
@@ -785,30 +1168,95 @@ fn draw_prompt(frame: &mut Frame, app: &App) {
                 rows.push((note.clone(), Style::new().fg(DIM)));
                 rows.push((String::new(), Style::new()));
             }
+            /* Numbered so the answer is one key rather than a walk with
+               j and k. Past nine there is no digit to press, so those rows
+               keep the space and stay reachable the long way. */
             rows.extend(options.iter().enumerate().map(|(i, opt)| {
                 let selected = i == app.choice;
                 let style = if selected {
-                    Style::new().fg(GREEN)
+                    Style::new().fg(TEAL)
                 } else {
                     Style::new()
                 };
-                (format!("{} {opt}", if selected { "▌" } else { " " }), style)
+                let key = match i {
+                    i if i < 9 => format!("{} ", i + 1),
+                    _ => "  ".into(),
+                };
+                (
+                    format!("{} {key}{opt}", if selected { "▌" } else { " " }),
+                    style,
+                )
             }));
             (header, rows)
         }
-        Prompt::Input { header, .. } => (
+        Prompt::Input { header, note, .. } => {
+            let mut rows = Vec::new();
+            if !note.is_empty() {
+                rows.push((note.clone(), Style::new().fg(DIM)));
+                rows.push((String::new(), Style::new()));
+            }
+            // Drawn between the halves, so the block is where the next
+            // character lands rather than always at the end of the line.
+            let (before, after) = app.input_parts();
+            rows.push((format!("{before}\u{2588}{after}"), Style::new().fg(CREAM)));
+            (header, rows)
+        }
+        Prompt::Form {
             header,
-            vec![(format!("{}\u{2588}", app.input), Style::new().fg(CREAM))],
-        ),
+            note,
+            fields,
+            ..
+        } => {
+            let mut rows = Vec::new();
+            /* The title the tags came from, above the boxes rather than in
+               the popup's own title, which clips instead of wrapping. It is
+               what the answer is being corrected against, so it belongs
+               inside the frame with the boxes. */
+            if !note.is_empty() {
+                rows.push((format!("was  {note}"), Style::new().fg(SAND)));
+                rows.push((String::new(), Style::new()));
+            }
+            let label = fields
+                .iter()
+                .map(|(l, _)| l.chars().count())
+                .max()
+                .unwrap_or(0);
+            for (n, (name, _)) in fields.iter().enumerate() {
+                let value = app.fields.get(n).cloned().unwrap_or_default();
+                // Only the focused box carries the block, or the popup shows
+                // two cursors and neither of them is where typing lands.
+                let text = if n == app.field {
+                    let (before, after) = app.input_parts();
+                    format!("{name:label$}  {before}\u{2588}{after}")
+                } else {
+                    format!("{name:label$}  {value}")
+                };
+                let style = if n == app.field {
+                    Style::new().fg(CREAM)
+                } else {
+                    Style::new().fg(DIM)
+                };
+                rows.push((text, style));
+            }
+            (header, rows)
+        }
     };
     rows.push((String::new(), Style::new()));
     rows.push((
         match prompt {
-            Prompt::Choice { escape, .. } => {
-                format!("j/k select   enter confirm   {}", escape.hint())
+            Prompt::Choice { escape, options, .. } => {
+                let digits = match options.len().min(9) {
+                    0 | 1 => String::new(),
+                    n => format!("1-{n} pick   "),
+                };
+                format!("{digits}j/k select   enter confirm   {}", escape.hint())
             }
-            crate::app::Prompt::Input { escape, .. } => {
+            Prompt::Input { escape, .. } => {
                 format!("enter confirm   ^u clear   ^w word   {}", escape.hint())
+            }
+            Prompt::Form { escape, fields, .. } => {
+                let swap = if fields.len() == 2 { "^s swap   " } else { "" };
+                format!("tab field   {swap}enter save   {}", escape.hint())
             }
         },
         Style::new().fg(DIM),
@@ -841,12 +1289,19 @@ fn popup(frame: &mut Frame, title: &str, lines: Vec<Line>, width: u16) {
     let width = width.clamp((title.chars().count() as u16 + 4).min(screen.width), screen.width);
     let area = centred(screen, width, height);
     frame.render_widget(Clear, area);
+    // Without colour the border is the whole separation, so it stops being
+    // chrome and becomes the only thing saying where the popup ends.
+    let (fill, edge) = if theme::plain() {
+        (Style::new(), Style::new())
+    } else {
+        (Style::new().bg(SURFACE), Style::new().fg(RULE).bg(SURFACE))
+    };
     frame.render_widget(
         Paragraph::new(lines).block(
             Block::default()
                 .borders(Borders::ALL)
-                .style(Style::new().bg(SURFACE))
-                .border_style(Style::new().fg(RULE).bg(SURFACE))
+                .style(fill)
+                .border_style(edge)
                 .title(Span::styled(format!(" {title} "), Style::new().fg(CREAM))),
         ),
         area,
@@ -877,9 +1332,19 @@ fn truncate(text: &str, width: usize) -> String {
 }
 
 /// Greedy word wrap, hard-splitting any single word too long for the box.
+/// Leading spaces are the caller's indentation and survive onto the first
+/// line: splitting on spaces used to eat them, which left every unselected
+/// option in a menu two columns left of the one with the marker.
 fn wrap(text: &str, width: usize) -> Vec<String> {
     if width == 0 {
         return vec![text.to_string()];
+    }
+    let indent: String = text.chars().take_while(|c| *c == ' ').collect();
+    if !indent.is_empty() {
+        let room = width.saturating_sub(indent.chars().count()).max(1);
+        let mut lines = wrap(&text[indent.len()..], room);
+        lines[0] = format!("{indent}{}", lines[0]);
+        return lines;
     }
     let mut out = Vec::new();
     let mut line = String::new();
@@ -909,10 +1374,11 @@ fn wrap(text: &str, width: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{bar, popup_width, wrap};
-    use crate::app::{App, Msg, Shelf, Status, Track};
+    use crate::app::{App, Msg, Shelf, Status, Track, View};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
+    use ratatui::style::Modifier;
 
     /// The bottom row of a rendered frame, trailing spaces trimmed.
     fn status_row(width: u16, tracks: Vec<Track>, logs: Vec<String>) -> String {
@@ -1003,6 +1469,222 @@ mod tests {
         ]
     }
 
+    /* The folder says which playlist is on air and never which song, which
+       is the question people actually have of a player. */
+    #[test]
+    fn the_bar_names_the_track_cliamp_has_loaded() {
+        let bar = |width: u16, title: Option<&str>| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(tx, "settings".into());
+            app.tracks = spread();
+            app.done = Some(Ok(String::new()));
+            app.intro_done = true;
+            app.apply(Msg::Player(crate::app::Playback {
+                player: crate::app::Player::Running,
+                folder: None,
+                track: title.map(str::to_string),
+                playing: true,
+            }));
+            let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+            terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..width)
+                .map(|x| buffer[(x, 11)].symbol().to_string())
+                .collect::<String>()
+        };
+
+        let wide = bar(160, Some("Vogel im Käfig"));
+        assert!(wide.contains("♪ cliamp ▶"), "{wide:?}");
+        assert!(wide.contains("Vogel im Käfig"), "{wide:?}");
+        // Nothing loaded is not the same as nothing playing.
+        assert!(!bar(160, None).contains("Vogel"), "{:?}", bar(160, None));
+
+        /* Somebody else's song title is the one hint whose length earworm
+           does not choose, so it is capped and it gives way first. */
+        let long = bar(160, Some("Prescription for Sleep: Attack on Titan Jazz Arrangement"));
+        assert!(long.contains("Prescription for Sleep"), "{long:?}");
+        assert!(!long.contains("Arrangement"), "the title ran the length it liked: {long:?}");
+
+        let tight = bar(64, Some("Vogel im Käfig"));
+        assert!(!tight.contains("Vogel"), "the title pushed the counts off: {tight:?}");
+        assert!(tight.contains("120 ok"), "{tight:?}");
+        assert!(tight.contains("♪ cliamp"), "the player went with it: {tight:?}");
+    }
+
+    /* Urgency was the one thing on this bar that only colour said, so a
+       terminal without it, or a reader who cannot separate amber from dim,
+       saw an ordinary hint; and the bar named the player without ever saying
+       which of the two things it was doing. */
+    #[test]
+    fn no_state_in_the_bar_is_told_by_colour_alone() {
+        let bar = |logs: Vec<&str>, player: crate::app::Player, playing: bool| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(tx, "settings".into());
+            app.tracks = vec![track_named(1, "Autobahn")];
+            app.done = Some(Ok(String::new()));
+            app.intro_done = true;
+            app.logs = logs.into_iter().map(str::to_string).collect();
+            app.apply(Msg::Player(crate::app::Playback {
+                player,
+                playing,
+                ..Default::default()
+            }));
+            let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
+            terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..120)
+                .map(|x| buffer[(x, 11)].symbol().to_string())
+                .collect::<String>()
+        };
+        use crate::app::Player;
+
+        let warned = bar(vec!["WARNING: one video"], Player::Missing, false);
+        let broke = bar(vec!["ERROR: it went wrong"], Player::Missing, false);
+        assert!(warned.contains("l  1 yt-dlp line"), "{warned:?}");
+        assert!(!warned.contains('!'), "an ordinary run was marked urgent: {warned:?}");
+        assert!(broke.contains("! l"), "an error reads as an ordinary hint: {broke:?}");
+
+        // Which of the two cliamp is doing, not merely that it is up.
+        assert!(bar(vec![], Player::Running, true).contains("♪ cliamp ▶"));
+        assert!(bar(vec![], Player::Running, false).contains("♪ cliamp ⏸"));
+        assert!(bar(vec![], Player::Stopped, false).contains("♪ cliamp off"));
+    }
+
+    /* `f` toggles silently, and a cursor that jumps to whatever is
+       downloading reads as a bug until you know a mode is doing it. */
+    #[test]
+    fn the_bar_says_when_the_cursor_is_following_the_run() {
+        let bar = |settled: bool, follow: bool| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(tx, "settings".into());
+            app.tracks = spread();
+            app.follow = follow;
+            app.intro_done = true;
+            if settled {
+                app.done = Some(Ok(String::new()));
+            }
+            let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
+            terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..120)
+                .map(|x| buffer[(x, 11)].symbol().to_string())
+                .collect::<String>()
+        };
+        assert!(bar(false, true).contains("following"), "{:?}", bar(false, true));
+        assert!(!bar(false, false).contains("following"), "{:?}", bar(false, false));
+        /* Nothing moves the cursor once the run is over, so the word would
+           describe a mode that is not doing anything. */
+        assert!(!bar(true, true).contains("following"), "{:?}", bar(true, true));
+    }
+
+    /* The first question a new user is ever asked, on a screen with nothing
+       else on it: both facts they need before typing anything. */
+    #[test]
+    fn the_url_prompt_says_what_an_answer_looks_like() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        let (reply, _answers) = std::sync::mpsc::channel();
+        app.apply(Msg::Ask(
+            crate::app::Prompt::Input {
+                header: "YouTube playlist URL".into(),
+                note: "a playlist or a single video  ·  esc quits".into(),
+                value: String::new(),
+                escape: crate::app::Escape::Quit,
+            },
+            reply,
+        ));
+        app.intro_done = true;
+        let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let screen: String = (0..14)
+            .map(|y| {
+                (0..80)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("YouTube playlist URL"), "{screen}");
+        assert!(screen.contains("a playlist or a single video"), "{screen}");
+        assert!(screen.contains("esc quits"), "{screen}");
+    }
+
+    /* The row truncates `was` at 32 characters, and the part it cuts is
+       usually the part that says how the identification went wrong. The path
+       is never on the row at all. */
+    #[test]
+    fn a_wide_terminal_says_the_whole_of_what_the_row_truncates() {
+        let screen = |width: u16| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(tx, "settings".into());
+            let mut track = track_named(1, "Neu! - Hallogallo");
+            track.was = "Neu! - Hallogallo (1972 Remaster, Official Audio) [HQ]".into();
+            track.artist = "Neu!".into();
+            track.title = "Hallogallo".into();
+            track.duration = 610;
+            track.path = Some(std::path::PathBuf::from("/music/Krautrock/01 Neu! - Hallogallo.opus"));
+            app.tracks = vec![track];
+            app.done = Some(Ok("finished".into()));
+            app.intro_done = true;
+            let mut terminal = Terminal::new(TestBackend::new(width, 14)).unwrap();
+            terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..14)
+                .map(|y| {
+                    (0..width)
+                        .map(|x| buffer[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let wide = screen(110);
+        assert!(wide.contains("Official Audio"), "the tail is still cut: {wide}");
+        assert!(wide.contains("10:10"), "no length: {wide}");
+        assert!(wide.contains("Krautrock"), "no path: {wide}");
+
+        /* Below the threshold the row needs every column it has, so the pane
+           is simply absent rather than squeezed. */
+        let narrow = screen(80);
+        assert!(!narrow.contains("Krautrock"), "the pane took a narrow screen: {narrow}");
+        assert!(narrow.contains("Hallogallo"), "{narrow}");
+    }
+
+    /* The header counts the folders and the rows count their tracks, and
+       neither says what the library as a whole is carrying. */
+    #[test]
+    fn the_library_bar_carries_the_whole_librarys_totals() {
+        let rows = library_screen_at(120, 0);
+        let bar = rows.last().unwrap();
+        assert!(bar.contains("51 tracks"), "{bar:?}");
+        assert!(bar.contains("2 missing"), "{bar:?}");
+        assert!(bar.contains("last sync 3d ago"), "{bar:?}");
+        // The hints are what nothing else can recover, so they keep their room.
+        assert!(bar.contains("enter open"), "{bar:?}");
+    }
+
+    /* Review narrows the list with nothing in the filter box, so the band has
+       to name itself or the list looks like it has lost most of the run. */
+    #[test]
+    fn the_band_says_the_list_is_narrowed_to_the_review() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.tracks = spread();
+        app.done = Some(Ok("finished".into()));
+        app.intro_done = true;
+        app.apply(Msg::Review);
+        let mut terminal = Terminal::new(TestBackend::new(90, 12)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let band: String = (0..90).map(|x| buffer[(x, 1)].symbol().to_string()).collect();
+        assert!(band.contains("REVIEW"), "{band:?}");
+        // 9 kept, 7 weak, 5 no match and 3 failed, out of 361.
+        assert!(band.contains("24 of 361 shown"), "{band:?}");
+        assert!(band.contains("esc clears"), "{band:?}");
+    }
+
     fn library_screen(width: u16) -> Vec<String> {
         library_screen_at(width, 0)
     }
@@ -1044,6 +1726,7 @@ mod tests {
             app.apply(Msg::Player(crate::app::Playback {
                 player: crate::app::Player::Running,
                 folder: folder.map(std::path::PathBuf::from),
+                track: None,
                 playing,
             }));
             let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
@@ -1132,14 +1815,380 @@ mod tests {
         assert!(rows[11].contains("enter open"), "{:?}", rows[11]);
     }
 
+    /* A walk with j and k to answer a question whose options are right
+       there, on a menu that fires at the end of every run. */
+    #[test]
+    fn a_choice_numbers_its_options() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.apply(Msg::Ask(
+            crate::app::Prompt::Choice {
+                header: "finished".into(),
+                note: "12 tracks".into(),
+                options: vec![
+                    "keep this open".into(),
+                    "play it in cliamp".into(),
+                    "sync another playlist".into(),
+                    "quit".into(),
+                ],
+                escape: crate::app::Escape::Keep,
+            },
+            std::sync::mpsc::channel().0,
+        ));
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let screen: String = (0..16)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol().to_string()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(screen.contains("▌ 1 keep this open"), "{screen}");
+        // Every option in the same column, marker or not.
+        assert!(screen.contains("  2 play it in cliamp"), "{screen}");
+        assert!(screen.contains("  4 quit"), "{screen}");
+        // And the keys say so, or the numbers are decoration.
+        assert!(screen.contains("1-4 pick"), "{screen}");
+    }
+
+    /* Both boxes and the title they are being corrected against, in one
+       frame: the popup is the whole edit now, not the first half of it. */
+    #[test]
+    fn the_edit_form_shows_both_boxes_and_the_title_behind_them() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.apply(Msg::Ask(
+            crate::app::Prompt::Form {
+                header: "track 4".into(),
+                note: "Roygbiv - Boards Of Canada (Official Audio)".into(),
+                fields: vec![
+                    ("artist".into(), "Roygbiv".into()),
+                    ("title".into(), "Boards Of Canada".into()),
+                ],
+                escape: crate::app::Escape::Skip,
+            },
+            std::sync::mpsc::channel().0,
+        ));
+
+        let render = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(90, 16)).unwrap();
+            terminal.draw(|f| super::draw(f, app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..16)
+                .map(|y| {
+                    (0..90).map(|x| buffer[(x, y)].symbol().to_string()).collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        let first = render(&mut app);
+        assert!(first.contains("track 4"), "{first}");
+        assert!(first.contains("was  Roygbiv - Boards Of Canada (Official Audio)"), "{first}");
+        assert!(first.contains("artist"), "{first}");
+        assert!(first.contains("title"), "{first}");
+        assert!(first.contains("^s swap"), "the swap key went unlisted:\n{first}");
+        // One block, in the box that has the keys.
+        assert_eq!(first.matches('\u{2588}').count(), 1, "{first}");
+        assert!(first.contains("Roygbiv\u{2588}"), "{first}");
+
+        app.next_field(true);
+        let second = render(&mut app);
+        assert_eq!(second.matches('\u{2588}').count(), 1, "{second}");
+        assert!(second.contains("Boards Of Canada\u{2588}"), "the caret stayed put:\n{second}");
+    }
+
+    /* The right half of the header was empty on every screen while the one
+       thing a long run cannot say from its rows is how far along it is. */
+    #[test]
+    fn the_header_carries_the_run_and_gives_it_up_when_narrow() {
+        let head = |width: u16, running: bool| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(tx, "opus · ~/Music".into());
+            app.apply(Msg::Tracks(spread()));
+            app.playlist = "Focus".into();
+            if !running {
+                app.done = Some(Ok("finished".into()));
+            }
+            let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+            terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..width)
+                .map(|x| buffer[(x, 0)].symbol().to_string())
+                .collect::<String>()
+        };
+
+        // 358 of 361 settle at once in this fixture, so the bar is nearly full.
+        let wide = head(120, true);
+        assert!(wide.contains("━━━━"), "no progress bar: {wide:?}");
+        assert!(wide.contains("Focus"), "the left half lost its playlist");
+
+        // Half a bar is a lie, so it goes whole or not at all.
+        let narrow = head(46, true);
+        assert!(!narrow.contains("━━"), "the bar squeezed the playlist out: {narrow:?}");
+        assert!(narrow.contains("Focus"), "{narrow:?}");
+
+        /* A finished run has nothing left to estimate, so the space goes to
+           what the run was doing, which is otherwise only under `h`. */
+        let over = head(120, false);
+        assert!(over.contains("opus · ~/Music"), "{over:?}");
+        assert!(!over.contains("━━━━"), "a finished run still drew a bar: {over:?}");
+    }
+
+    /* The cost of quitting is the whole point of asking, so the box has to
+       carry the count. */
+    #[test]
+    fn the_quit_question_says_what_it_would_cost() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.tracks = vec![track_named(1, "Autobahn"), track_named(2, "Hallogallo")];
+        app.tracks[1].status = Status::Downloading;
+        app.confirm = Some(crate::app::Confirm::Quit);
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let screen: String = (0..14)
+            .map(|y| (0..80).map(|x| buffer[(x, y)].symbol().to_string()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("quit?"), "{screen}");
+        assert!(screen.contains("1 of 2 finished so far"), "{screen}");
+        assert!(screen.contains("stops the download"), "{screen}");
+        assert!(screen.contains("esc  keep going"), "{screen}");
+    }
+
+    /* A key nobody can see is a key nobody presses: the library named its
+       keys in the status bar and the track list named none of its own. */
+    #[test]
+    fn the_track_bar_names_the_key_for_where_the_run_is() {
+        let bar = |failures: bool, running: bool| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(tx, "settings".into());
+            app.tracks = vec![track_named(1, "Autobahn"), track_named(2, "Hallogallo")];
+            if failures {
+                app.tracks[1].status = Status::Failed;
+            }
+            if !running {
+                app.done = Some(Ok("finished".into()));
+            }
+            let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
+            terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..100)
+                .map(|x| buffer[(x, 11)].symbol().to_string())
+                .collect::<String>()
+        };
+
+        // Mid-run the post-run keys are dead, so the one live key is offered.
+        assert!(bar(false, true).contains("/ filter"), "{:?}", bar(false, true));
+        assert!(!bar(false, true).contains("e edit"), "a dead key was offered");
+
+        assert!(bar(false, false).contains("e edit"), "{:?}", bar(false, false));
+        // Retry is only an answer when there is something to answer for.
+        assert!(!bar(false, false).contains("r retry"), "{:?}", bar(false, false));
+        assert!(bar(true, false).contains("r retry"), "{:?}", bar(true, false));
+    }
+
+    /* The tally cannot be recovered by pressing anything and the hints can,
+       so a narrow bar keeps the counts and drops the hint. */
+    #[test]
+    fn a_narrow_bar_keeps_the_tally_and_drops_the_hint() {
+        let bar = |width: u16| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(tx, "settings".into());
+            app.tracks = spread();
+            app.done = Some(Ok(String::new()));
+            let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+            terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..width)
+                .map(|x| buffer[(x, 11)].symbol().to_string())
+                .collect::<String>()
+        };
+        assert!(bar(100).contains("e edit"), "{:?}", bar(100));
+        let tight = bar(46);
+        assert!(!tight.contains("e edit"), "the hint pushed the tally out: {tight:?}");
+        assert!(tight.contains("120 ok"), "{tight:?}");
+    }
+
+    /* yt-dlp warns about a video on most good runs, so red everywhere made
+       every run look broken and hid the one line that mattered. */
+    #[test]
+    fn the_log_pane_separates_a_warning_from_an_error() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.tracks = vec![track_named(1, "Autobahn")];
+        app.done = Some(Ok(String::new()));
+        app.show_logs = true;
+        app.apply(Msg::Log("WARNING: nothing to merge".into()));
+        app.apply(Msg::Log("ERROR: unable to download".into()));
+        app.apply(Msg::Log("[info] writing thumbnail".into()));
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let colour_of = |needle: &str| {
+            (0..14)
+                .find_map(|y| {
+                    let row: String =
+                        (0..80).map(|x| buffer[(x, y)].symbol().to_string()).collect();
+                    row.contains(needle).then(|| buffer[(2, y)].fg)
+                })
+                .unwrap_or_else(|| panic!("{needle} never drew"))
+        };
+        assert_eq!(colour_of("ERROR"), crate::theme::RED);
+        assert_eq!(colour_of("WARNING"), crate::theme::AMBER);
+        assert_eq!(colour_of("[info]"), crate::theme::DIM);
+    }
+
+    /* The block used to sit at the end of the line whatever the caret was
+       doing, so an edit in the middle drew the cursor somewhere it was not. */
+    #[test]
+    fn the_prompt_draws_its_caret_where_the_next_letter_lands() {
+        let screen = |back: usize| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(tx, "settings".into());
+            app.apply(Msg::Ask(
+                crate::app::Prompt::Input {
+                    note: String::new(),
+                    header: "Title".into(),
+                    value: "Autobahn".into(),
+                    escape: crate::app::Escape::Skip,
+                },
+                std::sync::mpsc::channel().0,
+            ));
+            for _ in 0..back {
+                app.input_move(false);
+            }
+            let mut terminal = Terminal::new(TestBackend::new(60, 12)).unwrap();
+            terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..12)
+                .map(|y| {
+                    (0..60)
+                        .map(|x| buffer[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .find(|r| r.contains("Auto"))
+                .expect("the prompt drew no text")
+        };
+        assert!(screen(0).contains("Autobahn\u{2588}"), "{:?}", screen(0));
+        assert!(screen(4).contains("Auto\u{2588}bahn"), "{:?}", screen(4));
+    }
+
+    /* The status words are the app's own vocabulary, so the overlay is where
+       they get explained. It gives way on a short terminal rather than being
+       clipped by the border with nothing saying so. */
+    #[test]
+    fn the_help_glosses_the_statuses_when_there_is_room() {
+        let help = |height: u16, view: View| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(tx, "settings".into());
+            app.tracks = vec![track_named(1, "Autobahn")];
+            app.done = Some(Ok("finished".into()));
+            app.show_help = true;
+            if view == View::Library {
+                app.apply(Msg::Library { shelves: shelves(), show: true });
+            }
+            app.intro_done = true;
+            let mut terminal = Terminal::new(TestBackend::new(90, height)).unwrap();
+            terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..height)
+                .map(|y| {
+                    (0..90)
+                        .map(|x| buffer[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<String>>()
+                .join("\n")
+        };
+        let tall = help(40, View::Tracks);
+        assert!(tall.contains("guessed"), "no legend on a tall terminal:\n{tall}");
+        assert!(tall.contains("no match"), "{tall}");
+        // The words alone say nothing without what to do about them.
+        assert!(tall.contains("a guess, worth a look"), "{tall}");
+        assert!(tall.contains("l has the reason"), "{tall}");
+
+        // The keys are what the overlay is for, so they are what stays.
+        let short = help(20, View::Tracks);
+        assert!(!short.contains("guessed"), "the legend crowded out the keys:\n{short}");
+        assert!(short.contains("edit this track"), "{short}");
+
+        // The library has no statuses on it, so it has nothing to explain.
+        assert!(!help(40, View::Library).contains("guessed"));
+    }
+
+    /* `missing` is only on some rows, so without a fixed slot the sync column
+       stepped sideways between rows and the eye had to re-find it. */
+    #[test]
+    fn the_sync_column_holds_still_whether_or_not_files_are_missing() {
+        let rows = library_screen(80);
+        let col = |r: &String| r.chars().position(|c| c == 's').map(|_| {
+            let text: Vec<char> = r.chars().collect();
+            let want: Vec<char> = "synced".chars().collect();
+            let never: Vec<char> = "never synced".chars().collect();
+            (0..text.len())
+                .find(|&i| text[i..].starts_with(&want) || text[i..].starts_with(&never))
+                .unwrap()
+        });
+        let focus = col(&rows[2]).expect("no sync time on the Focus row");
+        let road = col(&rows[3]).expect("no sync time on the Road trip row");
+        assert_eq!(focus, road, "{:?}\n{:?}", rows[2], rows[3]);
+    }
+
+    /* The bar alone is a thin signal for "this is what the next key acts on",
+       so the name on the cursor row is bold and no other name is. */
+    #[test]
+    fn only_the_cursor_rows_name_is_bold() {
+        let bold_names = |width: u16, shelf: usize| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(tx, "settings".into());
+            app.apply(Msg::Library { shelves: shelves(), show: true });
+            app.shelf = shelf;
+            app.intro_done = true;
+            let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+            terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            // The first letter of each name sits two cells in from the marker.
+            (2..4)
+                .map(|y| buffer[(2, y)].modifier.contains(Modifier::BOLD))
+                .collect::<Vec<bool>>()
+        };
+        assert_eq!(bold_names(80, 0), [true, false]);
+        assert_eq!(bold_names(80, 1), [false, true]);
+
+        // And the same on the track list, where the cursor is a track index.
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.tracks = vec![track_named(1, "Autobahn"), track_named(2, "Hallogallo")];
+        app.done = Some(Ok("finished".into()));
+        app.cursor = 1;
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let name_at = |y: u16| {
+            let row: String = (0..80).map(|x| buffer[(x, y)].symbol().to_string()).collect();
+            let x = row.chars().position(|c| c == 'A' || c == 'H').unwrap() as u16;
+            buffer[(x, y)].modifier.contains(Modifier::BOLD)
+        };
+        assert!(!name_at(2), "the row above the cursor is bold");
+        assert!(name_at(3), "the cursor row is not bold");
+    }
+
     /* The shelf row says a sync would re-download two files but never which,
        which is the whole reason the pane is there. It follows the cursor
        without a cursor of its own, and a folder longer than the pane says how
-       many it could not show rather than ending mid-list. */
+       many it could not show rather than ending mid-list. A bordered column
+       of filenames with no head to it says nothing about which folder it
+       belongs to, so the first line is the counts. */
     #[test]
     fn the_preview_shows_the_selected_folders_tracks() {
         let rows = library_screen_at(120, 1);
         let pane: String = rows[2..10].join("\n");
+        assert!(rows[2].contains("9 tracks  ·  2 missing"), "{:?}", rows[2]);
         assert!(pane.contains("Autobahn"), "{pane:?}");
         assert!(pane.contains("Vitamin C"), "{pane:?}");
         // The missing one is marked, not merely coloured.
@@ -1153,13 +2202,16 @@ mod tests {
 
         let long = library_screen_at(120, 0);
         let pane: String = long[2..10].join("\n");
+        assert!(long[2].contains("42 tracks"), "{:?}", long[2]);
+        assert!(!long[2].contains("missing"), "nothing is missing here: {:?}", long[2]);
         assert!(pane.contains("Track 1"), "{pane:?}");
-        assert!(pane.contains("Track 7"), "{pane:?}");
-        assert!(!pane.contains("Track 8"), "a row overflowed the pane: {pane:?}");
-        assert!(pane.contains("… 35 more"), "{pane:?}");
+        // The head costs the pane a row, and the tail count is what says so.
+        assert!(pane.contains("Track 6"), "{pane:?}");
+        assert!(!pane.contains("Track 7"), "a row overflowed the pane: {pane:?}");
+        assert!(pane.contains("… 36 more"), "{pane:?}");
     }
 
-    /* The shelf row already needs its name plus 28 columns of counts, so a
+    /* The shelf row already needs its name plus 40 columns of counts, so a
        pane at this width would leave nothing for either. */
     #[test]
     fn a_narrow_library_has_no_preview_at_all() {
@@ -1632,6 +2684,10 @@ mod tests {
         );
         assert_eq!(wrap("supercalifragilistic", 8), ["supercal", "ifragili", "stic"]);
         assert_eq!(wrap("", 10), [""]);
+        // The caller's indentation, which is a column and not a separator.
+        assert_eq!(wrap("  ab cd", 10), ["  ab cd"]);
+        assert_eq!(wrap("  aaaa bbbb", 8), ["  aaaa", "bbbb"]);
+        assert_eq!(wrap("   ", 10), ["   "]);
     }
 
     #[test]
@@ -1753,6 +2809,7 @@ mod tests {
         let (reply, _back) = std::sync::mpsc::channel();
         asked.apply(Msg::Ask(
             crate::app::Prompt::Input {
+                note: String::new(),
                 header: "YouTube playlist URL".into(),
                 value: String::new(),
                 escape: crate::app::Escape::Quit,
@@ -1776,3 +2833,4 @@ mod tests {
         assert!(top.contains("earworm  ·"), "{top:?}");
     }
 }
+

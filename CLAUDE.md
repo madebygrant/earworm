@@ -309,6 +309,40 @@ call and file write. Nothing that blocks touches the render loop.
   hand-edited, so rebuilding it from the parsed struct would drop every
   comment. A file earworm can no longer read is worse than one that never
   recorded the choice, since the next start fails outright.
+- **Only `ErrorKind::NotFound` means the config is empty.** `unwrap_or_default`
+  on the read turned a permission denial or a stray non-UTF-8 byte into "the
+  file was empty", and the save then replaced a whole hand-written config with
+  one line while reporting success. An absent file is the one case that writes
+  a one-line config.
+- **`extension` never guesses.** It used to fall back to `opus`, so a typo in
+  `FORMATS` would predict the wrong filename for every track in a folder: the
+  scan would call all of them absent and download the lot again beside the
+  copies on disk. `Config::build` refuses anything not in the table and
+  `set_format` picks out of it, so an unknown name here is a bug in this file
+  and says so.
+- **The format is saved before the run adopts it.** A failed save left the
+  session on the new format while the flash said nothing had been remembered,
+  so the next download agreed with neither the message nor the file.
+- **A quoted key is the same key.** TOML allows `"format" = …`, which
+  `save_format` read as some other key and appended a second `format` to. That
+  is a duplicate, the re-parse refused it, and every later save failed the same
+  way: the setting could never be written again.
+- **`save_format` re-parses the file before editing it too.** A config that was
+  already broken is not something the edit did, and "the edited config no
+  longer parses" sends the reader to the wrong line.
+- **The write is a temp file renamed over the resolved path.** `fs::write`
+  truncates first, so a crash between the truncate and the write leaves a
+  config that will not load. The rename follows the symlink, because a config
+  kept in a dotfiles repo would otherwise be replaced by a plain file and every
+  later change in the repo would stop arriving; and it copies the old file's
+  mode, because a fresh temp file is world-readable and this file holds an
+  AcoustID key in plain text.
+- **The scan's format is tested through a stub yt-dlp, not through
+  `scan_template`.** Asserting on the helper left the call site free to pass
+  anything: reverting `.arg(scan_template(cfg))` to a hardcoded `opus` kept the
+  suite green while every track in a flac folder looked absent. `scan_with`
+  takes the binary so a test can read back the arguments the scan actually
+  ran with, the same way `player`'s `*_with` functions do.
 - **`f` is library-only, like `space`.** It follows the active track on the
   track list, and the setting is about the next playlist rather than the one on
   screen. `--no-config` leaves `Config.config_file` as `None`, and the flash
@@ -316,6 +350,241 @@ call and file write. Nothing that blocks touches the render loop.
 - **`Msg::Settings` exists because `App.settings` is built once at startup.**
   Change a setting from inside the tool without re-sending it and the help
   overlay keeps reporting the format the run began with.
+
+### What a key is allowed to do
+
+- **Esc never ends the session.** It used to quit whenever `leave_tracks`
+  found no library behind the run, which is every first run from start to
+  finish, so one Esc aimed at a filter or a closed prompt took the download
+  with it. It now reports what it cannot do, because a key that goes silent
+  reads as a broken key. `q` and ^c are the only ways out, and the help drops
+  the `back Esc` row when there is nothing behind the run rather than
+  documenting an exit that no longer exists.
+- **`App.say` is the UI talking, not the worker.** It is `Msg::Flash` without
+  a message, for the keys the UI answers by itself.
+- **The caret is a char index, `caret_byte` converts.** A byte index lands
+  inside a multi-byte character the first time a title carries an accent, and
+  `String::insert` panics on it. Every input edit goes through the `input_*`
+  methods so the caret and the string cannot disagree.
+- **The prompt block is drawn between `input_parts`.** Appending it to the end
+  of the line put the cursor where the next letter was not going.
+- **`App.viewport` is set by the draw, read by `page`.** Only the layout knows
+  how many rows the list got, and a page key that moves by anything else
+  scrolls past what the user was reading.
+- **The status bar's hints yield to the tally, and `extra` is what yields.**
+  Every count in the tally is unrecoverable once it is off the row, where
+  every hint is one `h` away. `TALLY_FLOOR` is the room the counts keep.
+- **A status legend only draws when the whole popup still clears the frame by
+  two rows.** It grew tall enough to cover the status bar once, which hid the
+  tally it exists to explain. The keys are what the overlay is for, so the
+  legend is what gives way.
+- **Colour is confidence, the word is provenance.** `ok` and `manual` share
+  teal because both are checked; `guessed`, `unsure` and `no match` are sand
+  or amber because none of them are. `kept` sat in dim beside four states with
+  nothing to check at all, so an unverified guess looked as settled as a
+  skipped track.
+- **`log_color` exists because a clean run still warns.** Painting all of
+  stderr red made every run look broken and hid the one ERROR in it, and the
+  `l` hint burns amber only when `log_errors()` finds a real one.
+
+### Questions, forms and quitting
+
+- **`App.confirm` is the UI asking itself, `Prompt` is the worker asking.**
+  Nothing is blocked on a confirm, so it carries no reply channel: the run
+  keeps going behind it. It is handled ahead of every screen's keys, or the
+  answer also reaches the list underneath.
+- **Only a named key confirms a quit.** `y`, `q`, Enter and ^c mean yes and
+  everything else means no. `q` meaning yes is deliberate: `qq` quits without
+  anyone reading the box, which is what stops the guard becoming a tax on the
+  people who meant it.
+- **`working()` is the one predicate behind Esc and `q`.** Two notions of "in
+  flight" would make the safe key safe on a different set of screens from the
+  one that asks. It is `busy` or an unsettled run that has tracks, so it is
+  false before the first list arrives.
+- **`App.fields` is the only text state, and a single prompt is a form with
+  one box.** Keeping a separate `input` beside the form's values meant two
+  sources of truth and a sync on every Tab. `input()` is the focused box;
+  `box_mut` is what every editing key writes through.
+- **`^u` clears the focused box, never the form.** The other box holds an
+  answer being kept.
+- **Only the focused box draws the block.** Two cursors in one popup and
+  neither of them is where typing lands.
+- **`edit` and `tag::manual` ask the same form.** Both used to ask artist
+  then title in sequence, so the second question covered the answer to the
+  first at the moment you wanted to compare them.
+- **The header's right half is dropped whole, never truncated.** Half a
+  progress bar is a lie about how far along the run is. The left half names
+  what you are looking at, so it is what stays.
+- **`App.run_started` is set by `Msg::Tracks`, not by `App::new`.** `started`
+  includes the intro and however long the URL prompt sat there, which would
+  make the first estimate of every run enormous.
+- **The estimate is coarse and only ever approximate.** Tracks already on disk
+  settle the instant the list arrives, so a part-downloaded folder reads
+  optimistic until real work lands; `eta` waits for three settled tracks and
+  hides anything under thirty seconds rather than pretending to a precision it
+  does not have.
+
+### Dependencies and --check
+
+- **`DEPS` is the one table, and the README's requirements list restates it.**
+  A binary's name is not always its package: `fpcalc` comes from
+  `chromaprint`, which is exactly the lookup a bare "not found on PATH" leaves
+  the reader to do by hand.
+- **Only `ErrorKind::NotFound` earns an install line.** A permission error
+  told to `brew install` sends the reader after the wrong problem, which is
+  worse than the vague message it replaced.
+- **`report` takes `Facts` and touches nothing.** Probing PATH and walking
+  `--dir` happen in `main::check`, so the report is testable as the text it
+  is rather than as whatever the machine running the tests has installed.
+- **An optional tool missing is not a failed check.** `ready` is what sets
+  the exit status and only required tools clear it, so `--check` in a script
+  means "can earworm work", not "is everything installed". The row still
+  carries a cross and what you lose without it.
+- **`version_of` takes one word after the tool's own name.** ffmpeg follows
+  its version with a copyright line and fpcalc with a build string, and three
+  of the four restate their own name before the number.
+
+### Colour depth and the terminal
+
+- **The palette stays one set of RGB numbers; `recolour` maps the finished
+  buffer.** Three palettes would be three things to keep in step, and every
+  widget would have to ask which one it was drawing into. It is the last thing
+  `draw` does, after every widget has had its say.
+- **Truecolor is opt-in through `COLORTERM`, and 256 is the assumption.** A
+  truecolor terminal shown 256 colours loses smoothness in the gradient; a
+  256-colour terminal shown truecolor loses the text. `depth_from` is kept
+  apart from the environment so the decision is testable as a decision.
+- **The quantiser weighs the 216-cube against the 24-step grey ramp.** Most of
+  this palette is a near-grey, and the cube's steps are 40 apart: cream
+  rounding to a cube corner stops being the brightest thing on screen.
+- **`NO_COLOR` is presence, not truth.** Any non-empty value means no colour,
+  `NO_COLOR=0` included; only an empty value does not count.
+- **Without colour a band is reversed video, not a fill.** The band is the one
+  thing on screen that must not be missable. The gradient is skipped entirely
+  and the popup keeps only its border, which becomes the whole separation.
+- **`NO_COLOR` set while running the tests fails about a dozen of them.** They
+  assert on `theme::GOLD` and friends, and the depth is a process-wide
+  `OnceLock`. Test `depth_from` and `shade_at`, never the global.
+
+### Lists and messages
+
+- **`ListState` is built fresh every frame, so the offset has to be ours.**
+  Left to itself ratatui scrolls the least it can to make the selection
+  visible, which pins the cursor to the last row for the whole of a long list.
+  `scroll_to` keeps `SCROLLOFF` rows of context and only moves when the cursor
+  comes within that of an edge; `App.scroll` and `App.shelf_scroll` carry it
+  between frames.
+- **A flash is timed by its length and a second one queues.** One fixed four
+  seconds fitted "saved track 12" and not a wrapped cliamp error, and a bulk
+  action's outcomes used to arrive and leave inside a single blink with only
+  the last readable. `QUEUE` is three deep, and `Msg::Stage` clears it: the
+  run talking outranks a backlog of outcomes from before it started.
+- **`wrap` keeps the caller's leading spaces on the first line.** Splitting on
+  spaces ate them, which left every unselected option in a menu two columns
+  left of the one carrying the marker.
+- **A digit answers a choice only when that option is there.** The finish
+  menu's last row is quit, so an unbounded digit is one keypress from ending
+  the session by accident.
+- **earworm refuses a terminal it cannot draw in.** Both ends are checked:
+  crossterm's raw mode otherwise fails with an OS error naming a device rather
+  than saying `--list` and `--check` work without one.
+
+### Narrowing, ordering and undoing
+
+- **The review is a predicate beside the filter, not a string in the box.**
+  `kept`, `unsure`, `no match` and `failed` share no word to type, so
+  `Status::wants_a_look` is what `v`, `n`/`N` and the finish menu's first row
+  all read. `keeps()` is where the two narrowings meet, and `narrowed()` is
+  what every key that clears them asks; clearing one without the other leaves
+  a band saying the list is short with nothing to turn off.
+- **`n` and `N` do not wrap.** A jump that quietly starts again at the top
+  reads as a key that did nothing. Reaching the end says which end it was.
+- **The library order is a view, never a sort of `library` itself.** `shelf`
+  is a position in the vector the worker built, so re-sorting that vector
+  would move the folder out from under the cursor every time a sync changed a
+  count. `shelf_rows()` is the order and the narrowing together, and every
+  library key walks it, exactly as the track keys walk `rows()`.
+- **One filter box, two screens.** `snap()` puts both cursors back on a row
+  that is showing, because a message can change either list. The band asks
+  the view which counts to print.
+- **Undo holds the values, not a diff, and only one level.** The edit worth
+  taking back is the one just seen landing on the row; a stack would be a
+  second history to keep in step with the files on disk. It clears itself
+  after one use, or `u` is a redo wearing the name of an undo.
+- **`Msg::Undoable` is what makes `u` a key at all.** The worker holds the old
+  values, so the UI cannot work out whether there is anything to put back, and
+  a key that can only fail is worse than no key. The bar names what it holds,
+  since one level of undo is only usable if you can see which level.
+- **An undone track reads `undone`, not the status it had.** Somebody typed
+  those values back. Restoring `ok` would claim a lookup that is no longer
+  what is in the file.
+- **A bulk undo collects each track's values as its write succeeds.** A track
+  that could not be written is not one `u` may claim to put back.
+- **The log offset counts from the tail.** That is where a running job writes,
+  so a line arriving while someone is reading further up has to grow the
+  offset or the window moves under them.
+- **The help overlay gives way in order: the legend, then the settings tail.**
+  The keys are what it is for, and the popup must clear the frame by two rows
+  or it covers the status bar. Adding rows to that table is what makes the
+  rule bite, and the failure is a test somewhere else entirely.
+- **The window title is written only when it changes.** Every frame otherwise
+  writes an escape sequence nobody asked for. It says `0/0` never: a scan that
+  is working would look like one that is stuck.
+
+### Verbs, modes and the bell
+
+- **One verb per activity, in the header and on the row.** The header said
+  `downloading` while the row said `getting`, and `reading` on a row was tag
+  reading while `reading playlist` in the header was the scan. Fetch, tag and
+  list are now one word each, and every status label still has to fit
+  `STATUS_WIDTH`.
+- **Following says so, and only while it is live.** `f` toggles silently and
+  the cursor being dragged to whatever is downloading reads as a bug. The bar
+  word and the flash share `working()` as their condition: once the run has
+  settled nothing moves the cursor, so announcing that the mode stopped would
+  land on the first `j` of every tag-fixing session and mean nothing.
+- **The bell is decided on the frame the run settles, not while it is set.**
+  `run_started.elapsed()` keeps growing, so a menu left open for a minute
+  would ring for a run that took five seconds. `rang` re-arms when `done`
+  clears, because a session syncs more than one playlist.
+- **A bell, not OSC 9.** An escape sequence the terminal does not know prints
+  its own text into the middle of the frame, and a notification is not worth a
+  torn screen.
+- **`intro = false` is `intro_done`, not a second flag.** Everything else that
+  ends the intro says it is over; a parallel "disabled" flag would be a second
+  answer to one question.
+- **Enter at the pick with nothing marked refuses.** It means exactly what Esc
+  means, and it is one stray `a` from being an accident, so it says what both
+  keys do and leaves the question open.
+- **`M` is track-list only.** Nothing is tagged at the pick, so every artist
+  is empty there and the key could only ever refuse. It matches artists
+  case-insensitively: case is a tagging accident, not a different artist.
+- **The finish menu's format row needs `config_file`.** Without one the choice
+  lasts until the tool closes, which is not what "next time" says.
+- **Every error a key can reach ends with the next step.** `failed: track 12
+  was never downloaded` is true and leaves the reader to work out that `r` is
+  the answer. The separator is the same middle dot the rest of the copy uses.
+
+- **The bar's track title lives in `extra`, not in the hints.** It is the one
+  thing on that row whose length earworm does not choose, and the hints proper
+  never give way to the tally. Capped as well, so a long title cannot spend
+  the whole row before it is dropped.
+- **`read_status` is kept apart from `probe`.** `probe` reaches a socket, so a
+  test of it would be a test of whether the machine running the suite happens
+  to have cliamp up. The parsing is text in, `Playback` out, tested against
+  the payload cliamp actually emits.
+- **No state on screen is told apart by colour alone.** Statuses are words, a
+  missing file carries `!`, the log hint puts `!` in front of itself when
+  there is a real error rather than only burning amber, and the bar says
+  `♪ cliamp ▶` or `⏸` rather than leaving the transport to the colour. A
+  terminal without colour, and a reader who cannot separate amber from dim,
+  see the same states everyone else does.
+- **`O` reveals, `o` orders.** The sort came first and a key that means two
+  things on one screen is worse than a new one.
+- **`player::reveal` takes the binary, like the cliamp calls do.** A test that
+  ran the real opener would put a window on the screen of whoever is running
+  the suite. `opener()` is the platform choice, kept apart so it is testable
+  as a choice.
 
 ### Text, subprocesses and keys
 

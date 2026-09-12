@@ -1,0 +1,405 @@
+<title>Earworm Design Review</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Xanh+Mono:ital@0;1&family=Alegreya+Sans:ital,wght@0,400;0,500;0,700;1,400&display=swap">
+<style>
+  /* Single visual world on purpose: the palette is theme.rs, so the report
+     reads like a page of the product it is about. */
+  :root {
+    --far: #120116;
+    --near: #372825;
+    --surface: #2e2921;
+    --cream: #ecdfc0;
+    --gold: #d6b460;
+    --teal: #60b29e;
+    --amber: #d69a4e;
+    --red: #c46a5c;
+    --sand: #a89b7e;
+    --dim: #9e9480;
+    --rule: #5c5442;
+    --ink: #181210;
+    --display: "Xanh Mono", "Iosevka", ui-monospace, "SF Mono", Menlo, monospace;
+    --body: "Alegreya Sans", "Gill Sans", "Segoe UI", system-ui, sans-serif;
+    --mono: "Xanh Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  }
+  html { color-scheme: dark; }
+  body {
+    margin: 0;
+    background: var(--far) linear-gradient(45deg, var(--near) 0%, var(--far) 76%) fixed;
+    color: var(--cream);
+    font-family: var(--body);
+    font-size: 18px;
+    line-height: 1.55;
+    padding-block: 3rem 6rem;
+    padding-inline: clamp(16px, 6vw, 72px);
+  }
+  a { color: var(--gold); text-decoration-color: var(--rule); text-underline-offset: 3px; }
+  a:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+  .page { max-width: 72rem; margin-inline: auto; display: grid; gap: 3.5rem; }
+  .prose { max-width: 66ch; }
+
+  header { display: grid; gap: 1rem; }
+  .wordmark {
+    font-family: var(--display); font-size: clamp(2.4rem, 6vw, 4.2rem); line-height: 1;
+    color: var(--gold); margin: 0; letter-spacing: -0.01em; text-wrap: balance;
+  }
+  .wordmark i { color: var(--cream); font-style: italic; }
+  .wave { font-family: var(--mono); color: var(--amber); font-size: 1.1rem; letter-spacing: 0.08em; user-select: none; }
+  .standfirst { font-size: 1.25rem; line-height: 1.45; color: var(--cream); margin: 0; }
+  .meta { color: var(--dim); font-size: 0.95rem; display: flex; gap: 1.5rem; flex-wrap: wrap; }
+  .meta b { color: var(--sand); font-weight: 500; }
+
+  nav.contents { display: flex; gap: 0.35rem 1.4rem; flex-wrap: wrap; font-family: var(--mono); font-size: 0.95rem; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); padding-block: 0.7rem; }
+  nav.contents a { color: var(--sand); text-decoration: none; }
+  nav.contents a:hover { color: var(--gold); }
+
+  h2 {
+    font-family: var(--display); font-weight: 400; font-size: 1.9rem; line-height: 1.15;
+    color: var(--gold); margin: 0 0 1rem; text-wrap: balance;
+  }
+  h2 .k { color: var(--dim); font-size: 0.75em; margin-right: 0.6rem; }
+  h3 { font-family: var(--body); font-weight: 700; font-size: 1.05rem; letter-spacing: 0.02em; color: var(--cream); margin: 2rem 0 0.4rem; }
+  p { margin: 0 0 1rem; }
+  ul { margin: 0 0 1rem; padding-left: 1.2rem; }
+  li { margin-bottom: 0.4rem; }
+  li::marker { color: var(--gold); }
+  code, kbd { font-family: var(--mono); font-size: 0.95em; color: var(--cream); }
+  kbd { border: 1px solid var(--rule); border-radius: 3px; padding: 0 0.3em; background: var(--surface); color: var(--gold); font-size: 0.85em; white-space: nowrap; }
+  .dim { color: var(--dim); }
+
+  /* A finding: the claim in bold, what to do as the run-on. Cards would
+     say "separate object" about things that are one list. */
+  .findings { display: grid; gap: 1.1rem; margin: 0; padding: 0; list-style: none; }
+  .findings li { display: grid; grid-template-columns: 3.2rem 1fr; gap: 0.6rem; margin: 0; }
+  .findings .id { font-family: var(--mono); color: var(--dim); font-size: 0.95rem; padding-top: 0.15rem; }
+  .findings b { color: var(--cream); font-weight: 700; }
+  .findings .why { color: var(--sand); }
+
+  /* Terminal mockups are the one thing here that earns a frame. */
+  pre.tui {
+    font-family: var(--mono); font-size: 0.92rem; line-height: 1.35;
+    background: linear-gradient(45deg, #3d2c29 0%, #160419 76%);
+    border: 1px solid var(--rule); border-radius: 4px;
+    padding: 0.9rem 1rem; margin: 1rem 0 1.4rem; overflow-x: auto; color: var(--cream);
+    max-width: 100%;
+  }
+  pre.tui .g { color: var(--gold); } pre.tui .t { color: var(--teal); } pre.tui .a { color: var(--amber); }
+  pre.tui .d { color: var(--dim); } pre.tui .s { color: var(--sand); } pre.tui .r { color: var(--red); }
+  pre.tui .band { background: var(--gold); color: var(--ink); font-weight: 700; }
+  pre.tui .cur { font-weight: 700; }
+  figcaption { color: var(--dim); font-size: 0.9rem; margin-top: -1rem; margin-bottom: 1.6rem; }
+
+  .keep { display: grid; grid-template-columns: repeat(auto-fit, minmax(17rem, 1fr)); gap: 0.4rem 2rem; list-style: none; padding: 0; margin: 0; }
+  .keep li { padding-left: 1.1rem; position: relative; }
+  .keep li::before { content: "▌"; color: var(--teal); position: absolute; left: 0; }
+
+  /* Tasklist */
+  .tasks-wrap { overflow-x: auto; border-top: 1px solid var(--rule); }
+  table.tasks { width: 100%; border-collapse: collapse; font-size: 0.98rem; font-variant-numeric: tabular-nums; }
+  table.tasks th { text-align: left; font-family: var(--mono); font-weight: 400; color: var(--dim); font-size: 0.85rem; letter-spacing: 0.06em; text-transform: uppercase; padding: 0.7rem 0.6rem 0.5rem; border-bottom: 1px solid var(--rule); }
+  table.tasks td { padding: 0.55rem 0.6rem; border-bottom: 1px solid #3a3229; vertical-align: top; }
+  table.tasks tr.wave td.wv { font-family: var(--mono); color: var(--gold); padding-top: 1.6rem; border-bottom: none; font-size: 0.95rem; }
+  table.tasks tr.wave td.wv small { color: var(--dim); margin-left: 0.8rem; font-family: var(--body); font-size: 0.9rem; }
+  td.id { font-family: var(--mono); color: var(--dim); white-space: nowrap; width: 3.5rem; }
+  td.size { font-family: var(--mono); white-space: nowrap; width: 2.5rem; }
+  td.imp { white-space: nowrap; width: 4rem; letter-spacing: 0.1em; }
+  .imp .on { color: var(--teal); } .imp .off { color: var(--rule); }
+  td.area { color: var(--sand); white-space: nowrap; }
+  td.task label { display: flex; gap: 0.7rem; align-items: baseline; cursor: pointer; }
+  td.task input { accent-color: var(--teal); width: 1rem; height: 1rem; flex: none; position: relative; top: 0.15rem; }
+  td.task .note { display: block; color: var(--dim); font-size: 0.9rem; margin-top: 0.15rem; }
+  tr.done td.task label { color: var(--dim); text-decoration: line-through; text-decoration-color: var(--rule); }
+  tr.shipped td.task label > span::after { content: " shipped"; font-family: var(--mono); font-size: 0.8rem; color: var(--teal); letter-spacing: 0.04em; }
+  tr.shipped td.id { color: var(--teal); }
+  tr.retired td.task label > span::after { content: " retired"; font-family: var(--mono); font-size: 0.8rem; color: var(--sand); letter-spacing: 0.04em; }
+  tr.retired td.task label { color: var(--dim); }
+  tr.retired td.id { color: var(--sand); }
+  .progress { font-family: var(--mono); color: var(--dim); font-size: 0.95rem; margin-top: 0.8rem; }
+  .progress b { color: var(--teal); font-weight: 400; }
+
+  .legend { color: var(--dim); font-size: 0.9rem; display: flex; gap: 1.5rem; flex-wrap: wrap; margin-bottom: 0.8rem; }
+  .legend b { color: var(--sand); font-weight: 500; font-family: var(--mono); }
+
+  @media (max-width: 640px) {
+    body { font-size: 17px; }
+    .findings li { grid-template-columns: 1fr; gap: 0.1rem; }
+    td.area { white-space: normal; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    .wave { animation: shimmer 6s ease-in-out infinite; }
+    @keyframes shimmer { 0%,100% { opacity: 0.55; } 50% { opacity: 1; } }
+  }
+</style>
+
+<div class="page">
+<header>
+  <div class="wave" aria-hidden="true">▁▂▃▅▆▇▆▅▃▂▁▂▃▅▆▇▆▅▃▂▁</div>
+  <h1 class="wordmark">earworm <i>design review</i></h1>
+  <p class="standfirst prose">earworm already does the hard part of TUI design: it says what mode it is in, hides keys that cannot work, and never blocks the screen on a subprocess. What is left is the layer that separates a tool you tolerate from one you reach for. This is a full pass, small things included, with a tasklist at the end.</p>
+  <div class="meta"><span><b>State reviewed</b> working tree, 12 Sep 2026</span><span><b>Screens</b> intro · run · pick · library · prompts · finish · CLI</span><span><b>Tasks</b> 41 · 32 shipped · 1 retired</span></div>
+</header>
+
+<nav class="contents" aria-label="Contents">
+  <a href="#keep">Keep</a><a href="#lens">Lens</a><a href="#start">Starting</a><a href="#run">Watching a run</a><a href="#pick">Choosing</a><a href="#fix">Fixing tags</a><a href="#library">Library</a><a href="#finish">Finishing</a><a href="#voice">Voice</a><a href="#cli">Command line</a><a href="#terminals">Terminals</a><a href="#tasks">Tasklist</a>
+</nav>
+
+<section id="keep" class="prose">
+  <h2>What to keep</h2>
+  <p>A review that is all defects misleads. These are the decisions I would defend against anyone who wanted to "modernise" them.</p>
+  <ul class="keep">
+    <li>Mode bands that cover the gradient. You cannot be in a filtered or picking list without knowing.</li>
+    <li>Keys that vanish when they cannot work, and a status bar that says why (<code>♪ cliamp off</code>).</li>
+    <li>Two threads, one channel each way. Nothing on screen ever waits for yt-dlp.</li>
+    <li>The <code>was …</code> column. A wrong identification is visible without opening the file.</li>
+    <li>Filenames that never encode a guess. Only <code>ok</code> and <code>manual</code> tracks get renamed.</li>
+    <li>Esc unwinds one layer at a time and no longer ends the session.</li>
+    <li>Colour as confidence, word as provenance. Teal is checked, sand is a guess, red is broken.</li>
+    <li>One name column per list, so the dim detail columns line up.</li>
+  </ul>
+</section>
+
+<section id="lens" class="prose">
+  <h2>The lens</h2>
+  <p>The TUIs people keep, lazygit, fzf, k9s, helix, share a handful of habits. Every screen names its keys somewhere the eye already rests. Rare actions live behind one key rather than many. Nothing destructive is one keystroke from a mistake. The layout has tiers, so a narrow terminal degrades on purpose rather than by accident. And the copy sounds like one person who knows the tool, in the same register from the first prompt to the exit summary. Each finding below is one of those habits, applied to a specific spot in earworm.</p>
+</section>
+
+<section id="start">
+  <h2><span class="k">A</span>Starting out</h2>
+  <div class="prose">
+  <ol class="findings">
+    <li><span class="id">A1</span><div><b>A missing binary should say how to get it.</b> <span class="why">"yt-dlp not found on PATH" is correct and unhelpful. The requirements table in the README already knows the Homebrew formula; the error should carry it: <code>yt-dlp not found · brew install yt-dlp</code>.</span></div></li>
+    <li><span class="id">A2</span><div><b>An <code>earworm --check</code> that reports the whole setup.</b> <span class="why">yt-dlp, ffmpeg, fpcalc, cliamp, the AcoustID key, the config file it found and the format it resolved, one row each with a tick or the fix. This is the first thing a new user runs and the first thing you ask for in a bug report.</span></div></li>
+    <li><span class="id">A3</span><div><b>Guard the minimum size.</b> <span class="why">Below about 40 columns the header truncates into fragments and the band loses its hint. One dim centred line, <code>needs 40 columns</code>, is honest; fragments look like a crash.</span></div></li>
+    <li><span class="id">A4</span><div><b>The intro needs an off switch.</b> <span class="why">Two seconds is right the first twenty times. An <code>intro = false</code> config key costs nothing and is where a daily user will look. Keep the default on.</span></div></li>
+    <li><span class="id">A5</span><div><b>Respect the terminal's colour depth.</b> <span class="why">Every colour is RGB. On a 256-colour terminal (default macOS Terminal.app without truecolor, many SSH sessions) the gradient becomes bands and the cream can fall to grey. Detect <code>COLORTERM=truecolor</code>; otherwise quantise to the nearest 256-colour index once, at startup. Honour <code>NO_COLOR</code> with a flat palette.</span></div></li>
+    <li><span class="id">A6</span><div><b>The first-run URL prompt is a good moment to teach one thing.</b> <span class="why">Its note is empty. One dim line, "a playlist or a single video · <kbd>Esc</kbd> quits", tells a newcomer both facts they need before typing anything.</span></div></li>
+  </ol>
+  </div>
+</section>
+
+<section id="run">
+  <h2><span class="k">B</span>Watching a run</h2>
+  <div class="prose">
+  <ol class="findings">
+    <li><span class="id">B1</span><div><b>The header's right half is empty on every screen.</b> <span class="why">That is prime real estate. During a run it should carry overall progress: <code>▰▰▰▰▱▱▱▱ 12/40 · 3m left</code>. yt-dlp reports per-track percent already; settled-over-total plus a running average per track gives an estimate that is good enough and improves as it goes.</span></div></li>
+  </ol>
+  <figure>
+<pre class="tui"><span class="g"> earworm</span><span class="d">  ·  </span>Focus<span class="d">  ·  </span>downloading<span class="d">  ·  </span>12/40  <span class="g">⣷</span>                       <span class="d">opus · ~/Music</span>  <span class="g">▰▰▰▰</span><span class="d">▱▱▱▱▱▱▱▱▱</span> <span class="d">3m left</span>
+<span class="d">──────────────────────────────────────────────────────────────────────────────────────────</span>
+<span class="t">▌</span> <span class="d"> 12</span> <span class="g">━━━━━╴</span><span class="d">──</span>  <span class="cur">Boards of Canada - Roygbiv</span>            <span class="d">deezer  score 0.91</span>
+   <span class="d"> 13</span> <span class="d">queued  </span>  Aphex Twin - Xtal                     <span class="d">was Aphex Twin - Xtal (Official)</span></pre>
+  <figcaption>Proposed header: the settings that shape this run on the right, then a single overall bar. Everything else is unchanged.</figcaption>
+  </figure>
+  <ol class="findings" start="2">
+    <li><span class="id">B2</span><div><b>Quitting mid-download deserves one question.</b> <span class="why">Esc is now safe, but <kbd>q</kbd> still kills yt-dlp instantly. A two-option prompt, "12 of 40 downloaded · keep going / quit", only while <code>done.is_none()</code>, and <kbd>^c</kbd> stays instant for the person who means it.</span></div></li>
+    <li><span class="id">B3</span><div><b>Keep the cursor off the last row.</b> <span class="why">Vim calls it <code>scrolloff</code>. When the cursor moves it should stay two rows clear of the pane's edge so the next row is visible before you reach it. ratatui's <code>ListState</code> supports an offset; three lines in <code>draw_tracks</code>.</span></div></li>
+    <li><span class="id">B4</span><div><b>Set the terminal title.</b> <span class="why">One OSC 2 write per stage: <code>earworm · Focus · 12/40</code>. It is what you see in the tab strip while doing something else, and it costs a <code>print!</code>.</span></div></li>
+    <li><span class="id">B5</span><div><b>Say when a long run finishes.</b> <span class="why">A BEL, or OSC 9 on terminals that show notifications, when the run settles and the window is not focused. Config key <code>notify</code>, default on. A forty-minute sync is exactly when the user has gone to do something else.</span></div></li>
+    <li><span class="id">B6</span><div><b>The log pane should scroll.</b> <span class="why">It shows the tail only. With <kbd>l</kbd> open, <kbd>j</kbd>/<kbd>k</kbd> could move the log instead of the list, or <kbd>L</kbd> could grow it to half the body. The line you need is the ERROR forty lines up.</span></div></li>
+    <li><span class="id">B7</span><div><b>Follow mode should announce itself.</b> <span class="why"><kbd>f</kbd> toggles silently. A dim <code>following</code> in the status bar while it is on, and a flash when a movement key switches it off, so the cursor jumping to the active track never looks like a bug.</span></div></li>
+  </ol>
+  </div>
+</section>
+
+<section id="pick">
+  <h2><span class="k">C</span>Choosing tracks</h2>
+  <div class="prose">
+  <ol class="findings">
+    <li><span class="id">C1</span><div><b>The band could say what is selected, not only how many.</b> <span class="why"><code>PICK 158 of 361 selected</code> is right. Adding the total duration where durations are known, <code>· 9h 12m</code>, turns the number into a decision about disk and time.</span></div></li>
+    <li><span class="id">C2</span><div><b>Enter with nothing marked equals Esc.</b> <span class="why">Both download nothing. That is consistent but surprising when someone unmarks everything by accident with <kbd>a</kbd>. A flash, <code>nothing selected · a marks all · esc downloads none</code>, and stay in the pick.</span></div></li>
+    <li><span class="id">C3</span><div><b>Invert selection.</b> <span class="why"><kbd>a</kbd> toggles everything the filter shows. <kbd>A</kbd> (or <kbd>i</kbd>) inverting the marks makes "everything except these three" one keystroke.</span></div></li>
+  </ol>
+  </div>
+</section>
+
+<section id="fix">
+  <h2><span class="k">D</span>Fixing tags</h2>
+  <div class="prose">
+  <p>This is what earworm is for, and it is where the largest gains are. Everything here is about reducing the number of prompts a person walks through to correct one track.</p>
+  <ol class="findings">
+    <li><span class="id">D1</span><div><b>Edit artist and title in one form.</b> <span class="why">Today <kbd>e</kbd> asks two questions in sequence. A two-field popup with <kbd>Tab</kbd> between fields, the original video title shown dim beneath as reference, and <kbd>^s</kbd> to swap the two fields in place. One prompt, one Enter.</span></div></li>
+  </ol>
+  <figure>
+<pre class="tui"><span class="d">┌ </span>track 12<span class="d"> ─────────────────────────────────────────────┐</span>
+<span class="d">│</span>  was  <span class="s">Roygbiv - Boards Of Canada (Official Audio)</span>       <span class="d">│</span>
+<span class="d">│</span>                                                        <span class="d">│</span>
+<span class="d">│</span>  <span class="d">artist</span>  Boards of Canada<span class="g">█</span>                              <span class="d">│</span>
+<span class="d">│</span>  <span class="d">title </span>  Roygbiv                                       <span class="d">│</span>
+<span class="d">│</span>                                                        <span class="d">│</span>
+<span class="d">│</span>  <span class="d">tab next field   ^s swap   enter save   esc skip</span>      <span class="d">│</span>
+<span class="d">└────────────────────────────────────────────────────────┘</span></pre>
+  <figcaption>One popup for the whole edit. The <code>was</code> line is the thing you are correcting against, so it belongs inside the frame.</figcaption>
+  </figure>
+  <ol class="findings" start="2">
+    <li><span class="id">D2</span><div><b>A detail pane for the selected track on wide terminals.</b> <span class="why">The library has one at 100 columns; the track list should too. Full title, artist, album, source, note, duration, the file path, and the original video title untruncated. The row truncates <code>was</code> at 32 characters, and the truncated part is often the part that tells you what went wrong.</span></div></li>
+    <li><span class="id">D3</span><div><b>Undo the last tag change.</b> <span class="why">One level, <kbd>u</kbd>, holding the previous artist and title for the last track written. Tag edits are the only thing earworm does that is both easy to get wrong and immediate. Bulk <kbd>s</kbd> and <kbd>A</kbd> would undo as a set.</span></div></li>
+    <li><span class="id">D4</span><div><b>Number the choices.</b> <span class="why">Every <code>Prompt::Choice</code> is <kbd>j</kbd>/<kbd>k</kbd>/<kbd>Enter</kbd>. Digits <kbd>1</kbd> to <kbd>9</kbd> choosing directly, and <kbd>y</kbd>/<kbd>n</kbd> for two-option prompts, halve the keystrokes on the artist-conflict question that fires most.</span></div></li>
+    <li><span class="id">D5</span><div><b>Show the cover before choosing it.</b> <span class="why">The cover prompt lists sources by name. Terminals that support Kitty or Sixel graphics could preview; the rest get dimensions and byte size next to each option, which is enough to reject a 120px thumbnail.</span></div></li>
+    <li><span class="id">D6</span><div><b>Mark by artist, not only by status.</b> <span class="why"><kbd>m</kbd> marks every track sharing the cursor's status. The other question people have is "every track by this artist". <kbd>M</kbd> for that; the filter can do it today but needs typing.</span></div></li>
+    <li><span class="id">D7</span><div><b>Jump between tracks that need attention.</b> <span class="why"><kbd>n</kbd> and <kbd>N</kbd> to the next and previous unverified or failed row. Filtering hides context; jumping keeps it.</span></div></li>
+  </ol>
+  </div>
+</section>
+
+<section id="library">
+  <h2><span class="k">E</span>The library</h2>
+  <div class="prose">
+  <ol class="findings">
+    <li><span class="id">E1</span><div><b>The library needs <kbd>/</kbd> too.</b> <span class="why">Twenty playlists is a page; sixty is a search. The filter code is generic enough to run over shelf names.</span></div></li>
+    <li><span class="id">E2</span><div><b>Sort order should be a choice.</b> <span class="why">Alphabetical is the only order. <kbd>o</kbd> cycling name → last synced → most missing puts the folder that needs a sync at the top.</span></div></li>
+    <li><span class="id">E3</span><div><b>Title the preview pane.</b> <span class="why">It has a left border and nothing else, so it floats. A dim first line, <code>42 tracks · 2 missing</code>, anchors it and repeats the one number that matters when the list truncates.</span></div></li>
+    <li><span class="id">E4</span><div><b>A footer total.</b> <span class="why">The header says <code>7 playlists</code>. The status bar could say <code>412 tracks · 3 missing · last sync 2h ago</code>: the whole library's health in one line.</span></div></li>
+    <li><span class="id">E5</span><div><b>Open the folder outside earworm.</b> <span class="why"><kbd>o</kbd> to reveal in Finder (<code>open</code>) or the platform equivalent. Everything downstream of earworm happens in a file manager or a player, and today you retype the path.</span></div></li>
+  </ol>
+  </div>
+</section>
+
+<section id="finish">
+  <h2><span class="k">F</span>Finishing</h2>
+  <div class="prose">
+  <ol class="findings">
+    <li><span class="id">F1</span><div><b>The finish menu should lead with what needs a decision.</b> <span class="why">Its note is the summary; its rows are keep, play, another, quit. When tracks are unverified, the first row should be <code>review 9 guesses</code>, which closes the menu with the filter set to the unverified statuses and the cursor on the first. That is the action the run is asking for.</span></div></li>
+    <li><span class="id">F2</span><div><b>The exit summary should include the folder as a path you can use.</b> <span class="why">It does say <code>12 tracks in ~/Music/Focus</code>. Printing the folder on its own final line, unquoted, means <code>cd "$(earworm … | tail -1)"</code> works and a double-click selects it.</span></div></li>
+    <li><span class="id">F3</span><div><b>Format belongs on this menu.</b> <span class="why">"Next time as flac" is a thought you have at the end of a run, on a screen where <kbd>f</kbd> means follow. One row, present when the config file is writable.</span></div></li>
+  </ol>
+  </div>
+</section>
+
+<section id="voice">
+  <h2><span class="k">G</span>Voice and messages</h2>
+  <div class="prose">
+  <ol class="findings">
+    <li><span class="id">G1</span><div><b>Flash duration should scale with length.</b> <span class="why">Four seconds fits <code>saved track 12</code> and not <code>cliamp: playlist import failed: invalid playlist name …</code>. 2s plus 50ms a character, capped at 8s, and a flash that arrives while another is showing should queue rather than replace.</span></div></li>
+    <li><span class="id">G2</span><div><b>Align the stage words with the status words.</b> <span class="why">The header says <code>identifying</code> while rows say <code>reading</code>; <code>reading playlist</code> is the scan but <code>reading</code> on a row is tag reading. Pick one verb per activity and use it in both places.</span></div></li>
+    <li><span class="id">G3</span><div><b>Write down the voice.</b> <span class="why">The copy is already good: lower case, short, active, a middle dot between clauses. Six lines in CLAUDE.md saying so keeps the next feature from introducing "Successfully saved!". Include the rule that a message names the thing it is about (<code>saved track 12</code>, never <code>saved</code>).</span></div></li>
+    <li><span class="id">G4</span><div><b>Errors should end with the fix.</b> <span class="why"><code>failed: the edited config no longer parses</code> is true. <code>… no longer parses · check the format line in ~/.config/earworm/config.toml</code> is useful. Every <code>bail!</code> that a user can hit should carry a next step.</span></div></li>
+  </ol>
+  </div>
+</section>
+
+<section id="cli">
+  <h2><span class="k">H</span>The command line</h2>
+  <div class="prose">
+  <p>Half of a CLI's experience happens before the TUI opens. This part is under-invested relative to the screens.</p>
+  <ol class="findings">
+    <li><span class="id">H1</span><div><b><code>--list --json</code>.</b> <span class="why">The table is for people; a JSON array of shelves (name, path, url, tracks, missing, synced) is for the shell script that wants to sync the stale ones. Ten lines with serde.</span></div></li>
+    <li><span class="id">H2</span><div><b>Shell completions.</b> <span class="why"><code>clap_complete</code> generates them; <code>earworm --completions zsh</code> prints them. Homebrew users expect tab-completion of flags and they notice its absence.</span></div></li>
+    <li><span class="id">H3</span><div><b>Group the help.</b> <span class="why"><code>--help</code> is one flat list of fourteen flags. clap's <code>help_heading</code> groups them: what to download, what to do to it, where the config comes from, actions that exit. The <code>--no-*</code> negation rule deserves one sentence in <code>after_help</code>.</span></div></li>
+    <li><span class="id">H4</span><div><b>Refuse a non-TTY politely.</b> <span class="why">Piped or in CI, crossterm's raw mode fails with an OS error. Detect it and say <code>earworm needs a terminal · --list and --check work without one</code>.</span></div></li>
+    <li><span class="id">H5</span><div><b>Document exit codes.</b> <span class="why">They exist and are correct. A line in the README and in <code>--help</code>, <code>0 finished · 1 failed · 2 bad arguments</code>, is what makes them usable.</span></div></li>
+    <li><span class="id">H6</span><div><b><code>--show-config</code>.</b> <span class="why">Print the effective configuration after merging file, flags and environment, with the source of each value. It answers "why is lookup off" without a bug report.</span></div></li>
+  </ol>
+  </div>
+</section>
+
+<section id="terminals">
+  <h2><span class="k">I</span>Terminals and access</h2>
+  <div class="prose">
+  <ol class="findings">
+    <li><span class="id">I1</span><div><b>Mouse: click to select, wheel to scroll.</b> <span class="why">crossterm's <code>EnableMouseCapture</code> plus two match arms. Keyboard stays primary; the wheel is what people reach for on a 300-track list without thinking.</span></div></li>
+    <li><span class="id">I2</span><div><b>A <code>motion = false</code> config key.</b> <span class="why">Turns off the intro and the spinner, leaves everything else. Vestibular sensitivity is real and a braille spinner at 8 Hz is exactly the kind of thing that triggers it.</span></div></li>
+    <li><span class="id">I3</span><div><b>Every state has a glyph as well as a colour.</b> <span class="why">Mostly true already: statuses are words, missing files carry <code>!</code>. The playing marker and the follow state are colour-only or absent; give both a glyph.</span></div></li>
+    <li><span class="id">I4</span><div><b>Test at 80×24 and 200×50 in CI.</b> <span class="why">The buffer tests exist and are good. Two fixed-size renders of every screen, asserted against a snapshot, catch the "who moved the sync column" class of regression before a human does.</span></div></li>
+  </ol>
+  </div>
+</section>
+
+<section id="tasks">
+  <h2>Tasklist</h2>
+  <div class="prose">
+    <p>Sized S (under an hour), M (an afternoon), L (a day or more). Impact is my estimate of how often a user would notice. Grouped into three waves: the first is the set I would ship before anything else; the second is what makes daily use pleasant; the third is polish and reach. Ticks are saved in this browser only.</p>
+    <div class="legend"><span><b>S M L</b> effort</span><span><b>●●●</b> most users, most sessions</span><span><b>●○○</b> some users, sometimes</span></div>
+  </div>
+  <div class="tasks-wrap">
+  <table class="tasks">
+    <thead><tr><th>id</th><th>task</th><th>area</th><th>size</th><th>impact</th></tr></thead>
+    <tbody id="tasklist">
+      <tr class="wave"><td class="wv" colspan="5">wave one <small>safety, discoverability, the biggest daily wins</small></td></tr>
+      <tr data-id="B2" class="shipped"><td class="id">B2</td><td class="task"><label><input type="checkbox" id="t-B2"><span>Confirm <kbd>q</kbd> while a download is in flight; <kbd>^c</kbd> stays instant<span class="note">Two-option prompt, only while <code>done.is_none()</code>.</span></span></label></td><td class="area">run</td><td class="size">S</td><td class="imp"><span class="on">●●●</span></td></tr>
+      <tr data-id="D1" class="shipped"><td class="id">D1</td><td class="task"><label><input type="checkbox" id="t-D1"><span>Two-field edit form with <kbd>Tab</kbd>, <kbd>^s</kbd> swap and the original title shown<span class="note">Replaces the two sequential prompts. Needs a <code>Prompt::Form</code> variant.</span></span></label></td><td class="area">fix</td><td class="size">M</td><td class="imp"><span class="on">●●●</span></td></tr>
+      <tr data-id="A1" class="shipped"><td class="id">A1</td><td class="task"><label><input type="checkbox" id="t-A1"><span>Missing-binary errors carry the install command</span></label></td><td class="area">start</td><td class="size">S</td><td class="imp"><span class="on">●●</span><span class="off">○</span></td></tr>
+      <tr data-id="A2" class="shipped"><td class="id">A2</td><td class="task"><label><input type="checkbox" id="t-A2"><span><code>--check</code> reports every dependency, the key, the config and the format</span></label></td><td class="area">cli</td><td class="size">M</td><td class="imp"><span class="on">●●</span><span class="off">○</span></td></tr>
+      <tr data-id="B1" class="shipped"><td class="id">B1</td><td class="task"><label><input type="checkbox" id="t-B1"><span>Header right side: run settings and an overall progress bar with an estimate</span></label></td><td class="area">run</td><td class="size">M</td><td class="imp"><span class="on">●●●</span></td></tr>
+      <tr data-id="D4" class="shipped"><td class="id">D4</td><td class="task"><label><input type="checkbox" id="t-D4"><span>Digits <kbd>1</kbd>–<kbd>9</kbd> and <kbd>y</kbd>/<kbd>n</kbd> answer choice prompts directly</span></label></td><td class="area">fix</td><td class="size">S</td><td class="imp"><span class="on">●●●</span></td></tr>
+      <tr data-id="A5" class="shipped"><td class="id">A5</td><td class="task"><label><input type="checkbox" id="t-A5"><span>Quantise to 256 colours when the terminal is not truecolor; honour <code>NO_COLOR</code></span></label></td><td class="area">terminals</td><td class="size">M</td><td class="imp"><span class="on">●●</span><span class="off">○</span></td></tr>
+      <tr data-id="B3" class="shipped"><td class="id">B3</td><td class="task"><label><input type="checkbox" id="t-B3"><span>Keep the cursor two rows off the pane edge (scrolloff)</span></label></td><td class="area">run</td><td class="size">S</td><td class="imp"><span class="on">●●</span><span class="off">○</span></td></tr>
+      <tr data-id="G1" class="shipped"><td class="id">G1</td><td class="task"><label><input type="checkbox" id="t-G1"><span>Flash duration scales with message length; a second flash queues</span></label></td><td class="area">voice</td><td class="size">S</td><td class="imp"><span class="on">●●</span><span class="off">○</span></td></tr>
+      <tr data-id="A3" class="retired"><td class="id">A3</td><td class="task"><label><input type="checkbox" id="t-A3"><span>Minimum-size guard below 40 columns<span class="note">Retired. Rendered at 1×1, 10×2, 20×3 and 30×5: nothing panics and every column truncates cleanly, so a guard would remove working behaviour at sizes that are still usable. The premise was wrong.</span></span></label></td><td class="area">start</td><td class="size">S</td><td class="imp"><span class="on">●</span><span class="off">○○</span></td></tr>
+      <tr data-id="H4" class="shipped"><td class="id">H4</td><td class="task"><label><input type="checkbox" id="t-H4"><span>Detect a non-TTY and say which flags work without one</span></label></td><td class="area">cli</td><td class="size">S</td><td class="imp"><span class="on">●</span><span class="off">○○</span></td></tr>
+
+      <tr class="wave"><td class="wv" colspan="5">wave two <small>what makes daily use pleasant</small></td></tr>
+      <tr data-id="D2" class="shipped"><td class="id">D2</td><td class="task"><label><input type="checkbox" id="t-D2"><span>Detail pane for the selected track at 100+ columns<span class="note">Same pattern as the library preview. Untruncated <code>was</code>, path, album, duration.</span><span class="note">Shipped. No album row: a track carries no album field until the tag pass writes one, and the pane reports what the row holds.</span></span></label></td><td class="area">fix</td><td class="size">M</td><td class="imp"><span class="on">●●●</span></td></tr>
+      <tr data-id="D3" class="shipped"><td class="id">D3</td><td class="task"><label><input type="checkbox" id="t-D3"><span>Single-level undo of the last tag write with <kbd>u</kbd><span class="note">Shipped. One level, cleared after use, and the status bar names what it is holding so the key is only live when there is something behind it.</span></span></label></td><td class="area">fix</td><td class="size">M</td><td class="imp"><span class="on">●●</span><span class="off">○</span></td></tr>
+      <tr data-id="D7" class="shipped"><td class="id">D7</td><td class="task"><label><input type="checkbox" id="t-D7"><span><kbd>n</kbd>/<kbd>N</kbd> jump to the next and previous unverified or failed track</span></label></td><td class="area">fix</td><td class="size">S</td><td class="imp"><span class="on">●●●</span></td></tr>
+      <tr data-id="F1" class="shipped"><td class="id">F1</td><td class="task"><label><input type="checkbox" id="t-F1"><span>Finish menu leads with <code>review N guesses</code> when there are any<span class="note">Shipped. The menu row narrows the list to the unconfirmed statuses and puts the cursor on the first; the narrowing is a predicate rather than a filter string, since kept, unsure, no match and failed share no word to type. <kbd>v</kbd> does the same by hand.</span></span></label></td><td class="area">finish</td><td class="size">S</td><td class="imp"><span class="on">●●●</span></td></tr>
+      <tr data-id="B6" class="shipped"><td class="id">B6</td><td class="task"><label><input type="checkbox" id="t-B6"><span>Scrollable log pane, or <kbd>L</kbd> to grow it to half the body<span class="note">Shipped as both: <kbd>L</kbd> grows the pane to half the body and <kbd>J</kbd>/<kbd>K</kbd> scroll it. A line arriving while it is scrolled back holds the window still rather than dragging it to the tail.</span></span></label></td><td class="area">run</td><td class="size">M</td><td class="imp"><span class="on">●●</span><span class="off">○</span></td></tr>
+      <tr data-id="E1" class="shipped"><td class="id">E1</td><td class="task"><label><input type="checkbox" id="t-E1"><span><kbd>/</kbd> filters the library by name</span></label></td><td class="area">library</td><td class="size">S</td><td class="imp"><span class="on">●●</span><span class="off">○</span></td></tr>
+      <tr data-id="E2" class="shipped"><td class="id">E2</td><td class="task"><label><input type="checkbox" id="t-E2"><span><kbd>o</kbd> cycles library sort: name, last synced, most missing</span></label></td><td class="area">library</td><td class="size">S</td><td class="imp"><span class="on">●●</span><span class="off">○</span></td></tr>
+      <tr data-id="E3" class="shipped"><td class="id">E3</td><td class="task"><label><input type="checkbox" id="t-E3"><span>Title line on the preview pane with the track and missing counts</span></label></td><td class="area">library</td><td class="size">S</td><td class="imp"><span class="on">●</span><span class="off">○○</span></td></tr>
+      <tr data-id="E4" class="shipped"><td class="id">E4</td><td class="task"><label><input type="checkbox" id="t-E4"><span>Library status bar carries whole-library totals</span></label></td><td class="area">library</td><td class="size">S</td><td class="imp"><span class="on">●</span><span class="off">○○</span></td></tr>
+      <tr data-id="B4" class="shipped"><td class="id">B4</td><td class="task"><label><input type="checkbox" id="t-B4"><span>Set the terminal title per stage</span></label></td><td class="area">run</td><td class="size">S</td><td class="imp"><span class="on">●●</span><span class="off">○</span></td></tr>
+      <tr data-id="B5" class="shipped"><td class="id">B5</td><td class="task"><label><input type="checkbox" id="t-B5"><span>BEL / OSC 9 when a run settles; <code>notify</code> config key<span class="note">Shipped as a bell only. An OSC 9 a terminal does not know prints its own text into the middle of the frame, and a notification is not worth a torn screen. Decided on the frame the run settles, so a menu left open does not ring for a five-second run.</span></span></label></td><td class="area">run</td><td class="size">S</td><td class="imp"><span class="on">●●</span><span class="off">○</span></td></tr>
+      <tr data-id="B7" class="shipped"><td class="id">B7</td><td class="task"><label><input type="checkbox" id="t-B7"><span>Show <code>following</code> in the status bar; flash when a move turns it off<span class="note">Shipped, and only while following is live: once the run has settled nothing moves the cursor, so the word and the flash would describe a mode doing nothing.</span></span></label></td><td class="area">run</td><td class="size">S</td><td class="imp"><span class="on">●</span><span class="off">○○</span></td></tr>
+      <tr data-id="C2" class="shipped"><td class="id">C2</td><td class="task"><label><input type="checkbox" id="t-C2"><span>Enter with nothing marked at the pick flashes and stays</span></label></td><td class="area">pick</td><td class="size">S</td><td class="imp"><span class="on">●</span><span class="off">○○</span></td></tr>
+      <tr data-id="C3" class="shipped"><td class="id">C3</td><td class="task"><label><input type="checkbox" id="t-C3"><span>Invert marks at the pick<span class="note">Shipped as <kbd>i</kbd>. <kbd>A</kbd> sets one artist on the track list, and a key meaning two things across two screens is worse than a new one.</span></span></label></td><td class="area">pick</td><td class="size">S</td><td class="imp"><span class="on">●</span><span class="off">○○</span></td></tr>
+      <tr data-id="D6" class="shipped"><td class="id">D6</td><td class="task"><label><input type="checkbox" id="t-D6"><span><kbd>M</kbd> marks every track by the cursor's artist<span class="note">Shipped, track list only: nothing is tagged at the pick, so every artist is empty there and the key could only refuse. Matches case-insensitively.</span></span></label></td><td class="area">fix</td><td class="size">S</td><td class="imp"><span class="on">●</span><span class="off">○○</span></td></tr>
+      <tr data-id="G2" class="shipped"><td class="id">G2</td><td class="task"><label><input type="checkbox" id="t-G2"><span>One verb per activity across stage words and status words<span class="note">Shipped: fetch, tag and list are one word each now, in the header and on the row. <code>getting</code> became <code>fetching</code> and <code>reading</code> became <code>tagging</code>.</span></span></label></td><td class="area">voice</td><td class="size">S</td><td class="imp"><span class="on">●</span><span class="off">○○</span></td></tr>
+      <tr data-id="G4" class="shipped"><td class="id">G4</td><td class="task"><label><input type="checkbox" id="t-G4"><span>Every user-reachable error ends with its fix</span></label></td><td class="area">voice</td><td class="size">M</td><td class="imp"><span class="on">●●</span><span class="off">○</span></td></tr>
+      <tr data-id="F3" class="shipped"><td class="id">F3</td><td class="task"><label><input type="checkbox" id="t-F3"><span>Format row on the finish menu<span class="note">Shipped, present only when there is a config file to write to: without one the choice lasts until the tool closes, which is not what "next time" means.</span></span></label></td><td class="area">finish</td><td class="size">S</td><td class="imp"><span class="on">●</span><span class="off">○○</span></td></tr>
+      <tr data-id="A4" class="shipped"><td class="id">A4</td><td class="task"><label><input type="checkbox" id="t-A4"><span><code>intro = false</code> config key</span></label></td><td class="area">start</td><td class="size">S</td><td class="imp"><span class="on">●</span><span class="off">○○</span></td></tr>
+      <tr data-id="A6" class="shipped"><td class="id">A6</td><td class="task"><label><input type="checkbox" id="t-A6"><span>One-line note on the first URL prompt</span></label></td><td class="area">start</td><td class="size">S</td><td class="imp"><span class="on">●</span><span class="off">○○</span></td></tr>
+
+      <tr class="wave"><td class="wv" colspan="5">wave three <small>reach, scripting, polish</small></td></tr>
+      <tr data-id="H1"><td class="id">H1</td><td class="task"><label><input type="checkbox" id="t-H1"><span><code>--list --json</code></span></label></td><td class="area">cli</td><td class="size">S</td><td class="imp"><span class="on">●</span><span class="off">○○</span></td></tr>
+      <tr data-id="H2"><td class="id">H2</td><td class="task"><label><input type="checkbox" id="t-H2"><span>Shell completions via <code>clap_complete</code></span></label></td><td class="area">cli</td><td class="size">S</td><td class="imp"><span class="on">●●</span><span class="off">○</span></td></tr>
+      <tr data-id="H3"><td class="id">H3</td><td class="task"><label><input type="checkbox" id="t-H3"><span>Group <code>--help</code> with headings; explain the negation rule in <code>after_help</code></span></label></td><td class="area">cli</td><td class="size">S</td><td class="imp"><span class="on">●●</span><span class="off">○</span></td></tr>
+      <tr data-id="H5"><td class="id">H5</td><td class="task"><label><input type="checkbox" id="t-H5"><span>Document exit codes in README and <code>--help</code></span></label></td><td class="area">cli</td><td class="size">S</td><td class="imp"><span class="on">●</span><span class="off">○○</span></td></tr>
+      <tr data-id="H6"><td class="id">H6</td><td class="task"><label><input type="checkbox" id="t-H6"><span><code>--show-config</code> with the source of every value</span></label></td><td class="area">cli</td><td class="size">S</td><td class="imp"><span class="on">●</span><span class="off">○○</span></td></tr>
+      <tr data-id="F2"><td class="id">F2</td><td class="task"><label><input type="checkbox" id="t-F2"><span>Exit summary prints the folder path on its own last line</span></label></td><td class="area">finish</td><td class="size">S</td><td class="imp"><span class="on">●</span><span class="off">○○</span></td></tr>
+      <tr data-id="C1"><td class="id">C1</td><td class="task"><label><input type="checkbox" id="t-C1"><span>Total duration of the selection in the pick band</span></label></td><td class="area">pick</td><td class="size">S</td><td class="imp"><span class="on">●</span><span class="off">○○</span></td></tr>
+      <tr data-id="E5" class="shipped"><td class="id">E5</td><td class="task"><label><input type="checkbox" id="t-E5"><span><kbd>o</kbd> reveals the folder in the file manager<span class="note">Shipped as <kbd>O</kbd>: <kbd>o</kbd> cycles the library sort, shipped earlier in this wave, and a key meaning two things on one screen is worse than a new one.</span></span></label></td><td class="area">library</td><td class="size">S</td><td class="imp"><span class="on">●</span><span class="off">○○</span></td></tr>
+      <tr data-id="I1"><td class="id">I1</td><td class="task"><label><input type="checkbox" id="t-I1"><span>Mouse: click selects, wheel scrolls</span></label></td><td class="area">terminals</td><td class="size">S</td><td class="imp"><span class="on">●●</span><span class="off">○</span></td></tr>
+      <tr data-id="I2"><td class="id">I2</td><td class="task"><label><input type="checkbox" id="t-I2"><span><code>motion = false</code> disables intro and spinner</span></label></td><td class="area">terminals</td><td class="size">S</td><td class="imp"><span class="on">●</span><span class="off">○○</span></td></tr>
+      <tr data-id="I3" class="shipped"><td class="id">I3</td><td class="task"><label><input type="checkbox" id="t-I3"><span>Glyphs for the playing marker and follow state, not colour alone<span class="note">Shipped. The follow state got its glyph with B7; what was left was the log hint, whose urgency only amber said, and the bar naming cliamp without saying which of the two things it was doing.</span></span></label></td><td class="area">terminals</td><td class="size">S</td><td class="imp"><span class="on">●</span><span class="off">○○</span></td></tr>
+      <tr data-id="D5"><td class="id">D5</td><td class="task"><label><input type="checkbox" id="t-D5"><span>Cover prompt shows dimensions and size; image preview on Kitty/Sixel</span></label></td><td class="area">fix</td><td class="size">L</td><td class="imp"><span class="on">●</span><span class="off">○○</span></td></tr>
+      <tr data-id="I4"><td class="id">I4</td><td class="task"><label><input type="checkbox" id="t-I4"><span>Snapshot renders of every screen at 80×24 and 200×50</span></label></td><td class="area">tests</td><td class="size">M</td><td class="imp"><span class="on">●</span><span class="off">○○</span></td></tr>
+      <tr data-id="G3"><td class="id">G3</td><td class="task"><label><input type="checkbox" id="t-G3"><span>Six-line voice guide in CLAUDE.md</span></label></td><td class="area">voice</td><td class="size">S</td><td class="imp"><span class="on">●</span><span class="off">○○</span></td></tr>
+    </tbody>
+  </table>
+  </div>
+  <p class="progress" id="progress"></p>
+</section>
+
+<section class="prose">
+  <h2>If you do three things</h2>
+  <p>Confirm <kbd>q</kbd> during a download (B2), because it is the last way to lose work with one key. Put the edit into one form (D1), because fixing tags is the job and it currently takes twice the prompts it needs. Use the header's right half (B1), because a run you can watch is a run you trust. Everything else is worth doing; those three change how the tool feels.</p>
+</section>
+</div>
+
+<script>
+(function () {
+  var KEY = "earworm-design-review-ticks";
+  var boxes = document.querySelectorAll('#tasklist input[type="checkbox"]');
+  var saved = {};
+  try { saved = JSON.parse(localStorage.getItem(KEY) || "{}") || {}; } catch (e) { saved = {}; }
+  function paint() {
+    var done = 0;
+    boxes.forEach(function (b) {
+      var row = b.closest("tr");
+      row.classList.toggle("done", b.checked);
+      if (b.checked) done++;
+    });
+    var el = document.getElementById("progress");
+    el.innerHTML = "<b>" + done + "</b> of " + boxes.length + " ticked";
+  }
+  boxes.forEach(function (b) {
+    var id = b.closest("tr").getAttribute("data-id");
+    b.checked = !!saved[id];
+    b.addEventListener("change", function () {
+      saved[id] = b.checked;
+      try { localStorage.setItem(KEY, JSON.stringify(saved)); } catch (e) {}
+      paint();
+    });
+  });
+  paint();
+})();
+</script>
