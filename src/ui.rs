@@ -1008,6 +1008,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("open", "enter", "read this playlist off disk"),
             ("", "O", "this folder in the file manager"),
             ("name", "e", "rename this playlist"),
+            ("", "D", "remove this playlist"),
             ("find", "/", "filter by name"),
             ("", "o", "order: name, last synced, most missing"),
         ]);
@@ -1049,7 +1050,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
         ]);
         if app.can_command() {
             rows.extend([
-                ("act", "e", "edit this track"),
+                ("act", "e T", "edit this track / search again"),
                 ("", "c", "choose cover art"),
                 ("", "r", "retry failures"),
                 ("", "S", "sync this playlist"),
@@ -1065,12 +1066,12 @@ fn draw_help(frame: &mut Frame, app: &App) {
                 ("", "A", "set one artist"),
             ]);
         } else {
-            rows.push(("act", "e c r s S A", "once the run finishes"));
+            rows.push(("act", "e c T r s S A", "once the run finishes"));
         }
         /* Only when there is one, because Esc no longer quits: a row saying
            it does is the documentation for the behaviour that lost runs. */
         if !app.library.is_empty() {
-            rows.push(("back", "Esc", "the library"));
+            rows.push(("back", "Esc", "clear marks, then the library"));
         }
         rows.push(("quit", "q  ^c", ""));
     }
@@ -2772,7 +2773,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(
             tx,
-            "parse on · lookup on · cover on · m3u8 on · prompts on · rename on".into(),
+            "parse on · lookup on · apple on · cover on · m3u8 on · prompts on · rename on".into(),
         );
         app.tracks = spread();
         app.show_help = true;

@@ -218,6 +218,10 @@ pub enum View {
 pub enum Cmd {
     Edit(usize),
     Cover(usize),
+    /// Run the text search again for one track's current artist and title.
+    /// Carries the track index, like `Edit`: the row is still there, and a
+    /// cursor position would name whatever moved under it by answer time.
+    Search(usize),
     /// Load a library row from its manifest, with no network behind it. The
     /// folder and not the row: the worker re-reads the library, and a row
     /// position would then name whatever had moved into it.
@@ -253,6 +257,10 @@ pub enum Cmd {
     /// earworm happens there or in a player, and the alternative is retyping
     /// a path the screen is already showing.
     Reveal(PathBuf),
+    /// Remove a library folder from the disk: the worker confirms first,
+    /// then either forgets the playlist or deletes the whole folder.
+    /// Carries the folder rather than the row, like `Open`.
+    Remove(PathBuf),
 }
 
 /* A question the UI asks on its own account. Nothing is blocked on the
@@ -1073,6 +1081,32 @@ impl App {
         } else {
             self.view = View::Library;
         }
+    }
+
+    /* Esc unwinds one step at a time: the filter first, since a hidden list is
+       the thing most likely to have prompted the keypress, then the marks,
+       then the library. Marks sit in the middle because they survive a cleared
+       filter, and leaving the screen with stale ones would act on rows the
+       next `s` the user presses was never aimed at. */
+    pub fn escape_tracks(&mut self) {
+        if self.narrowed() {
+            self.clear_filter();
+        } else if !self.marked.is_empty() {
+            self.clear_marks();
+        } else {
+            self.leave_tracks();
+        }
+    }
+
+    /* The dots down the rows are a bulk selection, and until now the only way
+       back was marking everything twice or running something: a stray `m`
+       left marks nobody remembers making. Esc clears them and says how many,
+       or the key reads as one that did nothing. */
+    pub fn clear_marks(&mut self) {
+        let n = self.marked.len();
+        self.marked.clear();
+        let plural = if n == 1 { "track" } else { "tracks" };
+        self.say(format!("unmarked {n} {plural}"));
     }
 
     /* `q` is the deliberate way out and stays one key everywhere nothing is
@@ -2615,6 +2649,44 @@ mod tests {
         app.busy = true;
         app.leave_tracks();
         assert_eq!(app.view, View::Tracks, "Esc left a command mid-flight");
+    }
+
+    /* Esc unwinds one step at a time: the filter first, since it hides the
+       list, then the marks, which survive a cleared filter, then the library.
+       Before the middle step the dots had no key that removed them. */
+    #[test]
+    fn escape_unwinds_the_filter_then_the_marks_then_the_library() {
+        let mut app = app_with(&[Status::Ok, Status::Ok, Status::Ok]);
+        app.done = Some(Ok(String::new()));
+        app.library = vec![shelf("Focus")];
+        app.filter = "ok".to_string();
+        app.marked.insert(1);
+        app.marked.insert(2);
+
+        app.escape_tracks();
+        assert!(app.filter.is_empty(), "Esc left the filter up");
+        assert_eq!(app.marked.len(), 2, "clearing the filter took the marks");
+        assert_eq!(app.view, View::Tracks);
+
+        app.escape_tracks();
+        assert!(app.marked.is_empty(), "Esc left the marks on");
+        assert!(app.stage.contains("unmarked 2 tracks"), "{:?}", app.stage);
+        assert_eq!(app.view, View::Tracks, "Esc left the screen while unmarking");
+
+        app.escape_tracks();
+        assert_eq!(app.view, View::Library);
+    }
+
+    #[test]
+    fn clearing_one_mark_says_track_not_tracks() {
+        let mut app = app_with(&[Status::Ok]);
+        app.done = Some(Ok(String::new()));
+        app.marked.insert(1);
+
+        app.escape_tracks();
+        assert!(app.marked.is_empty());
+        assert!(app.stage.contains("unmarked 1 track"), "{:?}", app.stage);
+        assert!(!app.stage.contains("tracks"), "{:?}", app.stage);
     }
 
     /* The two screens move different cursors and offer different keys, so

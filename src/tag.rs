@@ -162,6 +162,20 @@ pub fn identify(
                 None => {}
             }
         }
+        /* Apple is the fallback, not a second opinion: Deezer's plausible hit
+        already won, and an implausible Deezer hit already owns the rejection
+        note. */
+        if found.is_none() && cfg.apple {
+            match lookup::itunes(&info.artist, &info.title) {
+                Some(m) if lookup::plausible(&m, &info.artist, &info.title) => found = Some(m),
+                Some(m) if out.status == Status::NoMatch => {
+                    out.status = Status::Weak;
+                    out.source = m.source.into();
+                    out.note = format!("rejected \"{}\"", m.title);
+                }
+                _ => {}
+            }
+        }
     } else {
         out.status = Status::Kept;
     }
@@ -190,7 +204,7 @@ pub fn identify(
     if cfg.fix
         && asker.enabled
         && unresolved
-        && let Some(typed) = manual(path, asker, &out.artist, &out.title, index)
+        && let Some(typed) = manual(path, asker, &out.artist, &out.title, index, cfg.apple)
     {
         out.status = Status::Manual;
         out.source = "typed".into();
@@ -203,7 +217,28 @@ pub fn identify(
     Ok(out)
 }
 
-fn manual(path: &Path, asker: &Asker, artist: &str, title: &str, index: usize) -> Option<Match> {
+/// The text-search half of `identify`, for words already worth searching
+/// with: Deezer first, Apple fallback, the plausibility gate on both. No
+/// fingerprint and no prompts; a miss is just `None`.
+pub fn search(artist: &str, title: &str, apple: bool) -> Option<Match> {
+    lookup::deezer(artist, title)
+        .filter(|m| lookup::plausible(m, artist, title))
+        .or_else(|| {
+            apple
+                .then(|| lookup::itunes(artist, title))
+                .flatten()
+                .filter(|m| lookup::plausible(m, artist, title))
+        })
+}
+
+fn manual(
+    path: &Path,
+    asker: &Asker,
+    artist: &str,
+    title: &str,
+    index: usize,
+    apple: bool,
+) -> Option<Match> {
     let name = path.file_name()?.to_string_lossy().to_string();
     let answers = asker.form(
         &format!("track {index}"),
@@ -225,9 +260,9 @@ fn manual(path: &Path, asker: &Asker, artist: &str, title: &str, index: usize) -
         return None;
     }
     /* A hand-typed artist and title make a far better search key than the video
-    title did, so retry for album and artwork. */
-    let extra = lookup::deezer(&new_artist, &new_title)
-        .filter(|m| lookup::plausible(m, &new_artist, &new_title));
+    title did, so retry for album and artwork through the same search a `T`
+    re-run would use. */
+    let extra = search(&new_artist, &new_title, apple);
     Some(Match {
         title: new_title,
         artist: new_artist,
@@ -239,7 +274,10 @@ fn manual(path: &Path, asker: &Asker, artist: &str, title: &str, index: usize) -
     })
 }
 
-fn apply(
+/// Writes a lookup hit into the file: tags, embedded art, and the folder
+/// image unless the caller already wrote one. Returns the artist and title
+/// as written, plus why the artist differs when it does.
+pub fn apply(
     path: &Path,
     m: &Match,
     cfg: &Config,
@@ -258,7 +296,10 @@ fn apply(
         note = why;
     }
 
-    let jpeg = cfg.cover.then(|| lookup::cover_bytes(m)).flatten();
+    let jpeg = cfg
+        .cover
+        .then(|| lookup::cover_bytes(m, cfg.apple))
+        .flatten();
     with_tag(path, |tag| {
         tag.set_title(m.title.clone());
         tag.set_artist(artist.clone());

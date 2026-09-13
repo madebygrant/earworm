@@ -3,8 +3,8 @@
 A terminal UI for turning a YouTube playlist into a folder of tagged audio files.
 
 `yt-dlp` does the downloading. earworm does everything after. It splits artist
-and title out of the video title, checks that guess against AcoustID and
-Deezer, writes Vorbis tags, fetches cover art and writes an `.m3u8`. When it
+and title out of the video title, checks that guess against AcoustID, Deezer
+and Apple Music, writes Vorbis tags, fetches cover art and writes an `.m3u8`. When it
 can't work out a track it asks rather than writing a tag it doesn't believe,
 and you can still fix any track's artist, title or cover after the run.
 
@@ -38,7 +38,7 @@ tools
 
 settings
   ✓ config     ~/.config/earworm/config.toml
-  ✗ acoustid   no key · set ACOUSTID_API_KEY · lookups fall back to Deezer
+  ✗ acoustid   no key · set ACOUSTID_API_KEY · lookups fall back to Deezer and Apple
   ✓ format     opus · writes .opus
   ✓ directory  ~/Music · 7 playlists
 ```
@@ -58,8 +58,9 @@ key:
 export ACOUSTID_API_KEY=your-key
 ```
 
-Without one earworm falls back to Deezer search alone, which matches a lot
-less well. Nothing else changes.
+Without one earworm falls back to Deezer search, then to Apple Music via the
+free iTunes Search API, which matches a lot less well. Nothing else changes.
+`--no-apple` (or `apple = false`) skips just that second fallback.
 
 ## Install
 
@@ -82,12 +83,15 @@ earworm --check                          # is everything installed, then exit
 ```
 
 Tracks land in `<dir>/<playlist name>/`, named `NN - Artist - Title.opus` once
-earworm is confident of the tags, next to a `cover.jpg` (or `.png`) and
-`<playlist name>.m3u8`.
+earworm is confident of the tags, next to `<playlist name>.m3u8`. The cover
+art lives embedded in each track rather than as a folder image.
 
 Opus is the default. `--format` takes `opus`, `m4a`, `mp3`, `flac`, `vorbis`
-or `alac`. Pressing `f` on the library screen changes it mid-session and writes
-the choice to the config file, so the next playlist arrives the same way. That
+or `alac`. Typing a URL offers the format before the download starts, which
+sets the same session default `f` would: Esc keeps whatever is already set
+and the download carries on, and a URL passed on the command line skips the
+question, having arrived fully specified. Either way the choice is written
+to the config file, so the next playlist arrives the same way. That
 write edits the one line and leaves every comment where it was, lands through a
 symlink onto the file it points at rather than replacing the link, keeps the
 file's permissions, and is a rename rather than a truncate, so an interrupted
@@ -119,8 +123,9 @@ otherwise backs out to the screen behind it.
 | `-d`, `--dir` | output directory (default `~/Music`) |
 | `-f`, `--format` | opus, m4a, mp3, flac, vorbis or alac (default opus) |
 | `-P`, `--no-parse` | keep YouTube's own artist/track, skip title parsing |
-| `-L`, `--no-lookup` | skip AcoustID/Deezer, keep parsed tags |
-| `-C`, `--no-cover` | don't write `cover.jpg` |
+| `-L`, `--no-lookup` | skip AcoustID/Deezer/Apple, keep parsed tags |
+| `--no-apple` | skip the Apple Music fallback, Deezer only |
+| `-C`, `--no-cover` | don't fetch or embed cover art |
 | `-M`, `--no-m3u8` | don't write the playlist file |
 | `-F`, `--no-fix` | never prompt; unresolved tracks keep parsed tags |
 | `-R`, `--no-rename` | keep yt-dlp's filenames instead of renaming from tags |
@@ -147,8 +152,9 @@ dir = "~/Music/playlists"
 format = "opus"    # or m4a, mp3, flac, vorbis, alac
 
 parse = true       # split artist and title out of the video title
-lookup = true      # confirm against AcoustID and Deezer
-cover = true       # write cover.jpg beside the tracks
+lookup = true      # confirm against AcoustID, Deezer and Apple
+apple = true       # fall back to Apple Music when Deezer finds nothing
+cover = true       # fetch cover art and embed it in the tracks
 m3u8 = true        # write the playlist file
 fix = true         # prompt when a track can't be resolved
 rename = true      # rename files from the corrected tags
@@ -209,6 +215,7 @@ touch, and failures](docs/images/keys.png)
 | `u` | undo the last tag change (after the run) |
 | `tab` `^s` | next field, swap artist and title (in the edit form) |
 | `c` | choose cover art (after the run) |
+| `T` | search again for the track under the cursor (after the run) |
 | `r` | retry every failed track (after the run) |
 | `S` | sync the open playlist against its saved URL |
 | `p` | play this playlist in cliamp (only while cliamp is running) |
@@ -221,7 +228,7 @@ touch, and failures](docs/images/keys.png)
 | `A` | set one artist across the marked tracks |
 | `1`–`9` | answer a prompt by number |
 | `h` `?` | keys and current settings |
-| `Esc` | clear the filter, else back to the library |
+| `Esc` | clear the filter, unmark all, else back to the library |
 | `q` `ctrl+c` | quit, asking first if a download is going |
 
 `Esc` never ends the session, and it does nothing at all while a run or a
@@ -242,6 +249,7 @@ to act on:
 | `^d` `^u` `PgDn` `PgUp` | move by a screenful |
 | `enter` | open this playlist from disk |
 | `e` | rename this playlist |
+| `D` | remove this playlist: forget it or delete its folder |
 | `O` | open this folder in the file manager |
 | `/` | filter the folders by name |
 | `o` | order: name, last synced, most missing |
@@ -275,6 +283,13 @@ Playlists you have never renamed need nothing doing to them.
 macOS and `xdg-open` elsewhere. Everything downstream of earworm happens in a
 file manager or a player, and the alternative is retyping a path the screen is
 already showing. It is `O` because `o` cycles the sort.
+
+`D` on the library removes the playlist under the cursor, and asks what goes
+with it. Forgetting drops `.earworm` and the `.m3u8` but keeps the audio, so
+the folder stays on disk as plain files and the next `--resync` walks past it.
+Deleting removes the folder itself. Either way the copy in cliamp's store is
+dropped too, and if the folder on screen was the removed one the view falls
+back to the library.
 
 When cliamp has a track loaded the bar names it: `♪ cliamp ⏸  Vogel im Käfig`.
 It is cliamp's own title, which for a track earworm wrote is the corrected
@@ -435,7 +450,8 @@ into different names. With nothing marked, both act on the track under the
 cursor.
 
 Marks survive a cancelled prompt and clear once an action has written
-something. Bulk edits rename and rewrite the playlist just as a single edit
+something. `Esc` clears them outright, before going back to the library on a
+second press. Bulk edits rename and rewrite the playlist just as a single edit
 does.
 
 ### The library
@@ -529,7 +545,8 @@ rest alone.
 1. **Parse.** Split the video title on its separator. A dash means
    artist-first, a pipe or bullet means artist-last.
 2. **Fingerprint.** `fpcalc` plus AcoustID, accepted at score 0.8 or better.
-3. **Search.** Deezer, matched on normalised artist and title.
+3. **Search.** Deezer, then Apple Music (iTunes Search API) when Deezer has
+   nothing plausible, matched on normalised artist and title.
 4. **Ask.** Anything still unresolved gets a prompt listing the candidates,
    unless `--no-fix`.
 

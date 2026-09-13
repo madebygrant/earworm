@@ -362,6 +362,11 @@ call and file write. Nothing that blocks touches the render loop.
   documenting an exit that no longer exists.
 - **`App.say` is the UI talking, not the worker.** It is `Msg::Flash` without
   a message, for the keys the UI answers by itself.
+- **Esc unwinds filter, then marks, then the library.** The order lives on
+  `escape_tracks` rather than as match arms in `main`, so the three steps stay
+  one decision. Marks sit in the middle because they survive a cleared filter;
+  anything that later inserts a step before `leave_tracks` keeps the screen
+  while it unwinds, or one Esc starts navigating mid-cleanup.
 - **The caret is a char index, `caret_byte` converts.** A byte index lands
   inside a multi-byte character the first time a title carries an accent, and
   `String::insert` panics on it. Every input edit goes through the `input_*`

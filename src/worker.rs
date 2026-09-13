@@ -70,6 +70,15 @@ fn ask_start(cfg: &mut Config, tx: &Sender<Msg>) -> Start {
     match prompt_url(tx, Escape::Quit) {
         Some(url) => {
             cfg.url = url;
+            /* The only format question before the first download: the run
+               adopts whatever this leaves behind. A URL from the command line
+               returns above, having arrived fully specified. `start_url` asks
+               the same thing for the library's `n`, so the two stay in step. */
+            let asker = Asker {
+                tx: tx.clone(),
+                enabled: true,
+            };
+            report(tx, set_format(cfg, tx, &asker));
             Start::Playlist
         }
         None => Start::Cancelled,
@@ -603,6 +612,7 @@ fn pipeline(
 
     sync_manifest(cfg, tracks);
     let playlist_file = write_playlist(cfg, tracks)?;
+    drop_folder_cover(tracks);
     let mut summary = summarise(tracks, playlist_file.as_deref());
     if !warning.is_empty() {
         summary = format!("{summary}   [{warning}]");
@@ -847,6 +857,79 @@ fn rename_shelf(
     Ok(())
 }
 
+/* `D` on the library screen. The library is read off the disk, so a playlist
+   leaves it by losing its claim to be one: forgetting drops the `.earworm`
+   sidecar and the `.m3u8` but keeps the audio, deleting takes the folder as
+   well. The question is asked here rather than in the UI because the reply
+   channel lives on the worker, and the safe answer goes first because Enter
+   takes the highlighted row. */
+fn remove_shelf(
+    cfg: &mut Config,
+    tx: &Sender<Msg>,
+    asker: &Asker,
+    tracks: &mut Vec<Track>,
+    folder: &Path,
+) -> Result<()> {
+    /* The folder arrives from the UI rather than from the scan, and deleting
+       the wrong one does not come back, so check rather than assume. */
+    if !folder.starts_with(&cfg.dir) || folder == cfg.dir {
+        bail!("that folder is outside {}", cfg.dir.display());
+    }
+    let name = folder
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .context("that folder has no name to remove")?;
+    let Some(choice) = asker.choose_noted(
+        &format!("Remove {name}?"),
+        "forget keeps the audio and drops the playlist  ·  delete takes the folder as well",
+        vec![
+            "keep it".into(),
+            format!("forget {name}"),
+            format!("delete {name} and its files"),
+        ],
+    ) else {
+        return cancelled(tx);
+    };
+    if choice == 0 {
+        let _ = tx.send(Msg::Flash(format!("keeping {name}")));
+        return Ok(());
+    }
+    /* Before either removal, since the stored name is built from the path
+       this folder has now: afterwards there is nothing left that names it. */
+    player::forget(folder);
+    if choice == 1 {
+        /* Already gone is gone: the row was listed from a manifest that
+           someone may have deleted by hand since. */
+        for file in [manifest::path(folder), folder.join(format!("{name}.m3u8"))] {
+            match std::fs::remove_file(&file) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => bail!("removing {}: {e}", file.display()),
+            }
+        }
+    } else {
+        std::fs::remove_dir_all(folder)
+            .with_context(|| format!("deleting {}", folder.display()))?;
+    }
+    /* The track list on screen is this folder's files, so it goes with it:
+       `Restart` is what clears the run state everywhere else too. */
+    let open = folder_of(tracks).as_deref() == Some(folder);
+    if open {
+        let _ = tx.send(Msg::Restart);
+        tracks.clear();
+    }
+    let _ = tx.send(Msg::Library {
+        shelves: library(&cfg.dir),
+        show: open,
+    });
+    let _ = tx.send(Msg::Flash(if choice == 1 {
+        format!("forgot {name}  ·  audio kept")
+    } else {
+        format!("deleted {name}")
+    }));
+    Ok(())
+}
+
 /* The open run has to follow its own folder: `S` would otherwise sync the
    playlist back under the name it has upstream and leave this folder behind
    as a copy. Reopening any other folder reads the header instead. */
@@ -934,7 +1017,7 @@ fn serve(
             }
             Cmd::SyncOne => Some(sync_open(cfg, tx, cancel, tracks)),
             Cmd::ResyncAll => Some(resync(cfg, tx, cancel, tracks, library(&cfg.dir))),
-            Cmd::Url => start_url(cfg, tx, cancel, tracks),
+            Cmd::Url => start_url(cfg, tx, cancel, tracks, &asker),
             Cmd::Edit(index) => {
                 report(tx, edit(cfg, tx, tracks, &asker, &mut held, index));
                 None
@@ -944,7 +1027,11 @@ fn serve(
                 None
             }
             Cmd::Cover(index) => {
-                report(tx, cover(tx, tracks, &asker, cancel, index));
+                report(tx, cover(tx, tracks, &asker, cancel, index, cfg.apple));
+                None
+            }
+            Cmd::Search(index) => {
+                report(tx, search(cfg, tx, tracks, &asker, index));
                 None
             }
             Cmd::Retry => {
@@ -981,6 +1068,10 @@ fn serve(
             }
             Cmd::Toggle => {
                 report(tx, player::toggle());
+                None
+            }
+            Cmd::Remove(folder) => {
+                report(tx, remove_shelf(cfg, tx, &asker, tracks, &folder));
                 None
             }
             Cmd::Play(folder) => {
@@ -1052,6 +1143,7 @@ fn start_url(
     tx: &Sender<Msg>,
     cancel: &AtomicBool,
     tracks: &mut Vec<Track>,
+    asker: &Asker,
 ) -> Option<Result<String>> {
     let Some(url) = prompt_url(tx, Escape::Keep) else {
         let _ = tx.send(Msg::Flash("cancelled".into()));
@@ -1063,6 +1155,10 @@ fn start_url(
     /* Load-bearing: a new playlist has no folder of its own yet, and the last
        one's would pull every track of this one into that folder. */
     cfg.folder = None;
+    /* The same question the first-start prompt asks above: one menu before
+       the download, Esc keeping whatever the session already had. A failed
+       save reports rather than aborting the URL that was just typed. */
+    report(tx, set_format(cfg, tx, asker));
     let gate = cfg.pick;
     Some(pipeline(cfg, tx, cancel, tracks, gate))
 }
@@ -1129,8 +1225,9 @@ fn retry(
         .as_ref()
         .and_then(|f| f.file_name().map(|n| n.to_string_lossy().to_string()))
         .unwrap_or_default();
-    /* The folder image is already there from the first pass, and rewriting it
-       from a retried track would change the album art for every other one. */
+    /* The first pass dropped the folder image on its way out, so there is
+       nothing to preserve: whatever a retried track resolves gets embedded,
+       and the file it briefly leaves behind goes with the pass. */
     let mut cover = CoverState {
         written: folder.as_deref().is_some_and(has_cover),
     };
@@ -1138,6 +1235,7 @@ fn retry(
 
     sync_manifest(cfg, tracks);
     let playlist_file = write_playlist(cfg, tracks)?;
+    drop_folder_cover(tracks);
 
     /* Rebuilt rather than appended to: this replaces the run's own summary,
        which is what gets printed on exit, so it has to still say where the
@@ -1421,6 +1519,84 @@ fn edit(
     Ok(())
 }
 
+/// Runs the text search again for one track's current artist and title:
+/// Deezer first, Apple fallback. No fingerprint: the audio is unchanged, so
+/// only the words are worth re-asking about. A hit is written like a run
+/// match, and the row, filename and playlist follow it; a miss touches
+/// nothing. No undo: the album and art a hit brings have nowhere in `Undo`
+/// to go back to, and `e` is the way back instead.
+fn search(
+    cfg: &Config,
+    tx: &Sender<Msg>,
+    tracks: &mut [Track],
+    asker: &Asker,
+    index: usize,
+) -> Result<()> {
+    let Some(pos) = tracks.iter().position(|t| t.index == index) else {
+        return Ok(());
+    };
+    let path = tracks[pos].path.clone().context("track has no file")?;
+    if !path.is_file() {
+        bail!(
+            "track {} was never downloaded  ·  r retries the failures",
+            tracks[pos].index
+        );
+    }
+    let (artist, title) = (tracks[pos].artist.clone(), tracks[pos].title.clone());
+    if artist.is_empty() || title.is_empty() {
+        bail!("artist and title cannot be empty  ·  e types them first");
+    }
+    let _ = tx.send(Msg::Stage(format!("searching for {artist} - {title}")));
+    let Some(m) = tag::search(&artist, &title, cfg.apple) else {
+        let _ = tx.send(Msg::Flash(format!(
+            "no match for {artist} - {title}  ·  e types the tags by hand"
+        )));
+        return Ok(());
+    };
+    /* The folder image went with the pass: the hit still gets embedded, and
+       no new file is left behind. */
+    let mut cover = CoverState { written: true };
+    let old = tracks[pos].artist.clone();
+    let mut note = m.score.map(|score| format!("score {score:.2}")).unwrap_or_default();
+    let (artist, title, why) = tag::apply(&path, &m, cfg, &mut cover, asker, index, &old)?;
+    if !why.is_empty() {
+        note = why;
+    }
+    let departed = tracks[pos].status == Status::Gone;
+    /* A departed track stays departed, for the same reason an edit keeps it
+       so: it is still not in the playlist, and re-listing it would rename it
+       to a position it does not hold. */
+    let status = if departed { Status::Gone } else { Status::Ok };
+    let track = &mut tracks[pos];
+    track.artist = artist;
+    track.title = title;
+    track.name = label(&track.title, &track.artist);
+    track.status = status;
+    track.source = m.source.into();
+    track.note = std::mem::take(&mut note);
+    track.mbid = m.mbid.clone();
+    if !departed {
+        track.listed = true;
+    }
+    let _ = tx.send(Msg::Update {
+        index: track.index,
+        status,
+        source: Some(track.source.clone()),
+        note: Some(track.note.clone()),
+        name: Some(track.name.clone()),
+    });
+    if !departed {
+        rename(cfg, tx, &mut tracks[pos]);
+    }
+    save_manifest(cfg, tracks);
+    write_playlist(cfg, tracks)?;
+    let _ = tx.send(Msg::Flash(format!(
+        "track {index} matched via {}",
+        tracks[pos].source
+    )));
+    Ok(())
+}
+
 /// Where a chosen row's image comes from. Keeping this beside the label means
 /// the pick is resolved by identity rather than by re-reading the label text.
 #[derive(Debug, PartialEq)]
@@ -1520,6 +1696,18 @@ fn current_cover(folder: &Path) -> Option<String> {
     None
 }
 
+/* Every track already carries the art embedded, so the folder image is a
+   leftover once a pass finishes: it duplicates those bytes for file managers
+   and nothing else. The `c` cover picker still writes one on an explicit
+   choice; this only drops what a run left behind. */
+fn drop_folder_cover(tracks: &[Track]) {
+    if let Some(folder) = folder_of(tracks) {
+        for name in COVER_NAMES {
+            let _ = std::fs::remove_file(folder.join(name));
+        }
+    }
+}
+
 fn cancelled(tx: &Sender<Msg>) -> Result<()> {
     let _ = tx.send(Msg::Flash("cancelled".into()));
     Ok(())
@@ -1531,6 +1719,7 @@ fn cover(
     asker: &Asker,
     cancel: &AtomicBool,
     index: usize,
+    apple: bool,
 ) -> Result<()> {
     let Some(pos) = tracks.iter().position(|t| t.index == index) else {
         return Ok(());
@@ -1542,6 +1731,7 @@ fn cover(
         &tracks[pos].artist,
         &tracks[pos].title,
         tracks[pos].mbid.as_deref(),
+        apple,
     );
     let options = cover_options(&found, current_cover(&folder));
     let labels: Vec<String> = options.iter().map(|(label, _)| label.clone()).collect();
@@ -2369,6 +2559,297 @@ pub mod tests {
         assert!(library(Path::new("/nonexistent-earworm-library")).is_empty());
     }
 
+    /* `D` on the library, answered "forget": the playlist goes but the audio
+       stays, so the folder is left on disk as plain files. */
+    #[test]
+    fn forgetting_a_playlist_keeps_the_audio_but_drops_the_playlist() {
+        let root = scratch("remove-forget");
+        let folder = root.join("Focus");
+        std::fs::create_dir_all(&folder).unwrap();
+        let audio = folder.join("01 - A.opus");
+        std::fs::write(&audio, "audio").unwrap();
+        manifest::write(&folder, "u", [("a".to_string(), audio.clone())].into_iter()).unwrap();
+        let playlist = folder.join("Focus.m3u8");
+        std::fs::write(&playlist, "#EXTM3U\n").unwrap();
+        let mut cfg = config(true);
+        cfg.dir = root.clone();
+
+        let (tx, rx) = mpsc::channel();
+        let (result, answered, flashes) = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let asker = Asker { tx: tx.clone(), enabled: true };
+                let mut tracks = Vec::new();
+                remove_shelf(&mut cfg, &tx, &asker, &mut tracks, &folder)
+            });
+            let mut answered = false;
+            let mut flashes = Vec::new();
+            // Bounded: a menu that stopped asking would otherwise leave this
+            // waiting for a message nothing is going to send.
+            while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
+                match msg {
+                    Msg::Ask(_, reply) => {
+                        reply.send(Reply::Choice(1)).unwrap();
+                        answered = true;
+                    }
+                    Msg::Flash(line) => flashes.push(line),
+                    _ => {}
+                }
+                if answered {
+                    break;
+                }
+            }
+            let result = worker.join().unwrap();
+            while let Ok(msg) = rx.try_recv() {
+                if let Msg::Flash(line) = msg {
+                    flashes.push(line);
+                }
+            }
+            (result, answered, flashes)
+        });
+
+        assert!(answered, "no menu was asked");
+        result.unwrap();
+        assert!(!manifest::path(&folder).exists(), "the sidecar survived");
+        assert!(!playlist.exists(), "the .m3u8 survived");
+        assert!(audio.is_file(), "the audio went with the playlist");
+        assert!(
+            flashes.iter().any(|f| f.contains("audio kept")),
+            "no word about what stayed: {flashes:?}"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /* Answered "delete": the whole folder goes, audio with it. */
+    #[test]
+    fn deleting_a_playlist_takes_the_folder_with_it() {
+        let root = scratch("remove-delete");
+        let folder = root.join("Focus");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("01 - A.opus"), "audio").unwrap();
+        manifest::write(&folder, "u", std::iter::empty()).unwrap();
+        let mut cfg = config(true);
+        cfg.dir = root.clone();
+
+        let (tx, rx) = mpsc::channel();
+        let answered = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let asker = Asker { tx: tx.clone(), enabled: true };
+                let mut tracks = Vec::new();
+                remove_shelf(&mut cfg, &tx, &asker, &mut tracks, &folder)
+            });
+            let mut answered = false;
+            while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
+                if let Msg::Ask(_, reply) = msg {
+                    reply.send(Reply::Choice(2)).unwrap();
+                    answered = true;
+                    break;
+                }
+            }
+            worker.join().unwrap().unwrap();
+            answered
+        });
+
+        assert!(answered, "no menu was asked");
+        assert!(!folder.exists(), "the folder survived its own deletion");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /* The first row is the safe one: keeping changes nothing on disk. */
+    #[test]
+    fn keeping_a_playlist_changes_nothing() {
+        let root = scratch("remove-keep");
+        let folder = root.join("Focus");
+        std::fs::create_dir_all(&folder).unwrap();
+        manifest::write(&folder, "u", std::iter::empty()).unwrap();
+        let mut cfg = config(true);
+        cfg.dir = root.clone();
+
+        let (tx, rx) = mpsc::channel();
+        let flashes = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let asker = Asker { tx: tx.clone(), enabled: true };
+                let mut tracks = Vec::new();
+                remove_shelf(&mut cfg, &tx, &asker, &mut tracks, &folder)
+            });
+            let mut flashes = Vec::new();
+            while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
+                match msg {
+                    Msg::Ask(_, reply) => {
+                        reply.send(Reply::Choice(0)).unwrap();
+                        break;
+                    }
+                    Msg::Flash(line) => flashes.push(line),
+                    _ => {}
+                }
+            }
+            worker.join().unwrap().unwrap();
+            while let Ok(msg) = rx.try_recv() {
+                if let Msg::Flash(line) = msg {
+                    flashes.push(line);
+                }
+            }
+            flashes
+        });
+
+        assert!(manifest::path(&folder).is_file(), "keeping removed the sidecar");
+        assert!(flashes.iter().any(|f| f.contains("keeping")), "{flashes:?}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /* Removing the folder the track list is showing clears the run and lands
+       back on the library, or every key on screen would act on deleted files. */
+    #[test]
+    fn removing_the_open_folder_returns_to_the_library() {
+        let root = scratch("remove-open");
+        let folder = root.join("Focus");
+        std::fs::create_dir_all(&folder).unwrap();
+        manifest::write(&folder, "u", std::iter::empty()).unwrap();
+        let mut cfg = config(true);
+        cfg.dir = root.clone();
+
+        let (tx, rx) = mpsc::channel();
+        let (tracks_left, restarted, back, empty) = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let asker = Asker { tx: tx.clone(), enabled: true };
+                let mut tracks = vec![track_at(&folder, "01 - A.opus", Status::Have)];
+                remove_shelf(&mut cfg, &tx, &asker, &mut tracks, &folder)?;
+                Ok::<_, anyhow::Error>(tracks.len())
+            });
+            let (mut restarted, mut back, mut empty) = (false, false, false);
+            while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
+                match msg {
+                    Msg::Ask(_, reply) => {
+                        reply.send(Reply::Choice(1)).unwrap();
+                    }
+                    Msg::Restart => restarted = true,
+                    Msg::Library { shelves, show } => {
+                        back = show;
+                        empty = shelves.is_empty();
+                    }
+                    _ => {}
+                }
+                if restarted && back {
+                    break;
+                }
+            }
+            let tracks_left = worker.join().unwrap().unwrap();
+            (tracks_left, restarted, back, empty)
+        });
+
+        assert_eq!(tracks_left, 0, "the open run kept its tracks");
+        assert!(restarted, "the run state was never cleared");
+        assert!(back, "the screen stayed on the deleted folder");
+        assert!(empty, "the library still lists what was removed");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /* The folder arrives from the UI rather than from the scan, and what this
+       deletes does not come back: anything outside `--dir` is refused before
+       any question is asked. */
+    #[test]
+    fn removing_anything_outside_the_library_is_refused() {
+        let root = scratch("remove-guard");
+        let mut cfg = config(true);
+        cfg.dir = root.clone();
+        let (tx, _rx) = mpsc::channel();
+        let asker = Asker { tx: tx.clone(), enabled: false };
+        let mut tracks = Vec::new();
+
+        let err = remove_shelf(&mut cfg, &tx, &asker, &mut tracks, Path::new("/tmp/elsewhere"))
+            .unwrap_err();
+        assert!(err.to_string().contains("outside"), "{err:?}");
+        let err = remove_shelf(&mut cfg, &tx, &asker, &mut tracks, &root).unwrap_err();
+        assert!(err.to_string().contains("outside"), "{err:?}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /* Typing the first URL also offers the format: it is the only question
+       before the first download, and the run adopts whatever it leaves. */
+    #[test]
+    fn the_first_url_prompt_also_offers_the_format() {
+        let root = scratch("first-format");
+        let mut cfg = config(true);
+        cfg.dir = root.clone();
+        cfg.config_file = None;
+        // The index of "flac" in FORMATS, which is what the menu lists.
+        let flac = config::FORMATS
+            .iter()
+            .position(|(name, _)| *name == "flac")
+            .unwrap();
+
+        let (tx, rx) = mpsc::channel();
+        let (start, asked) = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| ask_start(&mut cfg, &tx));
+            let mut asked = 0;
+            // Bounded: a prompt that stopped asking would otherwise leave this
+            // waiting for a message nothing is going to send.
+            while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
+                let Msg::Ask(_, reply) = msg else { continue };
+                asked += 1;
+                if asked == 1 {
+                    reply
+                        .send(Reply::Text("https://www.youtube.com/playlist?list=PL1".into()))
+                        .unwrap();
+                } else {
+                    reply.send(Reply::Choice(flac)).unwrap();
+                    break;
+                }
+            }
+            (worker.join().unwrap(), asked)
+        });
+
+        assert_eq!(asked, 2, "the format was never offered");
+        assert!(matches!(start, Start::Playlist), "no playlist after two answers");
+        assert_eq!(cfg.format, "flac");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /* Backing out of the format menu keeps the session default: Esc is how a
+       URL add stays a single question. */
+    #[test]
+    fn backing_out_of_the_first_format_menu_keeps_the_default() {
+        let root = scratch("first-format-keep");
+        let mut cfg = config(true);
+        cfg.dir = root.clone();
+        cfg.config_file = None;
+
+        let (tx, rx) = mpsc::channel();
+        let start = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| ask_start(&mut cfg, &tx));
+            let mut asked = 0;
+            while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
+                let Msg::Ask(_, reply) = msg else { continue };
+                asked += 1;
+                if asked == 1 {
+                    reply
+                        .send(Reply::Text("https://www.youtube.com/playlist?list=PL1".into()))
+                        .unwrap();
+                } else {
+                    reply.send(Reply::Cancel).unwrap();
+                    break;
+                }
+            }
+            assert_eq!(asked, 2, "the format was never offered");
+            worker.join().unwrap()
+        });
+
+        assert!(matches!(start, Start::Playlist), "cancelling the menu lost the URL");
+        assert_eq!(cfg.format, config::DEFAULT_FORMAT);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /* A URL from the command line arrives fully specified, so the first start
+       asks nothing at all. */
+    #[test]
+    fn a_url_from_the_command_line_skips_the_first_questions() {
+        let mut cfg = config(true);
+        cfg.url = "https://www.youtube.com/playlist?list=PL1".into();
+        let (tx, rx) = mpsc::channel();
+        assert!(matches!(ask_start(&mut cfg, &tx), Start::Playlist));
+        assert!(rx.try_recv().is_err(), "a passed URL was asked about");
+        assert_eq!(cfg.format, config::DEFAULT_FORMAT);
+    }
+
     #[test]
     fn the_summary_counts_departures_separately_from_the_playlist() {
         let dir = scratch("summary");
@@ -3020,6 +3501,57 @@ pub mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /* A finished folder holds tracks, the playlist and the manifest. The
+       folder image only ever duplicated the art already embedded in every
+       track, so the end of a pass drops it and keeps everything else. */
+    #[test]
+    fn a_finished_pass_leaves_no_folder_image_behind() {
+        let dir = scratch("dropcover");
+        let tracks = vec![track_at(&dir, "01 - a - b.opus", Status::Have)];
+        for name in COVER_NAMES {
+            std::fs::write(dir.join(name), "image").unwrap();
+        }
+        std::fs::write(dir.join("list.m3u8"), "tracks").unwrap();
+
+        drop_folder_cover(&tracks);
+
+        for name in COVER_NAMES {
+            assert!(!dir.join(name).exists(), "{name} survived the pass");
+        }
+        assert!(dir.join("01 - a - b.opus").is_file(), "a track went with it");
+        assert!(dir.join("list.m3u8").is_file(), "the playlist went with it");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* Both bail before any lookup runs, so neither test needs the network:
+       the guards are the whole point being pinned down. */
+    #[test]
+    fn searching_a_track_with_no_file_reports_it() {
+        let dir = scratch("searchnofile");
+        let (tx, _rx) = mpsc::channel();
+        let asker = Asker { tx: tx.clone(), enabled: false };
+        let mut tracks = vec![Track::new(1, "vid".into(), "name".into(), dir.join("gone.opus"))];
+        tracks[0].artist = "Somebody".into();
+        tracks[0].title = "Something".into();
+
+        let err = search(&config(true), &tx, &mut tracks, &asker, 1).unwrap_err();
+        assert!(err.to_string().contains("never downloaded"), "{err:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn searching_with_no_words_to_search_with_names_the_next_step() {
+        let dir = scratch("searchempty");
+        let (tx, _rx) = mpsc::channel();
+        let asker = Asker { tx: tx.clone(), enabled: false };
+        let mut tracks = vec![track_at(&dir, "01 - a - b.opus", Status::Failed)];
+        tracks[0].artist.clear();
+
+        let err = search(&config(true), &tx, &mut tracks, &asker, 4).unwrap_err();
+        assert!(err.to_string().contains("e types them first"), "{err:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     fn scratch(tag: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("earworm-rename-{tag}-{}", std::process::id()));
@@ -3045,6 +3577,7 @@ pub mod tests {
             m3u8: true,
             cover: true,
             lookup: true,
+            apple: true,
             fix: true,
             format: config::DEFAULT_FORMAT.into(),
             config_file: None,

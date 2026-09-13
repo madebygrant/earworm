@@ -27,13 +27,17 @@ pub struct Cli {
     #[arg(short = 'M', long)]
     pub no_m3u8: bool,
 
-    /// Skip the cover.jpg written beside the tracks
+    /// Skip cover art: nothing fetched, nothing embedded in the tracks
     #[arg(short = 'C', long)]
     pub no_cover: bool,
 
     /// Skip AcoustID/Deezer identification, keep parsed tags
     #[arg(short = 'L', long)]
     pub no_lookup: bool,
+
+    /// Skip the Apple Music (iTunes Search) fallback when Deezer finds nothing
+    #[arg(long)]
+    pub no_apple: bool,
 
     /// Never prompt; unresolved tracks keep their parsed tags
     #[arg(short = 'F', long)]
@@ -96,6 +100,7 @@ pub struct FileConfig {
     pub m3u8: Option<bool>,
     pub cover: Option<bool>,
     pub lookup: Option<bool>,
+    pub apple: Option<bool>,
     pub fix: Option<bool>,
     pub rename: Option<bool>,
     pub album: Option<bool>,
@@ -270,6 +275,7 @@ pub struct Config {
     pub m3u8: bool,
     pub cover: bool,
     pub lookup: bool,
+    pub apple: bool,
     pub fix: bool,
     pub resync: bool,
     pub list: bool,
@@ -342,6 +348,7 @@ impl Config {
             m3u8: off("no_m3u8", file.m3u8),
             cover: off("no_cover", file.cover),
             lookup: off("no_lookup", file.lookup),
+            apple: off("no_apple", file.apple),
             fix: off("no_fix", file.fix),
             // Actions, not settings, so they have no config key.
             resync: cli.resync,
@@ -367,10 +374,11 @@ impl Config {
     pub fn describe(&self) -> String {
         let on = |flag: bool| if flag { "on" } else { "off" };
         format!(
-            "format {} · parse {} · lookup {} · cover {} · m3u8 {} · prompts {} · rename {}",
+            "format {} · parse {} · lookup {} · apple {} · cover {} · m3u8 {} · prompts {} · rename {}",
             self.format,
             on(self.parse),
             on(self.lookup),
+            on(self.apple),
             on(self.cover),
             on(self.m3u8),
             on(self.fix),
@@ -736,6 +744,19 @@ mod tests {
         assert!(!build("pick = false\n", &[]).pick, "the file could not switch it off");
         assert!(
             !build("pick = true\n", &["--no-pick"]).pick,
+            "the command line lost to the file"
+        );
+    }
+
+    /* The Apple fallback is on by default like the gate: the command line can
+    only switch it off, and the file is the only way to hold the choice. */
+    #[test]
+    fn the_apple_fallback_is_on_unless_something_says_otherwise() {
+        assert!(build("", &[]).apple, "a bare run lost the fallback");
+        assert!(!build("", &["--no-apple"]).apple, "the flag did not switch it off");
+        assert!(!build("apple = false\n", &[]).apple, "the file could not switch it off");
+        assert!(
+            !build("apple = true\n", &["--no-apple"]).apple,
             "the command line lost to the file"
         );
     }

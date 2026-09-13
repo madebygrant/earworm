@@ -103,6 +103,7 @@ fn check(cfg: &Config) -> Result<()> {
         extension: config::extension(&cfg.format),
         dir: &dir,
         playlists: dir.is_dir().then(|| worker::library(&dir).len()),
+        apple: cfg.apple,
     });
     print!("{text}");
     if !ready {
@@ -280,11 +281,9 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.quit = true,
         KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
         KeyCode::Char('q') => app.ask_quit(),
-        /* Esc unwinds one step at a time: the filter first, since a hidden
-           list is the thing most likely to have prompted the keypress, then
-           the library, then the tool. */
-        KeyCode::Esc if app.narrowed() => app.clear_filter(),
-        KeyCode::Esc => app.leave_tracks(),
+        /* One step at a time, and the order lives on `escape_tracks`: the
+           filter first, then the marks, then the library. */
+        KeyCode::Esc => app.escape_tracks(),
         KeyCode::Char('/') => app.typing_filter = true,
         KeyCode::Char('f') => app.follow = !app.follow,
         /* The same narrowing the finish menu offers, for the times you go
@@ -324,6 +323,11 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('c') if app.can_command() => {
             if let Some(index) = app.selected() {
                 app.send(Cmd::Cover(index));
+            }
+        }
+        KeyCode::Char('T') if app.can_command() => {
+            if let Some(index) = app.selected() {
+                app.send(Cmd::Search(index));
             }
         }
         KeyCode::Char('r') if app.can_command() => app.send(Cmd::Retry),
@@ -501,6 +505,13 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('O') if app.can_browse() => {
             if let Some(folder) = app.selected_shelf().map(|s| s.path.clone()) {
                 app.send(Cmd::Reveal(folder));
+            }
+        }
+        /* `D` removes the playlist, then asks whether the folder goes with
+           it: forgetting keeps the audio, deleting takes everything. */
+        KeyCode::Char('D') if app.can_browse() => {
+            if let Some(folder) = app.selected_shelf().map(|s| s.path.clone()) {
+                app.send(Cmd::Remove(folder));
             }
         }
         KeyCode::Char('R') if app.can_browse() => app.send(Cmd::ResyncAll),
@@ -691,6 +702,36 @@ mod tests {
         assert_eq!(app.sort, crate::app::Sort::Synced);
     }
 
+    /* `D` removes the playlist under the cursor: the worker asks what goes
+       before anything is deleted, so the key only names the folder. */
+    #[test]
+    fn the_library_remove_key_sends_the_folder_under_the_cursor() {
+        let (tx, cmds) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.view = View::Library;
+        app.apply(app::Msg::Library {
+            shelves: vec![crate::app::Shelf {
+                path: std::path::PathBuf::from("/music/Focus"),
+                name: "Focus".into(),
+                url: "u".into(),
+                tracks: 3,
+                missing: 0,
+                synced: None,
+                files: Vec::new(),
+            }],
+            show: true,
+        });
+
+        // Or the first key goes on skipping the intro instead.
+        app.intro_done = true;
+
+        handle_key(&mut app, KeyCode::Char('D'), KeyModifiers::NONE);
+        assert!(matches!(
+            cmds.try_recv(),
+            Ok(Cmd::Remove(path)) if path == std::path::Path::new("/music/Focus")
+        ));
+    }
+
     /* A forty-minute sync is when someone has gone to do something else,
        which is the whole point of the bell. A folder opened from the library
        settles in the same second as the keypress, and ringing for that is
@@ -740,6 +781,26 @@ mod tests {
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert!(app.picking.is_none());
         assert!(matches!(answers.try_recv(), Ok(Reply::Picked(picked)) if picked.is_empty()));
+    }
+
+    /* Esc on the track list unwinds the filter, then the marks, then the
+       library: the dots finally have a key that removes them. */
+    #[test]
+    fn esc_on_the_track_list_clears_marks_before_leaving() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.tracks = vec![crate::app::Track::new(
+            1,
+            "id".into(),
+            "name".into(),
+            std::path::PathBuf::new(),
+        )];
+        app.done = Some(Ok(String::new()));
+        app.marked.insert(1);
+
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.marked.is_empty(), "Esc left the marks on");
+        assert!(app.stage.contains("unmarked 1 track"), "{}", app.stage);
     }
 
     /* One level of undo is only usable if the key is live exactly when the

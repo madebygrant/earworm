@@ -9,6 +9,7 @@ use unicode_normalization::UnicodeNormalization;
 
 const ACOUSTID_URL: &str = "https://api.acoustid.org/v2/lookup";
 const DEEZER_URL: &str = "https://api.deezer.com/search";
+const ITUNES_URL: &str = "https://itunes.apple.com/search";
 const COVERART_URL: &str = "https://coverartarchive.org/release-group";
 const UA: &str = "earworm/0.1";
 
@@ -18,6 +19,7 @@ const ACOUSTID_MIN_SCORE: f64 = 0.8;
 // AcoustID asks for <=3 requests/second.
 const ACOUSTID_DELAY: Duration = Duration::from_millis(340);
 const DEEZER_DELAY: Duration = Duration::from_millis(200);
+const ITUNES_DELAY: Duration = Duration::from_millis(200);
 
 // ureq has no timeout by default, and a stalled lookup would hang the worker
 // with no way to skip the track.
@@ -213,6 +215,53 @@ pub fn deezer(artist: &str, title: &str) -> Option<Match> {
     })
 }
 
+/// iTunes Search API hit turned into a `Match`. Kept apart from the fetch so
+/// the mapping is testable as text in, `Match` out.
+fn itunes_match(hit: &Value) -> Option<Match> {
+    Some(Match {
+        title: hit.get("trackName")?.as_str()?.to_string(),
+        artist: hit
+            .get("artistName")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        album: hit
+            .get("collectionName")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        cover_url: hit
+            .get("artworkUrl100")
+            .and_then(Value::as_str)
+            .map(upscale_artwork),
+        mbid: None,
+        score: None,
+        source: "apple",
+    })
+}
+
+/// iTunes serves 100x100 thumbnails; the same path at 600x600 exists and is
+/// what gets embedded. A URL without the size marker is used as-is.
+fn upscale_artwork(url: &str) -> String {
+    url.replace("100x100", "600x600")
+}
+
+/// Apple Music catalogue via the free iTunes Search API, no key needed.
+/// Fallback for when Deezer has no plausible hit.
+pub fn itunes(artist: &str, title: &str) -> Option<Match> {
+    let query = format!("{artist} {title}");
+    let query = query.trim();
+    if query.is_empty() {
+        return None;
+    }
+    let data = get_json(&format!(
+        "{ITUNES_URL}?term={}&media=music&entity=song&limit=1",
+        encode(query)
+    ));
+    sleep(ITUNES_DELAY);
+    let hit = data?.get("results")?.as_array()?.first()?.clone();
+    itunes_match(&hit)
+}
+
 /// A cover the user could pick. Nothing is fetched to build the list; only the
 /// chosen one is downloaded.
 pub struct Artwork {
@@ -254,9 +303,10 @@ fn push_unique(out: &mut Vec<Artwork>, label: String, url: String) {
     out.push(Artwork { label, url });
 }
 
-/// Deezer albums matching the track, plus the Cover Art Archive release group
-/// when the identification supplied one.
-pub fn artwork(artist: &str, title: &str, mbid: Option<&str>) -> Vec<Artwork> {
+/// Deezer albums matching the track, plus Apple ones when the fallback is on,
+/// plus the Cover Art Archive release group when the identification supplied
+/// one.
+pub fn artwork(artist: &str, title: &str, mbid: Option<&str>, apple: bool) -> Vec<Artwork> {
     let mut out = Vec::new();
     if let Some(mbid) = mbid {
         out.push(Artwork {
@@ -267,29 +317,54 @@ pub fn artwork(artist: &str, title: &str, mbid: Option<&str>) -> Vec<Artwork> {
 
     let query = format!("{artist} {title}");
     let query = query.trim();
-    if !query.is_empty()
-        && let Some(data) = get_json(&format!("{DEEZER_URL}?q={}&limit=8", encode(query)))
-    {
-        sleep(DEEZER_DELAY);
-        for hit in data.get("data").and_then(Value::as_array).unwrap_or(&vec![]) {
-            let album = hit.get("album");
-            let (Some(name), Some(url)) = (
-                album.and_then(|a| a.get("title")).and_then(Value::as_str),
-                album.and_then(|a| a.get("cover_xl")).and_then(Value::as_str),
-            ) else {
-                continue;
-            };
-            push_unique(
-                &mut out,
-                format!("Deezer  {name}  1000x1000"),
-                url.to_string(),
-            );
+    if !query.is_empty() {
+        if let Some(data) = get_json(&format!("{DEEZER_URL}?q={}&limit=8", encode(query))) {
+            sleep(DEEZER_DELAY);
+            for hit in data.get("data").and_then(Value::as_array).unwrap_or(&vec![]) {
+                let album = hit.get("album");
+                let (Some(name), Some(url)) = (
+                    album.and_then(|a| a.get("title")).and_then(Value::as_str),
+                    album.and_then(|a| a.get("cover_xl")).and_then(Value::as_str),
+                ) else {
+                    continue;
+                };
+                push_unique(
+                    &mut out,
+                    format!("Deezer  {name}  1000x1000"),
+                    url.to_string(),
+                );
+            }
+        }
+        if apple
+            && let Some(data) = get_json(&format!(
+                "{ITUNES_URL}?term={}&media=music&entity=song&limit=8",
+                encode(query)
+            ))
+        {
+            sleep(ITUNES_DELAY);
+            for hit in data
+                .get("results")
+                .and_then(Value::as_array)
+                .unwrap_or(&vec![])
+            {
+                let (Some(name), Some(url)) = (
+                    hit.get("collectionName").and_then(Value::as_str),
+                    hit.get("artworkUrl100").and_then(Value::as_str),
+                ) else {
+                    continue;
+                };
+                push_unique(
+                    &mut out,
+                    format!("Apple  {name}  600x600"),
+                    upscale_artwork(url),
+                );
+            }
         }
     }
     out
 }
 
-pub fn cover_bytes(m: &Match) -> Option<Vec<u8>> {
+pub fn cover_bytes(m: &Match, apple: bool) -> Option<Vec<u8>> {
     if let Some(mbid) = &m.mbid
         && let Some(data) = get_bytes(&format!("{COVERART_URL}/{mbid}/front-500"))
     {
@@ -298,9 +373,18 @@ pub fn cover_bytes(m: &Match) -> Option<Vec<u8>> {
     if let Some(url) = &m.cover_url {
         return get_bytes(url);
     }
-    // AcoustID carries no artwork, so fall back to Deezer for the image alone.
-    let alt = deezer(&m.artist, &m.title)?;
-    get_bytes(&alt.cover_url?)
+    // AcoustID carries no artwork, so fall back to a text search for the
+    // image alone: Deezer first, then Apple when the fallback is on.
+    if let Some(alt) = deezer(&m.artist, &m.title)
+        && let Some(url) = alt.cover_url
+    {
+        return get_bytes(&url);
+    }
+    if apple {
+        let alt = itunes(&m.artist, &m.title)?;
+        return get_bytes(&alt.cover_url?);
+    }
+    None
 }
 
 pub fn normalise(text: &str) -> String {
@@ -315,9 +399,10 @@ pub fn similar(a: &str, b: &str) -> bool {
     !a.is_empty() && !b.is_empty() && (a == b || a.contains(&b) || b.contains(&a))
 }
 
-/// Deezer returns a top hit for any query, so the gate has to be real. A loose
-/// title match is only safe when the artist we searched with also corresponds;
-/// searching with a channel name instead demands an exact title.
+/// Deezer and Apple both return a top hit for any query, so the gate has to be
+/// real. A loose title match is only safe when the artist we searched with
+/// also corresponds; searching with a channel name instead demands an exact
+/// title.
 pub fn plausible(m: &Match, artist: &str, title: &str) -> bool {
     if m.source == "acoustid" {
         return true; // gated on score at lookup time instead
@@ -467,5 +552,65 @@ mod tests {
         ));
         assert!(!downgrades("Bjork", "Björk"));
         assert!(!downgrades("Sigur Ros", "Sigur Rós"));
+    }
+
+    #[test]
+    fn itunes_hit_maps_to_a_match_with_upscaled_artwork() {
+        let hit: Value = serde_json::from_str(
+            r#"{
+                "trackName": "Roygbiv",
+                "artistName": "Boards of Canada",
+                "collectionName": "Music Has the Right to Children",
+                "artworkUrl100": "https://example.com/cover/100x100bb.jpg"
+            }"#,
+        )
+        .unwrap();
+        let m = itunes_match(&hit).unwrap();
+        assert_eq!(m.title, "Roygbiv");
+        assert_eq!(m.artist, "Boards of Canada");
+        assert_eq!(m.album.as_deref(), Some("Music Has the Right to Children"));
+        assert_eq!(
+            m.cover_url.as_deref(),
+            Some("https://example.com/cover/600x600bb.jpg")
+        );
+        assert_eq!(m.source, "apple");
+    }
+
+    #[test]
+    fn itunes_hit_without_a_track_name_is_no_match() {
+        let hit: Value = serde_json::from_str(r#"{"artistName": "Nobody"}"#).unwrap();
+        assert!(itunes_match(&hit).is_none());
+    }
+
+    #[test]
+    fn artwork_url_without_a_size_marker_passes_through() {
+        assert_eq!(
+            upscale_artwork("https://example.com/cover.jpg"),
+            "https://example.com/cover.jpg"
+        );
+    }
+
+    #[test]
+    fn apple_hits_pass_through_the_same_plausibility_gate() {
+        let good = Match {
+            title: "Roygbiv".into(),
+            artist: "Boards of Canada".into(),
+            album: None,
+            mbid: None,
+            cover_url: None,
+            score: None,
+            source: "apple",
+        };
+        assert!(plausible(&good, "Boards of Canada", "Roygbiv"));
+        let bad = Match {
+            title: "Something Entirely Different".into(),
+            artist: "Boards of Canada".into(),
+            album: None,
+            mbid: None,
+            cover_url: None,
+            score: None,
+            source: "apple",
+        };
+        assert!(!plausible(&bad, "Boards of Canada", "Roygbiv"));
     }
 }

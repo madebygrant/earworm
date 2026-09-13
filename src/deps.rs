@@ -114,6 +114,7 @@ pub struct Facts<'a> {
     pub config: Option<&'a Path>,
     pub config_exists: bool,
     pub key: bool,
+    pub apple: bool,
     pub format: &'a str,
     pub extension: &'a str,
     pub dir: &'a Path,
@@ -167,6 +168,8 @@ pub fn report(facts: &Facts) -> (String, bool) {
         "acoustid",
         if facts.key {
             "key set"
+        } else if facts.apple {
+            "no key · set ACOUSTID_API_KEY · lookups fall back to Deezer and Apple"
         } else {
             "no key · set ACOUSTID_API_KEY · lookups fall back to Deezer"
         },
@@ -213,6 +216,7 @@ mod tests {
             extension: "opus",
             dir,
             playlists: Some(7),
+            apple: true,
         }
     }
 
@@ -275,6 +279,31 @@ mod tests {
         assert!(text.contains("none yet · would read /home/me/.config"), "{text}");
         assert!(text.contains("ACOUSTID_API_KEY"), "{text}");
         assert!(text.contains("not created yet"), "{text}");
+    }
+
+    /// Without a key the report names the fallbacks, so `--check` says what
+    /// a lookup without fingerprinting actually searches.
+    #[test]
+    fn the_fallback_row_names_apple_only_when_it_is_on() {
+        let tools = [
+            found("yt-dlp", Some("1")),
+            found("ffmpeg", Some("1")),
+            found("fpcalc", Some("1")),
+            found("cliamp", Some("1")),
+        ];
+        let dir = PathBuf::from("/tmp/music");
+        let mut with = facts(&tools, &dir);
+        with.key = false;
+        with.apple = true;
+        let (text, _) = report(&with);
+        assert!(text.contains("Deezer and Apple"), "{text}");
+
+        let mut without = facts(&tools, &dir);
+        without.key = false;
+        without.apple = false;
+        let (text, _) = report(&without);
+        assert!(text.contains("fall back to Deezer"), "{text}");
+        assert!(!text.contains("Apple"), "{text}");
     }
 
     /// ffmpeg opens with its entire build configuration, and most of them
