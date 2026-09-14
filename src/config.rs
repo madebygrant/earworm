@@ -59,6 +59,10 @@ pub struct Cli {
     #[arg(long)]
     pub no_intro: bool,
 
+    /// Don't ask GitHub whether a newer release exists
+    #[arg(long)]
+    pub no_update_check: bool,
+
     /// Don't ring the terminal bell when a long run finishes
     #[arg(long)]
     pub no_notify: bool,
@@ -107,6 +111,7 @@ pub struct FileConfig {
     pub pick: Option<bool>,
     pub intro: Option<bool>,
     pub notify: Option<bool>,
+    pub update_check: Option<bool>,
     pub extra: Option<Vec<String>>,
     pub acoustid_key: Option<String>,
 }
@@ -288,6 +293,8 @@ pub struct Config {
     pub intro: bool,
     /// Ring the bell when a run that took a while settles.
     pub notify: bool,
+    /// Ask GitHub about a newer release, at most once a day.
+    pub update_check: bool,
     pub extra: Vec<String>,
     pub acoustid_key: Option<String>,
 }
@@ -359,6 +366,7 @@ impl Config {
             pick: off("no_pick", file.pick),
             intro: off("no_intro", file.intro),
             notify: off("no_notify", file.notify),
+            update_check: off("no_update_check", file.update_check),
             extra,
             // The environment wins, so a key can be swapped for one run.
             acoustid_key: std::env::var("ACOUSTID_API_KEY")
@@ -757,6 +765,26 @@ mod tests {
         assert!(!build("apple = false\n", &[]).apple, "the file could not switch it off");
         assert!(
             !build("apple = true\n", &["--no-apple"]).apple,
+            "the command line lost to the file"
+        );
+    }
+
+    /* The update check phones home, so it is the one default worth a way to
+    refuse: same negation shape as everything else — the command line can only
+    switch it off, and the file is the only way to hold the choice. */
+    #[test]
+    fn the_update_check_is_on_unless_something_says_otherwise() {
+        assert!(build("", &[]).update_check, "a bare run lost the check");
+        assert!(
+            !build("", &["--no-update-check"]).update_check,
+            "the flag did not switch it off"
+        );
+        assert!(
+            !build("update_check = false\n", &[]).update_check,
+            "the file could not switch it off"
+        );
+        assert!(
+            !build("update_check = true\n", &["--no-update-check"]).update_check,
             "the command line lost to the file"
         );
     }

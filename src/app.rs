@@ -678,6 +678,9 @@ pub struct App {
     /// terminal that redraws on every message and one that sits idle.
     pub started: Instant,
     pub intro_done: bool,
+    /// A newer release, as the probe thread reported it. `None` until it
+    /// lands, and forever when the probe was off or found nothing.
+    pub update: Option<String>,
     pub quit: bool,
 }
 
@@ -726,6 +729,7 @@ impl App {
             picking: None,
             started: Instant::now(),
             intro_done: false,
+            update: None,
             quit: false,
         }
     }

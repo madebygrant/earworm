@@ -120,6 +120,11 @@ pub struct Facts<'a> {
     pub dir: &'a Path,
     /// `None` when the directory is not there yet.
     pub playlists: Option<usize>,
+    /// The newer release the probe found, gathered by the caller so this
+    /// stays as testable as the rest of the report. `None` is also a switched
+    /// off check, a stale read and "already current" all at once, which is
+    /// why there is no false row: silence is the no-news answer.
+    pub update: Option<String>,
 }
 
 /// The report, and whether everything earworm cannot work without is present.
@@ -185,6 +190,19 @@ pub fn report(facts: &Facts) -> (String, bool) {
         Some(n) => row(true, "directory", &format!("{dir} · {n} playlists")),
         None => row(true, "directory", &format!("{dir} · not created yet")),
     });
+    if let Some(latest) = &facts.update {
+        /* Both sides carry exactly one `v`: `update::available` hands over the
+           tag without one, so the prefix is added here and nowhere else. */
+        out.push_str(&row(
+            true,
+            "update",
+            &format!(
+                "v{} → v{latest} · {}",
+                crate::update::current(),
+                crate::update::hint()
+            ),
+        ));
+    }
     (out, ready)
 }
 
@@ -217,6 +235,7 @@ mod tests {
             dir,
             playlists: Some(7),
             apple: true,
+            update: None,
         }
     }
 
@@ -304,6 +323,31 @@ mod tests {
         let (text, _) = report(&without);
         assert!(text.contains("fall back to Deezer"), "{text}");
         assert!(!text.contains("Apple"), "{text}");
+    }
+
+    /// A newer release gets one row, with the numbers and the way to act on
+    /// them; nothing newer says nothing, which is why there is no false row.
+    #[test]
+    fn an_update_row_carries_its_hint_and_no_news_carries_none() {
+        let tools = [
+            found("yt-dlp", Some("1")),
+            found("ffmpeg", Some("1")),
+            found("fpcalc", Some("1")),
+            found("cliamp", Some("1")),
+        ];
+        let dir = PathBuf::from("/tmp/music");
+        let mut facts = facts(&tools, &dir);
+        facts.update = Some("99.0.0".into());
+        let (text, _) = report(&facts);
+        assert!(
+            text.contains(&format!("v{} → v99.0.0", crate::update::current())),
+            "{text}"
+        );
+        assert!(text.contains("cargo install"), "{text}");
+
+        facts.update = None;
+        let (text, _) = report(&facts);
+        assert!(!text.contains("update"), "{text}");
     }
 
     /// ffmpeg opens with its entire build configuration, and most of them

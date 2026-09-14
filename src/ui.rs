@@ -12,6 +12,7 @@ use crate::app::{self, App, Confirm, Player, Prompt, Shelf, Status, View};
 use crate::manifest;
 
 use crate::theme::{self, AMBER, CREAM, DIM, GOLD, INK, RED, RULE, SAND, SURFACE, TEAL};
+use crate::update;
 
 const SPINNER: [&str; 8] = ["⣷", "⣯", "⣟", "⡿", "⢿", "⣻", "⣽", "⣾"];
 const STATUS_WIDTH: usize = 8;
@@ -48,7 +49,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // Takes the whole frame: a header above it would be the thing you read.
     if app.intro() {
         draw_background(frame);
-        draw_intro(frame, app.started.elapsed().as_millis() as u64);
+        draw_intro(frame, app.started.elapsed().as_millis() as u64, app.update.as_deref());
         return;
     }
 
@@ -171,7 +172,7 @@ const WAVE: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█']
 /* Drawn from the elapsed milliseconds alone, so it runs at the same speed
    whether the event loop is idling at its poll timeout or spinning on
    messages, and skipping it costs nothing that was ever computed. */
-fn draw_intro(frame: &mut Frame, ms: u64) {
+fn draw_intro(frame: &mut Frame, ms: u64, update: Option<&str>) {
     let area = frame.area();
     // Below this the wordmark would wrap into nonsense, so only the wave runs.
     let big = area.width >= MARK_WIDTH + 2 && area.height >= MARK_HEIGHT + 6;
@@ -236,7 +237,12 @@ fn draw_intro(frame: &mut Frame, ms: u64) {
 
     // Last, so it reads as a signature rather than part of the animation.
     if ms > wave_at + 250 {
-        let sign = format!("youtube playlists, tagged  ·  v{}", env!("CARGO_PKG_VERSION"));
+        let mut sign = format!("youtube playlists, tagged  ·  v{}", update::current());
+        if let Some(latest) = update {
+            /* The numbers lead and the hint yields: a narrow terminal keeps
+               the news and drops the way to act on it, not the other round. */
+            sign = format!("{sign} → v{latest}  ·  {}", update::hint());
+        }
         let sign = truncate(&sign, area.width as usize);
         let at = area.x + (area.width - cols(&sign) as u16) / 2;
         frame.render_widget(
@@ -2878,11 +2884,15 @@ mod tests {
     }
 
     fn intro_rows(ms: u64, width: u16, height: u16) -> Vec<String> {
+        intro_rows_with(ms, width, height, None)
+    }
+
+    fn intro_rows_with(ms: u64, width: u16, height: u16, update: Option<&str>) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
             .draw(|f| {
                 super::draw_background(f);
-                super::draw_intro(f, ms);
+                super::draw_intro(f, ms, update);
             })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
@@ -2940,6 +2950,31 @@ mod tests {
         }
         // Too narrow for the block letters, so the plain word stands in.
         assert!(intro_rows(1400, 30, 12).join("\n").contains("earworm"));
+    }
+
+    /* A newer release is said once, in the one line that was already there:
+       the numbers lead and the hint follows, so a narrow frame keeps the
+       news and drops the way to act on it rather than the other round. */
+    #[test]
+    fn the_signature_names_the_update_when_there_is_one() {
+        let plain = intro_rows(1400, 100, 14).join("\n");
+        assert!(plain.contains("youtube playlists, tagged"), "{plain:?}");
+        assert!(!plain.contains('→'), "nothing newer said something: {plain:?}");
+
+        /* The `v` is added by this line, not carried in: a release tag arrives
+           `v0.2.0`, update strips it, and `notice` renders `v0.1.0 → v0.2.0`
+           rather than `vv0.2.0`. The current version is read from the crate,
+           not hardcoded, or a release bump would fail this test. */
+        let told = intro_rows_with(1400, 100, 14, Some("0.2.0")).join("\n");
+        let want = format!("v{} → v0.2.0", crate::update::current());
+        assert!(told.contains("youtube playlists, tagged"), "{told:?}");
+        assert!(told.contains(&want), "{told} has no {want}");
+        assert!(!told.contains("vv"), "doubled the v: {told:?}");
+        assert!(told.contains("cargo install"), "{told:?}");
+
+        // The hint yields before the numbers do.
+        let narrow = intro_rows_with(1400, 60, 14, Some("0.2.0")).join("\n");
+        assert!(narrow.contains(&want), "{narrow:?}");
     }
 
     /* It covers the scan and nothing else: anything worth reading outranks it,

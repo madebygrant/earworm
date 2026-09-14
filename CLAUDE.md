@@ -455,6 +455,28 @@ call and file write. Nothing that blocks touches the render loop.
   its version with a copyright line and fpcalc with a build string, and three
   of the four restate their own name before the number.
 
+### The update check
+
+- **A probe that can nag must not reach a frame.** The GitHub probe runs on
+  its own thread in `main` and answers through its own channel, drained with
+  `try_recv` between frames; nothing in the render loop or the worker
+  channel knows it exists. Its one answer per session is a flag, not
+  `app.update.is_none()`: a probe that found nothing has *sent* nothing, so
+  without the flag the disconnected channel is re-polled every frame.
+- **`None` from `update::available` is three answers at once** — check off,
+  cache stale and network dead, already current — so there is no false row
+  in `--check` and no second line in the intro. Silence is the no-news
+  answer, and adding a row would have to invent a question.
+- **The cache is the throttle.** Tag plus unix stamp in
+  `~/.cache/earworm/latest`, MAX_AGE 24h; the network is touched only when
+  the file is missing or old. `--check` is the one synchronous caller, and
+  it is script-facing and bounded, which is why it may spend the probe
+  timeout.
+- **The version comes from `env!("CARGO_PKG_VERSION")` only.** `compare` is
+  semver-lite and tolerant (`v` prefix, missing pieces, suffixes) because
+  the tag on GitHub is whatever the release was tagged; the two never share
+  a literal.
+
 ### Colour depth and the terminal
 
 - **The palette stays one set of RGB numbers; `recolour` maps the finished

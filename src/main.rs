@@ -7,6 +7,7 @@ mod player;
 mod tag;
 mod theme;
 mod ui;
+mod update;
 mod worker;
 mod ytdlp;
 
@@ -44,6 +45,11 @@ fn main() -> Result<()> {
     let settings = cfg.describe();
     // Read off before the worker takes the config: both belong to the UI.
     let (intro, notify) = (cfg.intro, cfg.notify);
+    /* The update probe runs beside the worker, not through it: it answers to
+       nobody on screen and the result is a one-line hint. A stale cache makes
+       it a file read; a fresh one costs at most the probe timeout, which the
+       intro absorbs rather than the first frame. */
+    let update_rx = update_thread(cfg.update_check);
     let (tx, rx) = mpsc::channel();
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -56,7 +62,7 @@ fn main() -> Result<()> {
        thing that ends it does. A separate flag would be a second answer to
        the same question. */
     app.intro_done = !intro;
-    let result = run(&mut terminal, &mut app, rx, notify);
+    let result = run(&mut terminal, &mut app, rx, update_rx, notify);
 
     cancel.store(true, Ordering::SeqCst);
     ytdlp::stop();
@@ -104,6 +110,9 @@ fn check(cfg: &Config) -> Result<()> {
         dir: &dir,
         playlists: dir.is_dir().then(|| worker::library(&dir).len()),
         apple: cfg.apple,
+        /* Script-facing and bounded, so a synchronous answer is fine here:
+           the one place earworm is allowed to spend the probe timeout. */
+        update: cfg.update_check.then(update::available).flatten(),
     });
     print!("{text}");
     if !ready {
@@ -136,14 +145,36 @@ fn list(cfg: &Config) {
     }
 }
 
+/* Off means no thread and no answer, not a failed check; the receiver is
+   what makes the result arrive without ever blocking a frame on it. */
+fn update_thread(on: bool) -> Option<mpsc::Receiver<String>> {
+    if !on {
+        return None;
+    }
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        /* Only a newer release is worth a message: nothing found ends the
+           thread, and the read of the empty channel is what says so. */
+        if let Some(latest) = update::available() {
+            let _ = tx.send(latest);
+        }
+    });
+    Some(rx)
+}
+
 fn run(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
     rx: mpsc::Receiver<app::Msg>,
+    update_rx: Option<mpsc::Receiver<String>>,
     notify: bool,
 ) -> Result<()> {
     let mut title = String::new();
     let mut rang = false;
+    /* `None` is a real answer (nothing newer, or the check found nothing),
+       not "not yet": without the flag a probe that found nothing is polled
+       every frame for the rest of the session. */
+    let mut update_taken = false;
     while !app.quit {
         loop {
             match rx.try_recv() {
@@ -160,6 +191,20 @@ fn run(
                     }
                     break;
                 }
+            }
+        }
+        /* One answer per session: after it is taken, the disconnected
+           channel is not a dead worker, so the poll stops happening. */
+        if !update_taken
+            && let Some(update_rx) = &update_rx
+        {
+            match update_rx.try_recv() {
+                Ok(latest) => {
+                    app.update = Some(latest);
+                    update_taken = true;
+                }
+                Err(TryRecvError::Empty) => {}
+                Err(TryRecvError::Disconnected) => update_taken = true,
             }
         }
         app.expire_flash();

@@ -133,6 +133,7 @@ otherwise backs out to the screen behind it.
 | `--no-pick` | download the whole playlist without stopping to choose tracks |
 | `--no-intro` | skip the opening animation |
 | `--no-notify` | don't ring the bell when a long run finishes |
+| `--no-update-check` | never ask GitHub about a newer release |
 | `--resync` | sync every playlist already under `--dir` |
 | `--list` | print the playlists already under `--dir` and exit |
 | `--check` | check the tools, the key and the config, then exit |
@@ -162,6 +163,7 @@ album = true       # fill an empty album tag with the playlist name
 pick = true        # stop to choose tracks before downloading
 intro = true       # the opening animation
 notify = true      # ring the bell when a long run finishes
+update_check = true # ask GitHub about a newer release, at most once a day
 
 extra = ["--sleep-requests", "1"]   # always passed to yt-dlp
 acoustid_key = "..."                # or use ACOUSTID_API_KEY
@@ -173,6 +175,15 @@ off. To run with something the file disables, edit the file.
 
 `extra` from the file comes before anything after `--` on the command line, so
 a repeated yt-dlp option takes its command-line value.
+
+Once a day earworm asks GitHub Releases whether a newer version exists, and
+says so on the intro's sign-off line and in `--check`. It never asks twice in
+a day (the answer is cached in `~/.cache/earworm/latest`) and it never
+nags: equal and older versions, network failures and `--no-update-check`
+(`update_check = false`) all just say nothing. Updating is
+`git pull && cargo install --path .`, or
+`cargo install --git https://github.com/madebygrant/earworm` for a binary
+built straight from the repo.
 
 Two environment variables change how it draws. `NO_COLOR` set to anything
 non-empty drops colour altogether, and the mode bands switch to reversed

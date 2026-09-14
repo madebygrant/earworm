@@ -53,6 +53,12 @@ fn get_json(url: &str) -> Option<Value> {
     resp.body_mut().read_json::<Value>().ok()
 }
 
+/// Text through the shared agent, for callers that parse it themselves.
+pub fn get_text(url: &str) -> Option<String> {
+    let mut resp = agent().get(url).call().ok()?;
+    resp.body_mut().read_to_string().ok()
+}
+
 fn get_bytes(url: &str) -> Option<Vec<u8>> {
     let mut resp = agent().get(url).call().ok()?;
     resp.body_mut()

@@ -2,5 +2,7 @@
 
 .DS_Store
 
+*.sh
+
 # Cargo.lock is committed: earworm is a binary, so pinned dependency
 # versions are what make a build reproducible.

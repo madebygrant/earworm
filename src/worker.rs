@@ -3666,6 +3666,7 @@ pub mod tests {
             pick: true,
             intro: true,
             notify: true,
+            update_check: true,
             folder: None,
             extra: Vec::new(),
             acoustid_key: None,
