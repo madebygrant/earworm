@@ -593,6 +593,9 @@ fn pipeline(
         tracks.len()
     )));
 
+    // Before the download, which is what writes the one this pass may drop.
+    let theirs = folder_covers(tracks);
+
     /* yt-dlp exits non-zero if any single entry failed, and aborting here
        would throw away the tags, cover and playlist for every track that did
        download. Carry the failure into the summary instead. */
@@ -612,7 +615,7 @@ fn pipeline(
 
     sync_manifest(cfg, tracks);
     let playlist_file = write_playlist(cfg, tracks)?;
-    drop_folder_cover(tracks);
+    drop_folder_cover(tracks, &theirs);
     let mut summary = summarise(tracks, playlist_file.as_deref());
     if !warning.is_empty() {
         summary = format!("{summary}   [{warning}]");
@@ -1031,7 +1034,7 @@ fn serve(
                 None
             }
             Cmd::Search(index) => {
-                report(tx, search(cfg, tx, tracks, &asker, index));
+                report(tx, search(cfg, tx, tracks, &asker, &mut held, index));
                 None
             }
             Cmd::Retry => {
@@ -1214,6 +1217,7 @@ fn retry(
         });
     }
 
+    let theirs = folder_covers(tracks);
     let mut warning = String::new();
     if let Err(err) = ytdlp::run(cfg, tracks, tx) {
         warning = err.to_string();
@@ -1225,9 +1229,9 @@ fn retry(
         .as_ref()
         .and_then(|f| f.file_name().map(|n| n.to_string_lossy().to_string()))
         .unwrap_or_default();
-    /* The first pass dropped the folder image on its way out, so there is
-       nothing to preserve: whatever a retried track resolves gets embedded,
-       and the file it briefly leaves behind goes with the pass. */
+    /* The first pass dropped whatever it wrote, so an image here is one
+       somebody chose: `written` leaves it alone, and it is on `theirs`, so
+       the end of this pass leaves it alone too. */
     let mut cover = CoverState {
         written: folder.as_deref().is_some_and(has_cover),
     };
@@ -1235,7 +1239,7 @@ fn retry(
 
     sync_manifest(cfg, tracks);
     let playlist_file = write_playlist(cfg, tracks)?;
-    drop_folder_cover(tracks);
+    drop_folder_cover(tracks, &theirs);
 
     /* Rebuilt rather than appended to: this replaces the run's own summary,
        which is what gets printed on exit, so it has to still say where the
@@ -1530,6 +1534,7 @@ fn search(
     tx: &Sender<Msg>,
     tracks: &mut [Track],
     asker: &Asker,
+    held: &mut Option<Undo>,
     index: usize,
 ) -> Result<()> {
     let Some(pos) = tracks.iter().position(|t| t.index == index) else {
@@ -1590,6 +1595,11 @@ fn search(
     }
     save_manifest(cfg, tracks);
     write_playlist(cfg, tracks)?;
+    /* Recording no undo is not the same as leaving the last one armed: `u`
+       would put the tags back that this search has just replaced, over a
+       match it knows nothing about, while the bar named some earlier edit. */
+    *held = None;
+    offer_undo(tx, held);
     let _ = tx.send(Msg::Flash(format!(
         "track {index} matched via {}",
         tracks[pos].source
@@ -1696,13 +1706,31 @@ fn current_cover(folder: &Path) -> Option<String> {
     None
 }
 
-/* Every track already carries the art embedded, so the folder image is a
-   leftover once a pass finishes: it duplicates those bytes for file managers
-   and nothing else. The `c` cover picker still writes one on an explicit
-   choice; this only drops what a run left behind. */
-fn drop_folder_cover(tracks: &[Track]) {
+/* Which folder images were there before a pass started. Anything on this
+   list is somebody else's file: one the user dropped in by hand, or the one
+   `c` wrote on an explicit choice. Read before the download, since that is
+   the only moment the two can still be told apart. */
+fn folder_covers(tracks: &[Track]) -> Vec<&'static str> {
+    let Some(folder) = folder_of(tracks) else {
+        return Vec::new();
+    };
+    COVER_NAMES
+        .into_iter()
+        .filter(|name| folder.join(name).is_file())
+        .collect()
+}
+
+/* Every track already carries the art embedded, so an image this pass wrote
+   is a leftover once it finishes: it duplicates those bytes for file managers
+   and nothing else. Only what the pass wrote, though. Deleting one that was
+   already there is not recoverable and nothing on screen would say it
+   happened, so `keep` is what `folder_covers` saw on the way in. */
+fn drop_folder_cover(tracks: &[Track], keep: &[&str]) {
     if let Some(folder) = folder_of(tracks) {
         for name in COVER_NAMES {
+            if keep.contains(&name) {
+                continue;
+            }
             let _ = std::fs::remove_file(folder.join(name));
         }
     }
@@ -3513,13 +3541,40 @@ pub mod tests {
         }
         std::fs::write(dir.join("list.m3u8"), "tracks").unwrap();
 
-        drop_folder_cover(&tracks);
+        drop_folder_cover(&tracks, &[]);
 
         for name in COVER_NAMES {
             assert!(!dir.join(name).exists(), "{name} survived the pass");
         }
         assert!(dir.join("01 - a - b.opus").is_file(), "a track went with it");
         assert!(dir.join("list.m3u8").is_file(), "the playlist went with it");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* An image that was there before the pass is somebody else's: one dropped
+       into the folder by hand, or the one `c` wrote on an explicit choice.
+       Deleting it does not come back and nothing on screen would say so. */
+    #[test]
+    fn a_cover_the_pass_did_not_write_survives_it() {
+        let dir = scratch("keepcover");
+        let tracks = vec![track_at(&dir, "01 - a - b.opus", Status::Have)];
+        std::fs::write(dir.join("cover.jpg"), "theirs").unwrap();
+
+        // What the folder held on the way in, which is the only moment the
+        // two can still be told apart.
+        let theirs = folder_covers(&tracks);
+        assert_eq!(theirs, ["cover.jpg"]);
+        // And then the download leaves one of its own beside it.
+        std::fs::write(dir.join("cover.png"), "ours").unwrap();
+
+        drop_folder_cover(&tracks, &theirs);
+
+        assert_eq!(
+            std::fs::read_to_string(dir.join("cover.jpg")).unwrap(),
+            "theirs",
+            "a cover nobody in this pass wrote was deleted"
+        );
+        assert!(!dir.join("cover.png").exists(), "the pass kept its own leftover");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -3534,7 +3589,7 @@ pub mod tests {
         tracks[0].artist = "Somebody".into();
         tracks[0].title = "Something".into();
 
-        let err = search(&config(true), &tx, &mut tracks, &asker, 1).unwrap_err();
+        let err = search(&config(true), &tx, &mut tracks, &asker, &mut None, 1).unwrap_err();
         assert!(err.to_string().contains("never downloaded"), "{err:?}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -3547,8 +3602,30 @@ pub mod tests {
         let mut tracks = vec![track_at(&dir, "01 - a - b.opus", Status::Failed)];
         tracks[0].artist.clear();
 
-        let err = search(&config(true), &tx, &mut tracks, &asker, 4).unwrap_err();
+        let err = search(&config(true), &tx, &mut tracks, &asker, &mut None, 4).unwrap_err();
         assert!(err.to_string().contains("e types them first"), "{err:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* A hit clears the undo, since `u` would otherwise write the tags this
+       search replaced back over a match it knows nothing about. A search that
+       changed nothing must not: clearing at the top of the function would
+       take the undo away every time the words turned out to be unsearchable.
+       Only this half runs offline; the clear itself needs a real lookup. */
+    #[test]
+    fn a_search_that_wrote_nothing_leaves_the_undo_alone() {
+        let dir = scratch("searchundo");
+        let (tx, _rx) = mpsc::channel();
+        let asker = Asker { tx: tx.clone(), enabled: false };
+        let mut tracks = vec![track_at(&dir, "01 - a - b.opus", Status::Failed)];
+        tracks[0].artist.clear();
+        let mut held = Some(Undo {
+            what: "the edit of track 4".into(),
+            fields: vec![(4, "Neu!".into(), "Hallogallo".into())],
+        });
+
+        assert!(search(&config(true), &tx, &mut tracks, &asker, &mut held, 4).is_err());
+        assert!(held.is_some(), "a search that did nothing took the undo with it");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

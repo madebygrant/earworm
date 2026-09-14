@@ -300,7 +300,14 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         // them: the run is the context a guess is judged in.
         KeyCode::Char('n') => app.jump_attention(true),
         KeyCode::Char('N') => app.jump_attention(false),
-        KeyCode::Char('u') if app.can_command() && app.undoable.is_some() => {
+        /* Not `^u`, which is a page up: a bare arm ahead of the ctrl one
+           takes the key from it, and undoing a tag write looks nothing like
+           the scroll the user asked for. */
+        KeyCode::Char('u')
+            if !mods.contains(KeyModifiers::CONTROL)
+                && app.can_command()
+                && app.undoable.is_some() =>
+        {
             app.send(Cmd::Undo);
         }
         KeyCode::Char('l') => app.show_logs = !app.show_logs,
@@ -823,6 +830,31 @@ mod tests {
         };
         assert_eq!(sent(Some("the edit of track 1")), 1);
         assert_eq!(sent(None), 0, "u sent a command with nothing to undo");
+    }
+
+    /* The bare `u` arm sits ahead of the ctrl one, so without a guard it took
+       the key: `^u` reverted a tag write instead of paging, and only in the
+       one direction, which reads as a rendering fault rather than a keymap. */
+    #[test]
+    fn ctrl_u_pages_even_with_an_undo_on_offer() {
+        let (tx, cmds) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        app.tracks = (1..=30)
+            .map(|n| crate::app::Track::new(n, "id".into(), "n".into(), std::path::PathBuf::new()))
+            .collect();
+        app.done = Some(Ok(String::new()));
+        app.undoable = Some("the edit of track 1".into());
+        app.viewport = 10;
+        app.cursor = 20;
+
+        handle_key(&mut app, KeyCode::Char('u'), KeyModifiers::CONTROL);
+        assert_eq!(cmds.try_iter().count(), 0, "^u undid instead of paging");
+        assert_eq!(app.cursor, 10, "^u did not page up");
+
+        // And the bare key still means undo, which is the arm being guarded.
+        handle_key(&mut app, KeyCode::Char('u'), KeyModifiers::NONE);
+        assert_eq!(cmds.try_iter().count(), 1, "the guard took the undo as well");
     }
 
     /* The guard on the one key that can still lose work, so an unrecognised

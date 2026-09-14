@@ -1549,6 +1549,12 @@ impl App {
        keeps both: the list stays whole and the cursor walks the problems. */
     pub fn jump_attention(&mut self, forward: bool) {
         let rows = self.rows();
+        // A filter that matches nothing, which is exactly when someone reaches
+        // for this key: `rows[at + 1..]` on an empty list is a panic.
+        if rows.is_empty() {
+            self.say("nothing here needs a look");
+            return;
+        }
         let at = self.row_of_cursor(&rows).unwrap_or(0);
         let hit = |pos: &usize| self.tracks[*pos].status.wants_a_look();
         let next = if forward {
@@ -1816,6 +1822,20 @@ mod tests {
         app.cursor = 1;
         app.jump_attention(true);
         assert_eq!(app.cursor, 1);
+        assert!(app.stage.contains("nothing here"), "{}", app.stage);
+    }
+
+    /* A filter that matches nothing is the state the key is most likely to be
+       pressed in, since the pane is showing that it matched nothing. The jump
+       used to index past the end of an empty list and take the tool with it. */
+    #[test]
+    fn n_on_a_list_the_filter_emptied_says_so_rather_than_panicking() {
+        let mut app = app_with(&[Status::Kept, Status::Failed]);
+        app.filter = "zzzz".into();
+        assert!(app.rows().is_empty());
+
+        app.jump_attention(true);
+        app.jump_attention(false);
         assert!(app.stage.contains("nothing here"), "{}", app.stage);
     }
 

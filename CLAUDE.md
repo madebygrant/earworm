@@ -209,6 +209,12 @@ call and file write. Nothing that blocks touches the render loop.
   retry time the tracks that worked are `ok` or `manual`, so keying on
   `Status::Have` would leave them out, and yt-dlp remuxing them fails the whole
   run.
+- **A pass deletes only the folder image it wrote.** Every track carries the
+  art embedded, so `cover.jpg` is a leftover once the pass finishes, but one
+  the user dropped in by hand or chose with `c` is not: `folder_covers` reads
+  the folder before the download and `drop_folder_cover` keeps what it saw.
+  Deleting somebody's file does not come back and nothing on screen would say
+  it happened.
 - **`is_file`, never `exists`, for a track's path.** A directory sitting where
   the audio should go satisfies `exists`, and `scan` then calls the track
   downloaded, so nothing fetches it or marks it failed.
