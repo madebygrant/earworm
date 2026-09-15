@@ -578,7 +578,7 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
         let pane = (u32::from(area.width) * 2 / 5).min(60) as u16;
         let [list, preview] =
             Layout::horizontal([Constraint::Min(1), Constraint::Length(pane)]).areas(area);
-        draw_preview(frame, &app.library[selected], &app.filter, preview);
+        draw_preview(frame, &app.library[selected], &app.filter, &app.format, preview);
         list
     } else {
         area
@@ -656,7 +656,7 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
    third view mode and a second set of keys, and Enter already opens the folder
    properly. What it is for is the `n missing` count on the shelf row, which
    says a sync would re-download something but never which one. */
-fn draw_preview(frame: &mut Frame, shelf: &Shelf, filter: &str, area: Rect) {
+fn draw_preview(frame: &mut Frame, shelf: &Shelf, filter: &str, format: &str, area: Rect) {
     let block = Block::new()
         .borders(Borders::LEFT)
         .border_style(Style::new().fg(RULE));
@@ -702,7 +702,19 @@ fn draw_preview(frame: &mut Frame, shelf: &Shelf, filter: &str, area: Rect) {
         truncate(&head, width),
         Style::new().fg(if shelf.missing > 0 { AMBER } else { DIM }),
     ))];
-    let height = (inner.height as usize).saturating_sub(1);
+    /* Here rather than on the shelf row, which reserves fixed columns for
+       everything it prints: a count that is zero for anyone not converting
+       would cost every folder name ten columns for good. Dim, because it is
+       a statement about the folder and not a problem with it. */
+    let off = app::off_format(shelf, format);
+    if off > 0 {
+        lines.push(Line::from(dim(truncate(
+            &format!(" {off} not {format}"),
+            width,
+        ))));
+    }
+    // Every line above the list, or the tail count runs off the bottom.
+    let height = (inner.height as usize).saturating_sub(lines.len());
     // The last line goes to the tail count, so no track is silently dropped.
     let room = if files.len() > height {
         height.saturating_sub(1)
@@ -2718,6 +2730,46 @@ mod tests {
         assert!(pane.contains("Track 6"), "{pane:?}");
         assert!(!pane.contains("Track 7"), "a row overflowed the pane: {pane:?}");
         assert!(pane.contains("… 36 more"), "{pane:?}");
+    }
+
+    /* The answer to "did my format change take", and the one place on the
+       library screen that gives it. Not a column on the row, which reserves
+       its width whether or not anything is in it, so a count that is zero for
+       everyone not converting would cost every folder name ten columns. */
+    #[test]
+    fn the_preview_says_how_many_tracks_are_not_in_the_current_format() {
+        let screen = |format: &str| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(tx, "settings".into());
+            app.apply(Msg::Library { shelves: shelves(), show: true });
+            app.intro_done = true;
+            app.format = format.into();
+            let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
+            terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..12)
+                .map(|y| {
+                    (0..120)
+                        .map(|x| buffer[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        /* The fixture's first folder is 42 opus files, so in an opus library
+           there is nothing to say and the line must not be there at all. */
+        let same = screen("opus");
+        assert!(same.contains("42 tracks"), "{same:?}");
+        assert!(!same.contains("not opus"), "a line appeared with nothing to report");
+
+        let other = screen("flac");
+        assert!(other.contains("42 not flac"), "{other:?}");
+        // And the head line it sits under is still there, not pushed off.
+        assert!(other.contains("42 tracks"), "{other:?}");
+        /* The pane lost a row to it, so the tail count has to have moved
+           rather than a track silently falling off the bottom. */
+        assert!(other.contains("… 37 more"), "the pane overflowed: {other:?}");
     }
 
     /* The shelf row already needs its name plus 40 columns of counts, so a

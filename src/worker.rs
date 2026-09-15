@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -462,12 +462,22 @@ fn mark_departed(folder: &Path, tracks: &mut [Track]) {
     let Some(names) = last_playlist(folder) else {
         return;
     };
+    /* On the stem, not the whole filename. A conversion changes a track's
+       extension and nothing else about it, and the playlist file cannot be
+       kept in step with perfect atomicity: `repoint_playlist` narrows that to
+       one track and one instant, and this is what makes even that harmless.
+       Two files differing only by extension both match one entry, which errs
+       towards calling nothing departed, and that is already the safe answer
+       here for the same reason the guard below gives. */
+    let stems: HashSet<String> = names
+        .iter()
+        .map(|name| stem_of(Path::new(name)))
+        .collect();
     let holds = |track: &Track| {
         track
             .path
             .as_deref()
-            .and_then(Path::file_name)
-            .is_some_and(|name| names.contains(&name.to_string_lossy().to_string()))
+            .is_some_and(|path| stems.contains(&stem_of(path)))
     };
     /* Nothing matched, so the file describes some other folder and both
        answers are guesses. Calling nothing departed is the safe one: it cannot
@@ -480,6 +490,10 @@ fn mark_departed(folder: &Path, tracks: &mut [Track]) {
         track.listed = false;
         track.source = "not in playlist".into();
     }
+}
+
+fn stem_of(path: &Path) -> String {
+    path.file_stem().unwrap_or_default().to_string_lossy().to_string()
 }
 
 /// Filenames from the folder's own `.m3u8`, or `None` when it has none, which
@@ -585,15 +599,30 @@ fn pipeline(
     note_departures(cfg, tx, listing.complete, tracks);
     let _ = tx.send(Msg::Tracks(tracks.clone()));
 
-    if gate {
-        ask_which(tx, tracks);
-    }
+    // Held on to, because `to_bring` has to honour the same answer.
+    let picked = gate.then(|| ask_which(tx, tracks)).flatten();
 
     let have = tracks.iter().filter(|t| t.status == Status::Have).count();
     let _ = tx.send(Msg::Stage(format!(
         "fetching  ({have} of {} already on disk)",
         tracks.len()
     )));
+
+    /* Decided here and not a moment later: this is the last point at which
+       every track either holds the file an earlier run left or holds nothing,
+       and the download is about to overwrite `path` for anything it fetches.
+       Empty unless `convert` is on. */
+    let plans = to_bring(cfg, tracks, picked.as_ref());
+    let refetch: HashSet<usize> = plans
+        .iter()
+        .filter(|(_, plan)| **plan == Bring::Refetch)
+        .map(|(index, _)| *index)
+        .collect();
+    let was: HashMap<usize, PathBuf> = tracks
+        .iter()
+        .filter(|t| refetch.contains(&t.index))
+        .filter_map(|t| t.path.clone().map(|p| (t.index, p)))
+        .collect();
 
     // Before the download, which is what writes the one this pass may drop.
     let theirs = folder_covers(tracks);
@@ -602,10 +631,16 @@ fn pipeline(
        would throw away the tags, cover and playlist for every track that did
        download. Carry the failure into the summary instead. */
     let mut warning = String::new();
-    if let Err(err) = ytdlp::run(cfg, tracks, tx) {
+    if let Err(err) = ytdlp::run(cfg, tracks, tx, &refetch) {
         warning = err.to_string();
         let _ = tx.send(Msg::Log(format!("download: {warning}")));
     }
+
+    let (adopted, missing, broke) = adopt_refetched(cfg, tx, tracks, &was);
+    let (encoded, unencoded) = convert_tracks(cfg, tx, cancel, tracks, &plans);
+    let converted = adopted + encoded;
+    // Both halves failing is one thing to the reader: it did not come across.
+    let stuck = broke + unencoded;
 
     let _ = tx.send(Msg::Stage("tagging".into()));
     let asker = Asker {
@@ -619,27 +654,519 @@ fn pipeline(
     let playlist_file = write_playlist(cfg, tracks)?;
     drop_folder_cover(tracks, &theirs);
     let mut summary = summarise(tracks, playlist_file.as_deref());
+    /* Said out loud, because the rows scroll off and a --resync's one line
+       per folder is the only record anyone reads afterwards. */
+    if converted > 0 {
+        summary = format!("{summary}, {converted} brought to {}", cfg.format);
+    }
+    /* Both said out loud. The rows scroll off, a --resync writes one line per
+       folder and that is all anyone reads afterwards, and a folder where every
+       transcode failed for want of an encoder used to report as a clean sync. */
+    if stuck > 0 {
+        summary = format!("{summary}, {stuck} could not be brought across");
+    }
+    if missing > 0 {
+        summary = format!("{summary}, {missing} no longer downloadable");
+    }
     if !warning.is_empty() {
         summary = format!("{summary}   [{warning}]");
     }
     Ok(summary)
 }
 
+/* What a sync has to do to bring one track to the current format. Decided
+   before the download, which is the only point at which every track either
+   has the file an earlier run left or has no file at all. */
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Bring {
+    Leave,
+    Convert,
+    Refetch,
+}
+
+/// The format a file on disk actually holds, as a `FORMATS` name, or `None`
+/// for a container earworm does not write.
+fn format_on_disk(path: &Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    /* `alac` and `m4a` share this extension, so the container has to be asked
+       which codec is inside it. `None` from that is a genuine "cannot tell",
+       and falling back to the extension would pick one of the two at random
+       and re-encode a file on no evidence. */
+    if ext == "m4a" {
+        return tag::mp4_format(path);
+    }
+    config::FORMATS
+        .iter()
+        .find(|(_, e, _)| *e == ext)
+        .map(|(name, _, _)| *name)
+}
+
+/* The per-track decision. Two facts drive it, and both were measured rather
+   than assumed:
+
+   yt-dlp's `bestaudio` on YouTube is itag 251, Opus in WebM. Checked with
+   `--print %(acodec)s` against a real video: the AAC stream (itag 140) is
+   there and is not what gets picked. So `--audio-format opus` copies the
+   stream it already has, and every other format is ffmpeg re-encoding that
+   same Opus. A download is one lossy generation for opus and two for m4a,
+   mp3 and vorbis; flac and alac are the one generation stored losslessly.
+
+   That gives each format on disk a generation count: opus, flac and alac
+   hold one, and m4a, mp3 and vorbis hold two. Converting adds another
+   whenever the target is lossy, and adds none when it is not.
+
+   - `m4a`, `mp3`, `vorbis` on disk: already two, so converting makes three
+     where a download makes at most two. Fetch it again. `m4a` belongs here
+     despite being a container YouTube serves, because it is not the
+     container `bestaudio` hands over.
+   - target `opus`: the only one a download remuxes rather than re-encodes,
+     so a fetch is one generation against the two any conversion would cost.
+     Fetch it again unless the file already is one.
+   - everything else: convert. The source holds one generation and a download
+     would cost exactly what ffmpeg costs here, without the network.
+
+   `Have` only. `Gone` holds no playlist position and its index is synthetic,
+   `Skipped` was never fetched, `Pending` is about to arrive in the target
+   format anyway. */
+fn bring(track: &Track, format: &str) -> Bring {
+    if track.status != Status::Have {
+        return Bring::Leave;
+    }
+    let Some(path) = track.path.as_deref().filter(|p| p.is_file()) else {
+        return Bring::Leave;
+    };
+    match format_on_disk(path) {
+        // Not a container earworm writes, so nothing is claimed about it.
+        None => Bring::Leave,
+        Some(now) if now == format => Bring::Leave,
+        Some("m4a" | "mp3" | "vorbis") => Bring::Refetch,
+        Some(_) if format == "opus" => Bring::Refetch,
+        Some(_) => Bring::Convert,
+    }
+}
+
+/// Tracks a sync would bring across, keyed by index. Empty when `convert` is
+/// off, which is what keeps a format change from rewriting anything.
+///
+/// `picked` is the pick gate's answer when it ran. The gate marks unpicked
+/// `Pending` tracks `Skipped`, which says nothing about the ones already on
+/// disk, so without honouring it here a run where somebody asked for two new
+/// tracks also re-downloaded every mp3 in the folder, with nothing on that
+/// screen mentioning it.
+fn to_bring(
+    cfg: &Config,
+    tracks: &[Track],
+    picked: Option<&HashSet<usize>>,
+) -> HashMap<usize, Bring> {
+    if !cfg.convert {
+        return HashMap::new();
+    }
+    tracks
+        .iter()
+        .filter(|t| picked.is_none_or(|only| only.contains(&t.index)))
+        .filter_map(|t| match bring(t, &cfg.format) {
+            Bring::Leave => None,
+            plan => Some((t.index, plan)),
+        })
+        .collect()
+}
+
+/* Puts `new` in the place of the track's current file, carrying across
+   everything the old one held. The order is the design: nothing is removed
+   until the replacement has been read back, because a video pulled from
+   YouTube since the first download cannot be fetched again and deleting
+   first loses it for good.
+
+   Tags go on through lofty rather than ffmpeg's `-map_metadata`: `with_tag`
+   knows which tag type each container takes, and ffmpeg's field mapping
+   across containers is inconsistent in the way that has already cost a day.
+   They are read off the old file rather than taken from the row, because a
+   refetched track's row has already been overwritten by the download.
+
+   The track lands back on `Have`, so `tag_tracks` reads the new file and
+   neither identifies nor renames it. A converted track is not a fresh
+   find: sending it through the lookup would replace the hand-typed
+   correction this just carried across with a guess. */
+fn swap_in(
+    tx: &Sender<Msg>,
+    track: &mut Track,
+    new: &Path,
+    format: &str,
+    owned: &HashSet<PathBuf>,
+) -> Result<Option<PathBuf>> {
+    let old = track.path.clone().context("track has no file")?;
+
+    let kept = tag::read(&old).ok();
+    let cover = tag::read_cover(&old);
+
+    /* An ffmpeg that half-wrote exits non-zero, but a full disk is the case
+       that makes reading it back worth the second or two. */
+    let size = std::fs::metadata(new).map(|m| m.len()).unwrap_or(0);
+    if size == 0 {
+        bail!("the new file is empty");
+    }
+    tag::read(new).context("the new file will not read back")?;
+    /* And that it is the format this run asked for. On the refetch path the
+       file is whatever yt-dlp wrote, so a postprocessor that fell back to the
+       source container would otherwise be renamed, recorded and reported as
+       converted while being nothing of the kind, and `format_on_disk` would
+       then say `Leave` about it on every later sync. */
+    match format_on_disk(new) {
+        Some(got) if got == format => {}
+        Some(got) => bail!("the new file is {got}, not {format}"),
+        None => bail!("the new file is not a format earworm writes"),
+    }
+
+    if let Some(info) = kept {
+        let fields = tag::Fields {
+            artist: info.artist,
+            title: info.title,
+            album: info.album,
+            year: info.year,
+        };
+        tag::set_fields(new, &fields).context("could not carry the tags across")?;
+    }
+    if let Some(image) = cover {
+        // Not fatal: a track with the right audio and no art beats no track.
+        if let Err(err) = tag::set_cover(new, &image) {
+            let _ = tx.send(Msg::Log(format!("convert: cover: {err}")));
+        }
+    }
+
+    /* The old file's name with the extension the chosen format lands on, so a
+       name an edit gave the track survives. Taken from the format rather than
+       from `new`, which on the refetch path is whatever yt-dlp decided to call
+       it. `alac` and `m4a` share one, which is the case where this lands
+       exactly where the old file already is. */
+    let target = old.with_extension(config::extension(format));
+
+    if target != *new {
+        if target.exists() && target != old {
+            /* Something is already sitting on the name. If a track holds it,
+               it is somebody's file and nothing here may take it. If nothing
+               does, it is this pass's own leftover: an interrupted swap
+               renames the replacement into place and is killed before the
+               sidecar moves, and refusing forever would wedge the track,
+               re-fetching and discarding a download on every later sync. */
+            if owned.contains(&target) {
+                bail!(
+                    "{} is another track's file  ·  rename one of them and sync again",
+                    target.file_name().unwrap_or_default().to_string_lossy()
+                );
+            }
+            let _ = tx.send(Msg::Log(format!(
+                "convert: track {}: replacing a leftover {}",
+                track.index,
+                target.file_name().unwrap_or_default().to_string_lossy()
+            )));
+        }
+        /* `alac` and `m4a` share an extension, so this is sometimes a rename
+           straight over the old file. Left to the rename rather than removing
+           it first: the replacement is atomic, where a remove would open a
+           moment in which the track has no file at all. */
+        std::fs::rename(new, &target).context("could not put the new file in place")?;
+    }
+    /* Between the two, so the playlist never names a file that is not there.
+       The sidecar is saved per track for this reason and the `.m3u8` has to
+       move with it: it is written once at the end of the pass, so quitting
+       part-way through a conversion used to leave it naming the old files.
+       Every converted track then failed `mark_departed`'s filename match the
+       next time the folder was opened from the library, and a folder that was
+       only half done still had enough unconverted tracks matching to get past
+       the "believe nothing" guard, so each one was called departed. */
+    if let (Some(folder), Some(from), Some(to)) =
+        (old.parent(), old.file_name(), target.file_name())
+        && from != to
+    {
+        repoint_playlist(folder, from, to);
+    }
+    track.path = Some(target.clone());
+    track.status = Status::Have;
+    let _ = tx.send(Msg::Path {
+        index: track.index,
+        path: target.clone(),
+    });
+    /* Handed back rather than removed here, so the caller can move the
+       sidecar onto the new file first. Killed in between, the manifest names
+       the replacement, which is there, and the next sync sees a track already
+       in the target format and leaves it alone. Removed first, the manifest
+       still names a file that has gone. */
+    Ok((target != old && old.exists()).then_some(old))
+}
+
+/* Every file the run's other tracks hold. `swap_in` consults it to tell a
+   leftover from an interrupted swap, which it may replace, from a file that
+   belongs to another track, which it may not. Recomputed per track because a
+   conversion earlier in the pass has moved one of them. */
+fn files_held(tracks: &[Track], except: usize) -> HashSet<PathBuf> {
+    tracks
+        .iter()
+        .filter(|t| t.index != except)
+        .filter_map(|t| t.path.clone())
+        .collect()
+}
+
+/* Renames one entry in the folder's own playlist file, leaving the order and
+   everything else in it alone. Not `write_playlist`, which builds the whole
+   file from the tracks that are `listed`: nothing is listed until the tagging
+   pass sets it, so calling that here would write an empty playlist over a
+   good one. Absent or unreadable is the ordinary `--no-m3u8` case and not
+   worth reporting. */
+fn repoint_playlist(folder: &Path, from: &std::ffi::OsStr, to: &std::ffi::OsStr) {
+    let Some(name) = folder.file_name() else {
+        return;
+    };
+    let playlist = folder.join(format!("{}.m3u8", name.to_string_lossy()));
+    let Ok(text) = std::fs::read_to_string(&playlist) else {
+        return;
+    };
+    let mut changed = false;
+    let mut out = String::with_capacity(text.len());
+    for line in text.lines() {
+        let entry = line.trim();
+        // `#EXTINF` carries the duration and title, never the filename.
+        let hit = !entry.is_empty()
+            && !entry.starts_with('#')
+            && Path::new(entry).file_name() == Some(from);
+        if hit {
+            changed = true;
+            // Through the path, so a relative prefix survives the swap.
+            out.push_str(&Path::new(entry).with_file_name(to).to_string_lossy());
+        } else {
+            out.push_str(line);
+        }
+        out.push('\n');
+    }
+    if changed {
+        let _ = config::write_atomically(&playlist, &out);
+    }
+}
+
+/* The half-written output of a conversion, beside the track rather than in a
+   temp directory: a rename across filesystems is a copy, and the folder is
+   where the headroom has to be anyway. Hidden and prefixed so `sweep_scratch`
+   can recognise its own leavings and nothing else. */
+const SCRATCH: &str = ".earworm-convert-";
+
+/* Whatever a killed ffmpeg left behind. Quitting mid-conversion kills the
+   child from the shutdown path, so the loop below never reaches the cleanup
+   in its own error arm, and the part-written file stays in the user's music
+   folder. Overwriting the same name on the next attempt covers only a repeat
+   of the same track into the same format; change the format in between and
+   the orphan is there for good. Matched on earworm's own hidden prefix, so
+   this can never take a file somebody else put there. */
+fn sweep_scratch(folder: &Path) {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return;
+    };
+    for path in entries.flatten().map(|e| e.path()) {
+        let leftover = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with(SCRATCH));
+        if leftover && path.is_file() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/* The convert half, run between the download and the tagging. */
+fn convert_tracks(
+    cfg: &Config,
+    tx: &Sender<Msg>,
+    cancel: &AtomicBool,
+    tracks: &mut [Track],
+    plans: &HashMap<usize, Bring>,
+) -> (usize, usize) {
+    let todo: Vec<usize> = (0..tracks.len())
+        .filter(|i| plans.get(&tracks[*i].index) == Some(&Bring::Convert))
+        .collect();
+    if todo.is_empty() {
+        return (0, 0);
+    }
+    let _ = tx.send(Msg::Stage(format!("converting {} tracks", todo.len())));
+    // Before writing any of our own, so a killed run does not accumulate them.
+    if let Some(folder) = folder_of(tracks) {
+        sweep_scratch(&folder);
+    }
+
+    let ext = config::extension(&cfg.format);
+    let (mut done, mut failed) = (0, 0);
+    for i in todo {
+        if cancel.load(Ordering::SeqCst) {
+            break;
+        }
+        let index = tracks[i].index;
+        let Some(old) = tracks[i].path.clone() else {
+            continue;
+        };
+        tracks[i].status = Status::Converting;
+        let _ = tx.send(Msg::Update {
+            index,
+            status: Status::Converting,
+            source: None,
+            note: None,
+            name: None,
+        });
+
+        // Beside the track and named so it cannot collide with a real file.
+        let scratch = old.with_file_name(format!("{SCRATCH}{index}.{ext}"));
+        let _ = std::fs::remove_file(&scratch);
+        // What the file actually holds, so the encoder knows whether there
+        // is any depth worth preserving.
+        let source = format_on_disk(&old);
+        let owned = files_held(tracks, index);
+        let outcome = tag::transcode(&old, &scratch, &cfg.format, source)
+            .and_then(|()| swap_in(tx, &mut tracks[i], &scratch, &cfg.format, &owned));
+        match outcome {
+            Ok(stale) => {
+                done += 1;
+                tracks[i].source = "converted".into();
+                let _ = tx.send(Msg::Update {
+                    index,
+                    status: Status::Have,
+                    source: Some("converted".into()),
+                    note: None,
+                    name: None,
+                });
+                /* Per track, not at the end. The sidecar is a small text file
+                   and rewriting it 300 times costs nothing next to 300
+                   transcodes, and it is what leaves a cancelled run with
+                   every track either fully swapped or fully untouched. Before
+                   the old file goes, so a kill in between leaves the sidecar
+                   naming a file that is there. */
+                save_manifest(cfg, tracks);
+                if let Some(old) = stale {
+                    let _ = std::fs::remove_file(old);
+                }
+            }
+            Err(err) => {
+                failed += 1;
+                let _ = std::fs::remove_file(&scratch);
+                // Straight back to where it was: the old file never moved.
+                tracks[i].status = Status::Have;
+                let _ = tx.send(Msg::Update {
+                    index,
+                    status: Status::Have,
+                    source: Some("on disk".into()),
+                    note: Some("not converted".into()),
+                    name: None,
+                });
+                let _ = tx.send(Msg::Log(format!("convert: track {index}: {err}")));
+            }
+        }
+    }
+    (done, failed)
+}
+
+/* The refetch half, run after the download. yt-dlp has already written the
+   new file under the name its own template predicts and the `@D` line has
+   already overwritten `track.path` with it, which is why the old path has to
+   have been remembered before the run. */
+fn adopt_refetched(
+    cfg: &Config,
+    tx: &Sender<Msg>,
+    tracks: &mut [Track],
+    was: &HashMap<usize, PathBuf>,
+) -> (usize, usize, usize) {
+    /* Three outcomes, not two. A download that never arrived and one that
+       arrived and could not be used are different things to have happened,
+       and one message covering both told the reader the wrong one half the
+       time. */
+    let (mut done, mut left, mut broke) = (0, 0, 0);
+    for i in 0..tracks.len() {
+        let index = tracks[i].index;
+        let Some(old) = was.get(&index) else {
+            continue;
+        };
+        let fresh = tracks[i].path.clone();
+        /* Unchanged means yt-dlp never wrote it: the video is gone, private,
+           or the download failed. The old file is still there and still in
+           the manifest, so the track keeps the format it had. */
+        let downloaded = fresh
+            .as_deref()
+            .filter(|p| *p != old.as_path() && p.is_file())
+            .map(Path::to_path_buf);
+        let Some(new) = downloaded else {
+            left += 1;
+            tracks[i].path = Some(old.clone());
+            tracks[i].status = Status::Have;
+            let _ = tx.send(Msg::Path {
+                index,
+                path: old.clone(),
+            });
+            let _ = tx.send(Msg::Update {
+                index,
+                status: Status::Have,
+                source: Some("on disk".into()),
+                note: Some("could not refetch".into()),
+                name: None,
+            });
+            continue;
+        };
+        /* The old file is what carries the tags, so it has to be the one
+           `swap_in` reads. It points at the download by now. */
+        tracks[i].path = Some(old.clone());
+        let owned = files_held(tracks, index);
+        match swap_in(tx, &mut tracks[i], &new, &cfg.format, &owned) {
+            Ok(stale) => {
+                done += 1;
+                tracks[i].source = "converted".into();
+                let _ = tx.send(Msg::Update {
+                    index,
+                    status: Status::Have,
+                    source: Some("converted".into()),
+                    note: None,
+                    name: None,
+                });
+                // Before the old file goes. See the same call in `convert_tracks`.
+                save_manifest(cfg, tracks);
+                if let Some(old) = stale {
+                    let _ = std::fs::remove_file(old);
+                }
+            }
+            Err(err) => {
+                broke += 1;
+                // The download is the one to drop: the old file is the record.
+                let _ = std::fs::remove_file(&new);
+                tracks[i].path = Some(old.clone());
+                tracks[i].status = Status::Have;
+                let _ = tx.send(Msg::Path {
+                    index,
+                    path: old.clone(),
+                });
+                let _ = tx.send(Msg::Update {
+                    index,
+                    status: Status::Have,
+                    source: Some("on disk".into()),
+                    note: Some("not converted".into()),
+                    name: None,
+                });
+                let _ = tx.send(Msg::Log(format!("convert: track {index}: {err}")));
+            }
+        }
+    }
+    (done, left, broke)
+}
+
 /* Blocks the worker on the UI's answer while the screen keeps drawing. Marks
    the rest `Skipped` rather than dropping them: `write_playlist` builds the
    .m3u8 from the tracks it is given, so a shortened list would rewrite a whole
    playlist file from the handful this run happened to fetch. */
-fn ask_which(tx: &Sender<Msg>, tracks: &mut [Track]) {
+/// Returns what the user chose, because the conversion has to honour it too.
+/// `None` is a gate that never got an answer, which is not the same as one
+/// that came back empty.
+fn ask_which(tx: &Sender<Msg>, tracks: &mut [Track]) -> Option<HashSet<usize>> {
     let (reply_tx, reply_rx) = mpsc::channel();
     let _ = tx.send(Msg::Stage("choose tracks".into()));
     if tx.send(Msg::Pick(reply_tx)).is_err() {
-        return;
+        return None;
     }
     let picked: HashSet<usize> = match reply_rx.recv() {
         Ok(Reply::Picked(picked)) => picked.into_iter().collect(),
         // The UI is gone, and skipping the whole playlist on the way out is
         // worse than the download the shutdown is about to kill anyway.
-        _ => return,
+        _ => return None,
     };
     for track in tracks.iter_mut() {
         // Already on disk or already departed: nothing was going to fetch it.
@@ -655,6 +1182,7 @@ fn ask_which(tx: &Sender<Msg>, tracks: &mut [Track]) {
             name: None,
         });
     }
+    Some(picked)
 }
 
 /// The identify-and-write pass. `wanted` limits it to a set of track indices,
@@ -712,7 +1240,13 @@ fn tag_tracks(
                 let _ = tx.send(Msg::Update {
                     index: track.index,
                     status: Status::Have,
-                    source: Some("on disk".into()),
+                    /* A conversion earlier in this same pass already said
+                       where the file came from, and "on disk" is true but
+                       drops the one word saying this run rewrote it. */
+                    source: Some(match track.source.as_str() {
+                        "" => "on disk".into(),
+                        already => already.to_string(),
+                    }),
                     note: None,
                     name: Some(track.name.clone()),
                 });
@@ -977,23 +1511,27 @@ fn pin_open_run(cfg: &mut Config, tracks: &[Track], folder: &Path, name: &str) -
 fn set_format(cfg: &mut Config, tx: &Sender<Msg>, asker: &Asker) -> Result<()> {
     let options: Vec<String> = config::FORMATS
         .iter()
-        .map(|(name, ext)| {
+        .map(|(name, ext, _)| {
             let here = if *name == cfg.format { "  (current)" } else { "" };
             format!("{name}  .{ext}{here}")
         })
         .collect();
-    let Some(choice) = asker.choose_noted(
-        "Format for new downloads",
-        "Tracks already on disk keep the format they were downloaded in.",
-        options,
-    ) else {
+    let note = if cfg.convert {
+        "Tracks already on disk follow when their playlist next syncs."
+    } else {
+        "Tracks already on disk keep the format they were downloaded in."
+    };
+    let Some(choice) = asker.choose_noted("Format for new downloads", note, options) else {
         return Ok(());
     };
     let picked = config::FORMATS[choice].0;
     let settle = |cfg: &mut Config| {
         cfg.format = picked.to_string();
         // Or the help overlay keeps reporting the format the run began with.
-        let _ = tx.send(Msg::Settings(cfg.describe()));
+        let _ = tx.send(Msg::Settings {
+            text: cfg.describe(),
+            format: cfg.format.clone(),
+        });
     };
 
     let Some(path) = cfg.config_file.clone() else {
@@ -1008,7 +1546,54 @@ fn set_format(cfg: &mut Config, tx: &Sender<Msg>, asker: &Asker) -> Result<()> {
     settle(cfg);
     let _ = tx.send(Msg::Log(format!("format {picked} written to {}", path.display())));
     let _ = tx.send(Msg::Flash(format!("format: {picked}, remembered")));
+    offer_convert(cfg, tx, asker, &path, picked);
     Ok(())
+}
+
+/* Asked straight after a format pick, because that is the one moment the
+   question is already in the user's head. Only when `convert` is off: with it
+   on the answer is already yes and the menu's own note says so.
+
+   Anything that fails here is reported and dropped rather than returned. The
+   format change itself has already been written and is what the user asked
+   for; failing the command would say otherwise. */
+fn offer_convert(cfg: &mut Config, tx: &Sender<Msg>, asker: &Asker, path: &Path, picked: &str) {
+    if cfg.convert {
+        return;
+    }
+    /* A `Prompt::Choice` header is a `Block::title`, which clips, so the part
+       that has to be read goes in the note. And it has to be read: once this
+       is on, every later sync converts without asking again, and bringing a
+       playlist to a lossless format recovers nothing while multiplying what
+       it costs on disk. */
+    let note = format!(
+        "Every sync from now on, not just this one. YouTube serves lossy audio, so {picked} \
+         recovers no quality; flac and alac only make the files several times larger."
+    );
+    let chosen = asker.choose_noted(
+        &format!("Bring tracks already on disk to {picked} too?"),
+        &note,
+        vec![
+            "no, leave them as they are".into(),
+            format!("yes, convert them to {picked} on the next sync"),
+        ],
+    );
+    if chosen != Some(1) {
+        return;
+    }
+    if let Err(err) = config::save_convert(path, true) {
+        let _ = tx.send(Msg::Log(format!("convert: {err}")));
+        let _ = tx.send(Msg::Flash(format!("could not record convert  ·  {err}")));
+        return;
+    }
+    cfg.convert = true;
+    let _ = tx.send(Msg::Settings {
+            text: cfg.describe(),
+            format: cfg.format.clone(),
+        });
+    let _ = tx.send(Msg::Flash(
+        "convert: on  ·  the next sync brings each playlist across".into(),
+    ));
 }
 
 fn serve(
@@ -1269,7 +1854,8 @@ fn retry(
 
     let theirs = folder_covers(tracks);
     let mut warning = String::new();
-    if let Err(err) = ytdlp::run(cfg, tracks, tx) {
+    // Nothing to refetch for a format: a retry is about tracks that failed.
+    if let Err(err) = ytdlp::run(cfg, tracks, tx, &HashSet::new()) {
         warning = err.to_string();
         let _ = tx.send(Msg::Log(format!("retry: {warning}")));
     }
@@ -2537,7 +3123,7 @@ pub mod tests {
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
                 if let Msg::Ask(_, reply) = msg {
                     // flac, which is not what the run started on.
-                    let flac = config::FORMATS.iter().position(|(n, _)| *n == "flac").unwrap();
+                    let flac = config::FORMATS.iter().position(|(n, _, _)| *n == "flac").unwrap();
                     reply.send(Reply::Choice(flac)).unwrap();
                     break;
                 }
@@ -2913,7 +3499,7 @@ pub mod tests {
         // The index of "flac" in FORMATS, which is what the menu lists.
         let flac = config::FORMATS
             .iter()
-            .position(|(name, _)| *name == "flac")
+            .position(|(name, _, _)| *name == "flac")
             .unwrap();
 
         let (tx, rx) = mpsc::channel();
@@ -3362,7 +3948,7 @@ pub mod tests {
 
         // 2. Which is what puts it in the archive, so the download skips it.
         let archive = dir.join("archive");
-        crate::ytdlp::write_archive(&found, &archive).unwrap();
+        crate::ytdlp::write_archive(&found, &archive, &HashSet::new()).unwrap();
         assert!(
             std::fs::read_to_string(&archive).unwrap().contains("vid1"),
             "the download would have written over the edited file"
@@ -4099,6 +4685,8 @@ pub mod tests {
             apple: true,
             fix: true,
             format: config::DEFAULT_FORMAT.into(),
+            // Off, so a test that does not ask for it converts nothing.
+            convert: false,
             config_file: None,
             resync: false,
             list: false,
@@ -4255,15 +4843,21 @@ mod format_tests {
         dir
     }
 
-    fn answer(rx: &Receiver<Msg>, reply: Reply) -> Vec<Msg> {
+    /* One reply per question, in order, stopping once the last has been
+       answered. `set_format` asks twice when it has a config file to write
+       to, and a helper that answered only the first left the worker blocked
+       on a channel nothing was going to send to. */
+    fn answer(rx: &Receiver<Msg>, replies: &[Reply]) -> Vec<Msg> {
         let mut seen = Vec::new();
+        let mut next = replies.iter();
         for msg in rx {
-            let done = matches!(msg, Msg::Ask(..));
+            let asked = matches!(msg, Msg::Ask(..));
             if let Msg::Ask(_, back) = &msg {
+                let reply = next.next().expect("asked more questions than expected");
                 back.send(reply.clone()).unwrap();
             }
             seen.push(msg);
-            if done {
+            if asked && next.len() == 0 {
                 break;
             }
         }
@@ -4284,8 +4878,10 @@ mod format_tests {
 
         let picked = std::thread::scope(|scope| {
             let worker = scope.spawn(|| set_format(&mut cfg, &tx, &asker));
-            // The index of "mp3" in FORMATS, which is what the menu lists.
-            let mut seen = answer(&rx, Reply::Choice(2));
+            /* The index of "mp3" in FORMATS, then no to the follow-up: this
+               test is about the format alone, and the second question has
+               its own. */
+            let mut seen = answer(&rx, &[Reply::Choice(2), Reply::Choice(0)]);
             worker.join().unwrap().unwrap();
             // Drained after the join: the interesting messages come after the
             // answer, so stopping at the question would catch none of them.
@@ -4299,9 +4895,51 @@ mod format_tests {
         assert!(written.contains("# mine"), "the file was rewritten: {written:?}");
         assert!(written.contains("dir = \"/tmp/music\""), "{written:?}");
         assert!(
-            picked.iter().any(|m| matches!(m, Msg::Settings(s) if s.contains("format mp3"))),
+            picked.iter().any(|m| matches!(m, Msg::Settings { text, .. } if text.contains("format mp3"))),
             "the help overlay still reports the old format"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* The setting that decides whether a sync rewrites files already on
+       disk. Asked here because this is the moment the question is in the
+       user's head, and off unless it is answered yes: a format change that
+       rewrote the library on its own would turn one menu pick into an
+       unattended rewrite of every folder under --dir. */
+    #[test]
+    fn the_follow_up_is_what_turns_conversion_on() {
+        let dir = scratch("convert");
+        let path = dir.join("config.toml");
+
+        let saying = |reply: Reply| {
+            std::fs::write(&path, "dir = \"/tmp/music\"\n").unwrap();
+            let (tx, rx) = mpsc::channel();
+            let mut cfg = super::tests::config(true);
+            cfg.config_file = Some(path.clone());
+            let asker = Asker { tx: tx.clone(), enabled: true };
+            std::thread::scope(|scope| {
+                let worker = scope.spawn(|| set_format(&mut cfg, &tx, &asker));
+                answer(&rx, &[Reply::Choice(3), reply]);
+                worker.join().unwrap().unwrap();
+            });
+            (cfg.convert, std::fs::read_to_string(&path).unwrap())
+        };
+
+        let (on, written) = saying(Reply::Choice(1));
+        assert!(on, "answering yes did not turn it on for this session");
+        assert!(written.contains("convert = true"), "{written:?}");
+        // The format is written whichever way the second question goes.
+        assert!(written.contains("format = \"flac\""), "{written:?}");
+
+        let (off, written) = saying(Reply::Choice(0));
+        assert!(!off, "answering no turned it on anyway");
+        assert!(!written.contains("convert = true"), "{written:?}");
+        assert!(written.contains("format = \"flac\""), "{written:?}");
+
+        // Escaping the follow-up is the same answer as no, and must not write.
+        let (escaped, written) = saying(Reply::Cancel);
+        assert!(!escaped);
+        assert!(!written.contains("convert = true"), "{written:?}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -4320,7 +4958,8 @@ mod format_tests {
 
         std::thread::scope(|scope| {
             let worker = scope.spawn(|| set_format(&mut cfg, &tx, &asker));
-            answer(&rx, Reply::Cancel);
+            // Backing out of the first means the second is never asked.
+            answer(&rx, &[Reply::Cancel]);
             worker.join().unwrap().unwrap();
         });
 
@@ -4340,7 +4979,9 @@ mod format_tests {
 
         let seen = std::thread::scope(|scope| {
             let worker = scope.spawn(|| set_format(&mut cfg, &tx, &asker));
-            let mut seen = answer(&rx, Reply::Choice(3));
+            /* One question only: with no config file there is nowhere to
+               record a conversion either, so the follow-up is not asked. */
+            let mut seen = answer(&rx, &[Reply::Choice(3)]);
             worker.join().unwrap().unwrap();
             seen.extend(rx.try_iter());
             seen
@@ -4351,5 +4992,609 @@ mod format_tests {
             seen.iter().any(|m| matches!(m, Msg::Flash(s) if s.contains("this run only"))),
             "nothing said the choice was not kept"
         );
+    }
+}
+#[cfg(test)]
+mod convert_tests {
+    use super::*;
+    use crate::app::Msg;
+    use std::sync::mpsc;
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "earworm-convert-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn holding(dir: &Path, index: usize, name: &str, status: Status) -> Track {
+        let path = dir.join(name);
+        let mut track = Track::new(index, format!("id{index}"), name.into(), path);
+        track.status = status;
+        track
+    }
+
+    /* The table the whole feature turns on, every source against every
+       target. Two measured facts decide it, both recorded on `bring`:
+       yt-dlp's `bestaudio` is the Opus stream, so only an opus target is
+       remuxed by a download and everything else is ffmpeg re-encoding that
+       same Opus; and that makes m4a, mp3 and vorbis on disk two generations
+       deep where opus, flac and alac are one. */
+    #[test]
+    fn the_source_format_decides_between_converting_and_downloading_again() {
+        let dir = scratch("decide");
+        /* `.m4a` is the one extension that cannot answer for itself, so those
+           two need a real container with a real codec in it. The rest are
+           decided on the extension and a placeholder is enough. */
+        let seed = dir.join("seed.opus");
+        let mpeg4 = super::tests::tiny_opus(&seed).is_some();
+        let mut real: Vec<&str> = Vec::new();
+        for (format, ext, _) in config::FORMATS {
+            let at = dir.join(format!("{format}.{ext}"));
+            if ext == "m4a" {
+                if mpeg4 && tag::transcode(&seed, &at, format, Some("opus")).is_ok() {
+                    real.push(format);
+                }
+                continue;
+            }
+            std::fs::write(&at, "audio").unwrap();
+            real.push(format);
+        }
+        assert!(
+            real.contains(&"opus") && real.contains(&"flac"),
+            "the fixtures nothing needs ffmpeg for are missing"
+        );
+        let file = |format: &str| format!("{format}.{}", config::extension(format));
+
+        for (now, _, _) in config::FORMATS {
+            if !real.contains(&now) {
+                eprintln!("skipped {now}: no fixture");
+                continue;
+            }
+            for (target, _, _) in config::FORMATS {
+                let name = file(now);
+                let track = holding(&dir, 1, &name, Status::Have);
+                let got = bring(&track, target);
+                // `alac` and `m4a` are one file on disk, so the fixture cannot
+                // tell them apart and only the extension is under test here.
+                if config::extension(now) == config::extension(target) {
+                    continue;
+                }
+                let want = match (now, target) {
+                    // Already there.
+                    (a, b) if a == b => Bring::Leave,
+                    /* Two generations on disk already, so converting makes a
+                       third where a download makes at most two. */
+                    ("m4a" | "mp3" | "vorbis", _) => Bring::Refetch,
+                    // The one target a download remuxes rather than re-encodes.
+                    (_, "opus") => Bring::Refetch,
+                    // One generation in, and a download would cost the same.
+                    _ => Bring::Convert,
+                };
+                assert_eq!(got, want, "{now} to {target}");
+            }
+        }
+
+        assert!(
+            real.contains(&"m4a") && real.contains(&"alac"),
+            "the two formats behind one extension were never tested"
+        );
+
+        // A container earworm does not write is left alone, not guessed at.
+        std::fs::write(dir.join("06 - f.wav"), "audio").unwrap();
+        let odd = holding(&dir, 6, "06 - f.wav", Status::Have);
+        assert_eq!(bring(&odd, "opus"), Bring::Leave);
+
+        /* Only a track with a file this sync owns. A departed one holds no
+           playlist position and its index is synthetic, a skipped one was
+           never fetched, a pending one is about to arrive in the target
+           format anyway. */
+        for status in [Status::Gone, Status::Skipped, Status::Pending, Status::Failed] {
+            let track = holding(&dir, 1, "opus.opus", status);
+            assert_eq!(bring(&track, "flac"), Bring::Leave, "{status:?}");
+        }
+        // And a row whose file is not actually there.
+        let gone = holding(&dir, 9, "99 - nothing.opus", Status::Have);
+        assert_eq!(bring(&gone, "flac"), Bring::Leave);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* The pick gate says which tracks this run is for, and it only ever marks
+       unpicked `Pending` tracks. Everything already on disk falls outside
+       that, so a run where somebody asked for two new tracks used to
+       re-download every mp3 in the folder as well, with nothing on the screen
+       that asked the question even mentioning it. */
+    #[test]
+    fn the_pick_gate_decides_what_gets_converted_too() {
+        let dir = scratch("picked");
+        for name in ["01 - a.mp3", "02 - b.mp3", "03 - c.mp3"] {
+            std::fs::write(dir.join(name), "audio").unwrap();
+        }
+        let tracks = vec![
+            holding(&dir, 1, "01 - a.mp3", Status::Have),
+            holding(&dir, 2, "02 - b.mp3", Status::Have),
+            holding(&dir, 3, "03 - c.mp3", Status::Have),
+        ];
+        let mut cfg = super::tests::config(true);
+        cfg.format = "flac".into();
+        cfg.convert = true;
+
+        // No gate, which is every `--resync`: the whole folder comes across.
+        assert_eq!(to_bring(&cfg, &tracks, None).len(), 3);
+
+        // Gated on one track, so that is the only one touched.
+        let picked = HashSet::from([2usize]);
+        let plans = to_bring(&cfg, &tracks, Some(&picked));
+        assert_eq!(plans.len(), 1, "the gate was ignored: {plans:?}");
+        assert_eq!(plans.get(&2), Some(&Bring::Refetch));
+
+        // And a gate nobody marked anything at is not a gate that wants all.
+        assert!(to_bring(&cfg, &tracks, Some(&HashSet::new())).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* An interrupted swap leaves the replacement under its own name with the
+       sidecar still pointing at the old file. Refusing that forever wedged the
+       track: every later sync planned the same conversion, hit the guard, and
+       on the refetch path downloaded a file and threw it away. A name no track
+       holds is this pass's own leftover and may be replaced. A name a track
+       does hold is somebody's file and may not. */
+    #[test]
+    fn a_leftover_is_replaced_but_another_tracks_file_is_not() {
+        let dir = scratch("collide");
+        let old = dir.join("01 - A.opus");
+        if super::tests::tiny_opus(&old).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            return;
+        }
+        let make_fresh = |to: &Path| tag::transcode(&old, to, "flac", Some("opus")).is_ok();
+        let fresh = dir.join(".earworm-convert-1.flac");
+        if !make_fresh(&fresh) {
+            eprintln!("no flac encoder, skipping");
+            return;
+        }
+        // What the interrupted run left behind, under the name this wants.
+        let leftover = dir.join("01 - A.flac");
+        std::fs::copy(&fresh, &leftover).unwrap();
+        let (tx, rx) = mpsc::channel();
+
+        // Nothing holds that name, so it is ours and gets replaced.
+        let mut track = holding(&dir, 1, "01 - A.opus", Status::Have);
+        let stale = swap_in(&tx, &mut track, &fresh, "flac", &HashSet::new()).unwrap();
+        assert_eq!(track.path.as_deref(), Some(leftover.as_path()));
+        assert_eq!(stale.as_deref(), Some(old.as_path()));
+        assert!(
+            rx.try_iter().any(|m| matches!(m, Msg::Log(l) if l.contains("leftover"))),
+            "replacing a file said nothing"
+        );
+        std::fs::remove_file(stale.unwrap()).unwrap();
+
+        /* And now the same name, held by another track in the run. That is
+           somebody's file, and the message has to say what to do about it. */
+        let other = dir.join("02 - B.opus");
+        super::tests::tiny_opus(&other).unwrap();
+        let again = dir.join(".earworm-convert-2.flac");
+        assert!(tag::transcode(&other, &again, "flac", Some("opus")).is_ok());
+        let mut second = holding(&dir, 2, "02 - B.opus", Status::Have);
+        // Track 1 already holds `01 - A.flac`, and this would land on it.
+        second.path = Some(dir.join("01 - A.opus"));
+        let owned = HashSet::from([leftover.clone()]);
+        let err = swap_in(&tx, &mut second, &again, "flac", &owned).unwrap_err().to_string();
+        assert!(err.contains("another track's file"), "{err}");
+        assert!(err.contains("sync again"), "the error gives no next step: {err}");
+        assert!(leftover.is_file(), "another track's file was taken");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* On the refetch path the new file is whatever yt-dlp wrote. A
+       postprocessor that fell back to the source container would otherwise be
+       renamed, recorded in the sidecar and reported as converted while being
+       nothing of the kind, and `format_on_disk` would then say `Leave` about
+       it on every later sync: the row claims success for good. */
+    #[test]
+    fn a_swap_refuses_a_file_that_is_not_the_format_asked_for() {
+        let dir = scratch("wrongfmt");
+        let old = dir.join("01 - A.mp3");
+        let seed = dir.join("seed.opus");
+        if super::tests::tiny_opus(&seed).is_none()
+            || tag::transcode(&seed, &old, "mp3", Some("opus")).is_err()
+        {
+            eprintln!("no ffmpeg or no mp3 encoder, skipping");
+            return;
+        }
+        // A perfectly good audio file, just not the one the run asked for.
+        let wrong = dir.join("what-yt-dlp-wrote.opus");
+        std::fs::copy(&seed, &wrong).unwrap();
+
+        let (tx, _rx) = mpsc::channel();
+        let mut track = holding(&dir, 1, "01 - A.mp3", Status::Have);
+        let err = swap_in(&tx, &mut track, &wrong, "flac", &HashSet::new())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("opus") && err.contains("flac"), "{err}");
+        assert!(old.is_file(), "the old file went for a replacement in the wrong format");
+        assert_eq!(track.path.as_deref(), Some(old.as_path()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* A folder where every transcode failed for want of an encoder used to
+       report as a clean sync. The rows scroll off, `--resync` writes one line
+       per folder, and that line is all anyone reads afterwards. */
+    #[test]
+    fn a_conversion_that_failed_is_counted_not_just_logged() {
+        let dir = scratch("counted");
+        // Not audio, so ffmpeg refuses every one of them.
+        for name in ["01 - a.flac", "02 - b.flac"] {
+            std::fs::write(dir.join(name), "this is not a flac").unwrap();
+        }
+        let mut tracks = vec![
+            holding(&dir, 1, "01 - a.flac", Status::Have),
+            holding(&dir, 2, "02 - b.flac", Status::Have),
+        ];
+        let mut cfg = super::tests::config(true);
+        cfg.format = "mp3".into();
+        cfg.convert = true;
+
+        let plans = to_bring(&cfg, &tracks, None);
+        assert_eq!(plans.len(), 2, "the fixture is not one the pass would act on");
+        let (tx, _rx) = mpsc::channel();
+        let cancel = AtomicBool::new(false);
+        let (done, failed) = convert_tracks(&cfg, &tx, &cancel, &mut tracks, &plans);
+        assert_eq!((done, failed), (0, 2), "a failure went uncounted");
+
+        // And the files are exactly as they were.
+        for track in &tracks {
+            assert_eq!(track.status, Status::Have);
+            assert!(track.path.as_deref().is_some_and(Path::is_file));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* The promise the setting exists to keep. `format` means "format for new
+       downloads", and a plain format change that rewrote the library would
+       turn one menu pick into an unattended rewrite of every folder under
+       --dir the next time cron ran a resync. */
+    #[test]
+    fn nothing_is_brought_across_while_convert_is_off() {
+        let dir = scratch("off");
+        std::fs::write(dir.join("01 - a.mp3"), "audio").unwrap();
+        std::fs::write(dir.join("02 - b.opus"), "audio").unwrap();
+        let tracks = vec![
+            holding(&dir, 1, "01 - a.mp3", Status::Have),
+            holding(&dir, 2, "02 - b.opus", Status::Have),
+        ];
+
+        let mut cfg = super::tests::config(true);
+        cfg.format = "flac".into();
+        cfg.convert = false;
+        assert!(to_bring(&cfg, &tracks, None).is_empty(), "convert was off");
+
+        // And that the fixture is one the feature would otherwise act on, or
+        // the assertion above passes for the wrong reason.
+        cfg.convert = true;
+        let plans = to_bring(&cfg, &tracks, None);
+        assert_eq!(plans.get(&1), Some(&Bring::Refetch));
+        assert_eq!(plans.get(&2), Some(&Bring::Convert));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* An edit is the only thing in a folder that cannot be got back, so it
+       has to survive the container change: the tags off the old file, and the
+       name the edit gave it with the new extension on the end. */
+    #[test]
+    fn a_swap_carries_the_tags_and_the_edited_name_onto_the_new_file() {
+        let dir = scratch("swap");
+        let old = dir.join("01 - The Name I Typed.opus");
+        if super::tests::tiny_opus(&old).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            return;
+        }
+        tag::set_fields(
+            &old,
+            &tag::Fields {
+                artist: "Kraftwerk".into(),
+                title: "Autobahn".into(),
+                album: "Autobahn".into(),
+                year: Some(1974),
+            },
+        )
+        .unwrap();
+
+        let fresh = dir.join("what-yt-dlp-called-it.flac");
+        if tag::transcode(&old, &fresh, "flac", Some("opus")).is_err() {
+            eprintln!("no flac encoder, skipping");
+            return;
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let mut track = holding(&dir, 1, "01 - The Name I Typed.opus", Status::Have);
+        let stale = swap_in(&tx, &mut track, &fresh, "flac", &HashSet::new()).unwrap();
+        /* Handed back rather than removed, so the caller can move the sidecar
+           onto the replacement first. Removing it here is what that caller
+           does one line later. */
+        assert_eq!(stale.as_deref(), Some(old.as_path()), "the old file was not handed back");
+        assert!(old.is_file(), "the old file went before the sidecar could move");
+        std::fs::remove_file(stale.unwrap()).unwrap();
+
+        let landed = dir.join("01 - The Name I Typed.flac");
+        assert_eq!(track.path.as_deref(), Some(landed.as_path()));
+        assert!(landed.is_file(), "the new file is not under the edited name");
+        assert!(!old.exists(), "the old file was left behind");
+        assert!(!fresh.exists(), "the downloaded name was left behind");
+        // Back on Have, so `tag_tracks` reads the file and does not identify
+        // it: a lookup here would replace what was just carried across.
+        assert_eq!(track.status, Status::Have);
+
+        let back = tag::read(&landed).unwrap();
+        assert_eq!(back.artist, "Kraftwerk");
+        assert_eq!(back.title, "Autobahn");
+        assert_eq!(back.album, "Autobahn");
+        assert_eq!(back.year, Some(1974));
+        assert!(
+            rx.try_iter().any(|m| matches!(m, Msg::Path { index: 1, .. })),
+            "the row was never told where the file went"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Nothing is removed until the replacement has been read back, because a
+    /// video pulled from YouTube since the first download cannot be re-fetched.
+    #[test]
+    fn a_swap_onto_an_unreadable_file_leaves_the_old_one_alone() {
+        let dir = scratch("keep");
+        let old = dir.join("01 - A.opus");
+        if super::tests::tiny_opus(&old).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            return;
+        }
+        let before = std::fs::read(&old).unwrap();
+        let junk = dir.join("half-written.flac");
+        std::fs::write(&junk, b"not audio at all").unwrap();
+
+        let (tx, _rx) = mpsc::channel();
+        let mut track = holding(&dir, 1, "01 - A.opus", Status::Have);
+        assert!(swap_in(&tx, &mut track, &junk, "flac", &HashSet::new()).is_err());
+        assert!(old.is_file(), "the old file was removed for a bad replacement");
+        assert_eq!(std::fs::read(&old).unwrap(), before);
+        assert_eq!(track.path.as_deref(), Some(old.as_path()));
+
+        // An empty one is the full-disk case, and fails before the parse.
+        let empty = dir.join("empty.flac");
+        std::fs::write(&empty, b"").unwrap();
+        assert!(swap_in(&tx, &mut track, &empty, "flac", &HashSet::new()).is_err());
+        assert!(old.is_file());
+
+        /* The case the verification is actually load-bearing for. With tags
+           on the old file, writing them onto the replacement fails and takes
+           the swap down with it, so the two assertions above hold whether or
+           not the new file was ever checked. An old file lofty cannot read
+           has no tags to carry, nothing else touches the replacement, and
+           only the read-back stands between a junk file and the real one. */
+        let untagged = dir.join("02 - B.opus");
+        std::fs::write(&untagged, b"not a container lofty knows").unwrap();
+        let mut orphan = holding(&dir, 2, "02 - B.opus", Status::Have);
+        assert!(tag::read(&untagged).is_err(), "the fixture has readable tags");
+        assert!(swap_in(&tx, &mut orphan, &junk, "flac", &HashSet::new()).is_err());
+        assert!(untagged.is_file(), "an unreadable replacement took the old file");
+        assert_eq!(std::fs::read(&untagged).unwrap(), b"not a container lofty knows");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* `alac` and `m4a` share an extension, so the new file lands exactly where
+       the old one is. Everything else about the swap has somewhere to stand;
+       this case has to remove the old file first, and only once the
+       replacement is written and verified somewhere else. */
+    #[test]
+    fn a_swap_within_one_extension_replaces_the_file_in_place() {
+        let dir = scratch("inplace");
+        let old = dir.join("01 - A.m4a");
+        if super::tests::tiny_opus(&dir.join("seed.opus")).is_none()
+            || tag::transcode(&dir.join("seed.opus"), &old, "m4a", Some("opus")).is_err()
+        {
+            eprintln!("no ffmpeg or no aac encoder, skipping");
+            return;
+        }
+        assert_eq!(tag::mp4_format(&old), Some("m4a"));
+
+        let fresh = dir.join(".earworm-convert-1.m4a");
+        if tag::transcode(&old, &fresh, "alac", Some("m4a")).is_err() {
+            eprintln!("no alac encoder, skipping");
+            return;
+        }
+        let (tx, _rx) = mpsc::channel();
+        let mut track = holding(&dir, 1, "01 - A.m4a", Status::Have);
+        let stale = swap_in(&tx, &mut track, &fresh, "alac", &HashSet::new()).unwrap();
+        // The replacement landed on the old name, so there is nothing to drop.
+        assert_eq!(stale, None, "an in-place swap named a file to remove");
+
+        assert_eq!(track.path.as_deref(), Some(old.as_path()));
+        assert!(old.is_file());
+        assert!(!fresh.exists(), "the scratch file was left in the folder");
+        // The extension never changed, so only the codec says it worked.
+        assert_eq!(tag::mp4_format(&old), Some("alac"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* A download that never happened leaves the track exactly as it was: the
+       mp3, its manifest entry and its row. Converting it anyway would be the
+       silent downgrade the plan rules out. */
+    #[test]
+    fn a_refetch_that_never_downloaded_keeps_the_file_it_had() {
+        let dir = scratch("nofetch");
+        let old = dir.join("01 - A.mp3");
+        std::fs::write(&old, "audio").unwrap();
+        let cfg = super::tests::config(true);
+        let (tx, rx) = mpsc::channel();
+
+        let mut tracks = vec![holding(&dir, 1, "01 - A.mp3", Status::Have)];
+        // yt-dlp wrote nothing, so `path` is still what it was handed.
+        let was = HashMap::from([(1usize, old.clone())]);
+        let (done, missing, broke) = adopt_refetched(&cfg, &tx, &mut tracks, &was);
+
+        assert_eq!((done, missing, broke), (0, 1, 0));
+        assert!(old.is_file());
+        assert_eq!(tracks[0].path.as_deref(), Some(old.as_path()));
+        assert_eq!(tracks[0].status, Status::Have);
+        assert!(
+            rx.try_iter().any(|m| matches!(
+                m,
+                Msg::Update { note: Some(n), .. } if n.contains("could not refetch")
+            )),
+            "nothing on the row said why it was left"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* The bug this pair of fixes exists for. A conversion renames every track
+       it touches, and the `.m3u8` is written once at the end of the pass, so
+       quitting part-way left it naming the old files. Opening that folder from
+       the library then ran `mark_departed`, whose filename match failed for
+       every converted track while the unconverted ones still matched, which
+       got it past the "believe nothing" guard and called each converted track
+       departed. Per CLAUDE.md that renumbers them past the playlist, stops
+       them being tagged, refuses them a rename and drops them from the next
+       playlist written. */
+    #[test]
+    fn a_half_converted_folder_is_not_read_as_a_dozen_departures() {
+        let dir = scratch("halfway");
+        let mut names: Vec<String> = (1..=4).map(|n| format!("{n:02} - Track {n}.opus")).collect();
+        for name in &names {
+            std::fs::write(dir.join(name), "audio").unwrap();
+        }
+        let playlist = dir.join(format!(
+            "{}.m3u8",
+            dir.file_name().unwrap().to_string_lossy()
+        ));
+        let body = format!("#EXTM3U\n{}\n", names.join("\n"));
+        std::fs::write(&playlist, &body).unwrap();
+
+        /* Two of the four converted, which is the case the guard does not
+           catch: with all four renamed nothing matches and the file is not
+           believed at all. */
+        let mut replaced: Vec<String> = Vec::new();
+        for name in names.iter_mut().take(2) {
+            let old = dir.join(&*name);
+            let new = old.with_extension("flac");
+            std::fs::rename(&old, &new).unwrap();
+            repoint_playlist(&dir, old.file_name().unwrap(), new.file_name().unwrap());
+            replaced.push(name.clone());
+            *name = new.file_name().unwrap().to_string_lossy().to_string();
+        }
+
+        // The playlist names four files and all four are on disk.
+        let written = std::fs::read_to_string(&playlist).unwrap();
+        for name in &names {
+            assert!(written.contains(name.as_str()), "{name} missing from {written:?}");
+            assert!(dir.join(name).is_file(), "{name} is not on disk");
+        }
+        for gone in &replaced {
+            assert!(!written.contains(gone.as_str()), "{gone} survived in {written:?}");
+        }
+        // The two that were not touched keep the names they had.
+        assert_eq!(written.matches(".opus").count(), 2, "{written:?}");
+        assert!(written.starts_with("#EXTM3U"), "the header was lost: {written:?}");
+
+        let mut tracks: Vec<Track> = names
+            .iter()
+            .enumerate()
+            .map(|(n, name)| holding(&dir, n + 1, name, Status::Have))
+            .collect();
+        mark_departed(&dir, &mut tracks);
+        assert!(
+            tracks.iter().all(|t| t.status == Status::Have),
+            "a converted track was called departed: {:?}",
+            tracks.iter().map(|t| (t.index, t.status)).collect::<Vec<_>>()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* The second half, for the instant `repoint_playlist` cannot cover: the
+       rename has happened and the playlist write has not, or the folder was
+       synced with --no-m3u8 and given one later. The stem is what a
+       conversion leaves alone. */
+    #[test]
+    fn a_departure_is_judged_on_the_stem_so_an_extension_change_is_not_one() {
+        let dir = scratch("stale");
+        let playlist = dir.join(format!(
+            "{}.m3u8",
+            dir.file_name().unwrap().to_string_lossy()
+        ));
+        // Deliberately never repointed: this is the window, written out.
+        std::fs::write(&playlist, "#EXTM3U\n01 - A.opus\n02 - B.opus\n").unwrap();
+        for name in ["01 - A.flac", "02 - B.opus", "09 - Old.opus"] {
+            std::fs::write(dir.join(name), "audio").unwrap();
+        }
+
+        let mut tracks = vec![
+            holding(&dir, 1, "01 - A.flac", Status::Have),
+            holding(&dir, 2, "02 - B.opus", Status::Have),
+            holding(&dir, 9, "09 - Old.opus", Status::Have),
+        ];
+        mark_departed(&dir, &mut tracks);
+        assert_eq!(tracks[0].status, Status::Have, "the converted track was called departed");
+        assert_eq!(tracks[1].status, Status::Have);
+        /* And a real departure is still one: a file the playlist has never
+           named is what this check exists to find, and loosening the match
+           must not have cost that. */
+        assert_eq!(tracks[2].status, Status::Gone, "a real departure went unnoticed");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* A killed ffmpeg never reaches the cleanup in the loop's own error arm,
+       so its part-written output stays in the user's music folder. Writing the
+       same name again covers only a repeat of the same track into the same
+       format, and a format change in between strands it for good. */
+    #[test]
+    fn a_killed_conversion_leaves_no_scratch_file_behind() {
+        let dir = scratch("sweep");
+        // What a previous run into a different format would have left.
+        let orphans = [".earworm-convert-1.flac", ".earworm-convert-7.m4a"];
+        for name in orphans {
+            std::fs::write(dir.join(name), "half a track").unwrap();
+        }
+        // And the files it must not touch, hidden ones included.
+        let keep = ["01 - A.opus", "cover.jpg", ".DS_Store", ".earworm"];
+        for name in keep {
+            std::fs::write(dir.join(name), "mine").unwrap();
+        }
+
+        sweep_scratch(&dir);
+        for name in orphans {
+            assert!(!dir.join(name).exists(), "{name} was left behind");
+        }
+        for name in keep {
+            assert!(dir.join(name).is_file(), "{name} was swept away");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Off the filenames the shelf already holds, so the library screen can
+    /// ask it per frame without a stat or a worker round trip.
+    #[test]
+    fn the_off_format_count_reads_the_filenames_and_skips_what_is_missing() {
+        let shelf = Shelf {
+            path: PathBuf::from("/tmp/x"),
+            name: "X".into(),
+            url: "u".into(),
+            tracks: 3,
+            missing: 1,
+            synced: None,
+            files: vec![
+                ("01 - a.opus".into(), true),
+                ("02 - b.mp3".into(), true),
+                ("03 - c.flac".into(), true),
+                // Not on disk, so nothing is going to convert it.
+                ("04 - d.mp3".into(), false),
+            ],
+        };
+        assert_eq!(crate::app::off_format(&shelf, "opus"), 2);
+        assert_eq!(crate::app::off_format(&shelf, "mp3"), 2);
+        assert_eq!(crate::app::off_format(&shelf, "flac"), 2);
+        // vorbis writes .ogg, so the name is not the extension to compare.
+        assert_eq!(crate::app::off_format(&shelf, "vorbis"), 3);
     }
 }

@@ -106,6 +106,29 @@ by the filename it has, so those files stay as they are and a folder you switch
 format on ends up holding both. earworm leaves out wav and aac, since neither
 carries tags or cover art.
 
+Turn `convert` on and a sync brings them across as well. It is a separate
+setting for a reason: picking a format is one keystroke, and if that alone
+rewrote every folder under `--dir` a nightly `--resync` would do it while you
+slept. Off by default, and earworm asks about it once, right after you pick a
+format. `--no-convert` switches it off for a run whatever the config says.
+
+Once it is on, each playlist is brought over the next time it syncs. Tracks
+that are already in the target format are left alone, and so are ones whose
+video has left the playlist. The rest are re-encoded in place, except `mp3`
+and `vorbis`, which are downloaded again, and `m4a`, which is the same story:
+YouTube hands yt-dlp an Opus stream, so those three were already re-encoded
+once and converting them again would stack a third generation where a download
+costs at most two. Bringing a folder *to* `opus` also downloads, because opus
+is the one format a download copies rather than re-encodes. Everything else is
+converted in place, where ffmpeg costs exactly what a download would and needs
+no network.
+
+The tags, the cover and any name you typed yourself all come across, and
+nothing is deleted until the replacement has been written and read back. A
+track whose download fails keeps the file it had and says so. Converting to
+`flac` or `alac` recovers no quality, because YouTube never served any: it
+buys you a format your player can read, at about three times the size.
+
 Reading a playlist takes a second or so, and the screen has nothing to say
 until it comes back, so that is where the wordmark animates in. It runs once
 per session and holds for about two seconds, over the library screen too. Any
@@ -125,6 +148,7 @@ otherwise backs out to the screen behind it.
 | --- | --- |
 | `-d`, `--dir` | output directory (default `~/Music`) |
 | `-f`, `--format` | opus, m4a, mp3, flac, vorbis or alac (default opus) |
+| `--no-convert` | leave tracks already on disk in the format they have |
 | `-P`, `--no-parse` | keep YouTube's own artist/track, skip title parsing |
 | `-L`, `--no-lookup` | skip AcoustID/Deezer/Apple, keep parsed tags |
 | `--no-apple` | skip the Apple Music fallback, Deezer only |
@@ -154,6 +178,8 @@ holds the settings you'd otherwise retype every run. Every key is optional.
 ```toml
 dir = "~/Music/playlists"
 format = "opus"    # or m4a, mp3, flac, vorbis, alac
+convert = false    # bring tracks already on disk to `format` when they sync
+
 
 parse = true       # split artist and title out of the video title
 lookup = true      # confirm against AcoustID, Deezer and Apple

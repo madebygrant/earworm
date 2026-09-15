@@ -14,6 +14,9 @@ pub enum Status {
     Downloading,
     Downloaded,
     Tagging,
+    /// Being re-encoded into the current format by a sync, with the old file
+    /// still on disk until the new one is written and verified.
+    Converting,
     Ok,
     Manual,
     Kept,
@@ -26,6 +29,30 @@ pub enum Status {
     /// fetch it. Distinct from `Failed`, which would overstate what went wrong.
     Skipped,
 }
+
+/* Every variant, for the tests that have to walk them all. Rust will not
+   enumerate them and this list is hand-kept, so a new status left out of it
+   costs coverage rather than correctness: nothing in the running tool reads
+   it. `counts()` used to, which made forgetting one drop a whole column from
+   the tally with nothing saying why, and it now builds itself from the
+   tracks instead. */
+#[cfg(test)]
+pub const TALLY: [Status; 14] = [
+    Status::Pending,
+    Status::Have,
+    Status::Downloading,
+    Status::Downloaded,
+    Status::Tagging,
+    Status::Converting,
+    Status::Ok,
+    Status::Manual,
+    Status::Kept,
+    Status::Weak,
+    Status::NoMatch,
+    Status::Failed,
+    Status::Gone,
+    Status::Skipped,
+];
 
 impl Status {
     /// No wider than `STATUS_WIDTH`, and readable without the README: the old
@@ -42,6 +69,8 @@ impl Status {
             Status::Downloading => "fetching",
             Status::Downloaded => "fetched",
             Status::Tagging => "tagging",
+            // `converting` is 10 and STATUS_WIDTH is 8.
+            Status::Converting => "convert",
             Status::Ok => "ok",
             Status::Manual => "manual",
             Status::Kept => "guessed",
@@ -65,7 +94,10 @@ impl Status {
             // nothing to check at all.
             Status::Kept | Status::NoMatch => theme::SAND,
             Status::Failed => theme::RED,
-            Status::Downloading | Status::Tagging | Status::Downloaded => theme::GOLD,
+            Status::Downloading
+            | Status::Tagging
+            | Status::Downloaded
+            | Status::Converting => theme::GOLD,
             // Nothing to act on: not downloaded, or deliberately left alone.
             Status::Pending | Status::Have | Status::Gone | Status::Skipped => theme::DIM,
         }
@@ -79,6 +111,31 @@ impl Status {
             self,
             Status::Kept | Status::Weak | Status::NoMatch | Status::Failed
         )
+    }
+
+    /* Where a settled status sits in the tally beside the header, or `None`
+       for one that is still in flight. Exhaustive, unlike the hand-kept array
+       this replaced: a settled status left out of that array was counted in
+       the header's total and missing from the tally next to it, with nothing
+       on screen saying why, and adding a variant did not fail to compile.
+       Now it does. */
+    pub fn tally(self) -> Option<u8> {
+        match self {
+            Status::Ok => Some(0),
+            Status::Manual => Some(1),
+            Status::Kept => Some(2),
+            Status::Weak => Some(3),
+            Status::NoMatch => Some(4),
+            Status::Failed => Some(5),
+            Status::Gone => Some(6),
+            Status::Skipped => Some(7),
+            Status::Have => Some(8),
+            Status::Pending
+            | Status::Downloading
+            | Status::Downloaded
+            | Status::Tagging
+            | Status::Converting => None,
+        }
     }
 
     /// Terminal states, for the run summary and for picking what to follow.
@@ -413,7 +470,13 @@ pub enum Msg {
     Restart,
     /// The run's settings line for the help overlay, re-sent when one of them
     /// is changed from inside the tool rather than by a flag.
-    Settings(String),
+    Settings {
+        text: String,
+        /// Separately from the description, because the library preview
+        /// counts files against it and parsing it back out of the prose
+        /// would be a second place the two could disagree.
+        format: String,
+    },
     /// What `u` would put back, or `None` when there is nothing to undo. The
     /// worker holds the old values, so the UI cannot work this out for
     /// itself, and a key it cannot say is live is a key nobody presses.
@@ -590,6 +653,29 @@ pub fn scroll_to(offset: usize, at: usize, len: usize, height: usize) -> usize {
     offset.clamp(lowest, highest)
 }
 
+/* How many of a folder's files are not written in `format`. Off the
+   filenames the shelf already holds, so it costs no disk and no worker round
+   trip, which is what lets the preview ask it per frame.
+
+   `alac` and `m4a` share an extension, so a folder of one counted against the
+   other reads as nothing to do. That is the honest answer from a filename:
+   telling the two apart means opening every file to read its codec, which is
+   what the sync does when it actually converts them. */
+pub fn off_format(shelf: &Shelf, format: &str) -> usize {
+    let want = crate::config::extension(format);
+    shelf
+        .files
+        .iter()
+        .filter(|(_, here)| *here)
+        .filter(|(name, _)| {
+            std::path::Path::new(name)
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_none_or(|e| !e.eq_ignore_ascii_case(want))
+        })
+        .count()
+}
+
 /* A folder is on the list for its own name or for a track inside it. The
    names come free, but the filenames are the only way to answer "which
    playlist has that track" without opening folders one at a time, and
@@ -645,6 +731,9 @@ impl Sort {
 pub struct App {
     pub cmds: Option<Sender<Cmd>>,
     pub settings: String,
+    /// What new downloads are written as, for the preview's count of files
+    /// that are something else. Set at startup and by `Msg::Settings`.
+    pub format: String,
     pub tick: usize,
     pub show_help: bool,
     pub stage: String,
@@ -744,6 +833,7 @@ impl App {
         App {
             cmds: Some(cmds),
             settings,
+            format: crate::config::DEFAULT_FORMAT.to_string(),
             tick: 0,
             show_help: false,
             stage: "starting".into(),
@@ -916,7 +1006,10 @@ impl App {
                 self.flash_until = None;
                 self.done = Some(result);
             }
-            Msg::Settings(s) => self.settings = s,
+            Msg::Settings { text, format } => {
+                self.settings = text;
+                self.format = format;
+            }
             Msg::Undoable(what) => self.undoable = what,
             /* Not a jump on its own: the cursor lands on the first of them and
                the rest stay on screen, so the next one is `n` away rather
@@ -1808,25 +1901,25 @@ impl App {
         }
     }
 
+    /* Built from the tracks rather than from a list of every status, which
+       is the whole point: a list is hand-kept and adding a variant does not
+       fail to compile against it, so the first version of this still had the
+       bug it was meant to remove. `tally()` is exhaustive and decides both
+       whether a status is counted and where it sits, so a new one is either
+       given a column or deliberately left out, and neither can be forgotten. */
     pub fn counts(&self) -> Vec<(Status, usize)> {
-        let order = [
-            Status::Ok,
-            Status::Manual,
-            Status::Kept,
-            Status::Weak,
-            Status::NoMatch,
-            Status::Failed,
-            Status::Gone,
-            Status::Skipped,
-            Status::Have,
-        ];
-        order
-            .iter()
-            .filter_map(|s| {
-                let n = self.tracks.iter().filter(|t| t.status == *s).count();
-                (n > 0).then_some((*s, n))
-            })
-            .collect()
+        let mut seen: Vec<(u8, Status, usize)> = Vec::new();
+        for track in &self.tracks {
+            let Some(rank) = track.status.tally() else {
+                continue;
+            };
+            match seen.iter_mut().find(|(_, s, _)| *s == track.status) {
+                Some((_, _, n)) => *n += 1,
+                None => seen.push((rank, track.status, 1)),
+            }
+        }
+        seen.sort_unstable_by_key(|(rank, _, _)| *rank);
+        seen.into_iter().map(|(_, s, n)| (s, n)).collect()
     }
 
     pub fn settled(&self) -> usize {
@@ -3105,24 +3198,9 @@ mod tests {
        tally beside it, and the two disagree with nothing saying why. */
     #[test]
     fn every_settled_status_is_counted_in_the_tally() {
-        let settled: Vec<Status> = [
-            Status::Pending,
-            Status::Have,
-            Status::Downloading,
-            Status::Downloaded,
-            Status::Tagging,
-            Status::Ok,
-            Status::Manual,
-            Status::Kept,
-            Status::Weak,
-            Status::NoMatch,
-            Status::Failed,
-            Status::Gone,
-            Status::Skipped,
-        ]
-        .into_iter()
-        .filter(|s| s.settled())
-        .collect();
+        // `TALLY` is the one list of every variant; a copy of it here was
+        // already a version behind.
+        let settled: Vec<Status> = TALLY.into_iter().filter(|s| s.settled()).collect();
 
         let app = app_with(&settled);
         let counted: Vec<Status> = app.counts().into_iter().map(|(s, _)| s).collect();
@@ -3136,31 +3214,41 @@ mod tests {
         );
     }
 
+    /* A settled status left out of the tally was counted in the header's
+       total and missing from the row beside it, with nothing saying why.
+       `tally()` is exhaustive so it cannot be forgotten, and this is what
+       pins the other half: that the two agree about which are settled. */
+    #[test]
+    fn every_settled_status_has_a_column_of_its_own() {
+        let mut seen: Vec<u8> = Vec::new();
+        for status in TALLY {
+            match (status.settled(), status.tally()) {
+                (true, Some(rank)) => seen.push(rank),
+                (true, None) => panic!("{status:?} is settled and has no tally column"),
+                (false, Some(_)) => panic!("{status:?} is in flight and has a tally column"),
+                (false, None) => {}
+            }
+        }
+        let mut unique = seen.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), seen.len(), "two statuses share a tally column");
+    }
+
     /* A terminal status left out of `settled()` means the run never reaches
        its own count and the UI waits forever. The match below has no
        wildcard, so a new variant fails to compile here first. */
     #[test]
     fn every_status_is_either_in_flight_or_settled() {
-        let all = [
-            Status::Pending,
-            Status::Have,
-            Status::Downloading,
-            Status::Downloaded,
-            Status::Tagging,
-            Status::Ok,
-            Status::Manual,
-            Status::Kept,
-            Status::Weak,
-            Status::NoMatch,
-            Status::Failed,
-            Status::Gone,
-            Status::Skipped,
-        ];
-        for status in all {
+        // `TALLY` rather than a second list: two hand-kept arrays of every
+        // variant is one more than can be kept in step.
+        for status in TALLY {
             let in_flight = match status {
-                Status::Pending | Status::Downloading | Status::Downloaded | Status::Tagging => {
-                    true
-                }
+                Status::Pending
+                | Status::Downloading
+                | Status::Downloaded
+                | Status::Tagging
+                | Status::Converting => true,
                 Status::Have
                 | Status::Ok
                 | Status::Manual

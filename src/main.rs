@@ -43,6 +43,7 @@ fn main() -> Result<()> {
         anyhow::bail!("earworm needs a terminal · --list and --check work without one");
     }
     let settings = cfg.describe();
+    let format = cfg.format.clone();
     // Read off before the worker takes the config: both belong to the UI.
     let (intro, notify) = (cfg.intro, cfg.notify);
     /* The update probe runs beside the worker, not through it: it answers to
@@ -58,6 +59,8 @@ fn main() -> Result<()> {
 
     let mut terminal = ratatui::init();
     let mut app = App::new(cmd_tx, settings);
+    // The worker owns the config by now, so this is read across before it goes.
+    app.format = format;
     /* Switched off by saying it is already over, which is what every other
        thing that ends it does. A separate flag would be a second answer to
        the same question. */
@@ -66,6 +69,10 @@ fn main() -> Result<()> {
 
     cancel.store(true, Ordering::SeqCst);
     ytdlp::stop();
+    /* And the other subprocesses: a conversion is minutes of ffmpeg writing
+       into the playlist folder, and an orphan keeps going long after the
+       terminal is back. */
+    lookup::stop();
     // Closes the command channel, which is what ends the worker's service loop.
     app.cmds.take();
     /* Exiting part-way through an in-place tag rewrite truncates the file, so
@@ -100,6 +107,8 @@ fn check(cfg: &Config) -> Result<()> {
     let tools = deps::probe_all();
     let config = cfg.config_file.clone();
     let dir = cfg.dir.clone();
+    // Walked once and read twice: the playlist count and the format tally.
+    let shelves = if dir.is_dir() { worker::library(&dir) } else { Vec::new() };
     let (text, ready) = deps::report(&deps::Facts {
         tools: &tools,
         config: config.as_deref(),
@@ -108,7 +117,16 @@ fn check(cfg: &Config) -> Result<()> {
         format: &cfg.format,
         extension: config::extension(&cfg.format),
         dir: &dir,
-        playlists: dir.is_dir().then(|| worker::library(&dir).len()),
+        playlists: dir.is_dir().then_some(shelves.len()),
+        convert: cfg.convert,
+        off_format: dir.is_dir().then(|| {
+            let counts: Vec<usize> = shelves
+                .iter()
+                .map(|s| app::off_format(s, &cfg.format))
+                .filter(|n| *n > 0)
+                .collect();
+            (counts.iter().sum(), counts.len())
+        }),
         apple: cfg.apple,
         /* Script-facing and bounded, so a synchronous answer is fine here:
            the one place earworm is allowed to spend the probe timeout. */
@@ -134,13 +152,17 @@ fn list(cfg: &Config) {
         let synced = shelf
             .synced
             .map_or_else(|| "never synced".to_string(), manifest::ago);
-        let missing = match shelf.missing {
-            0 => String::new(),
-            n => format!(", {n} missing"),
+        /* Both in one column, since a folder rarely has either and a second
+           fixed field would push the URL off an eighty-column terminal. */
+        let note = match (shelf.missing, app::off_format(&shelf, &cfg.format)) {
+            (0, 0) => String::new(),
+            (0, n) => format!(", {n} not {}", cfg.format),
+            (n, 0) => format!(", {n} missing"),
+            (m, n) => format!(", {m} missing, {n} not {}", cfg.format),
         };
         println!(
-            "{:widest$}  {:>4} tracks{:<13}  {synced:<13}  {}",
-            shelf.name, shelf.tracks, missing, shelf.url
+            "{:widest$}  {:>4} tracks{:<24}  {synced:<13}  {}",
+            shelf.name, shelf.tracks, note, shelf.url
         );
     }
 }

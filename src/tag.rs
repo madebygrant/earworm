@@ -19,6 +19,12 @@ use crate::lookup::{self, Match};
 /// megabytes. Generous, since the alternative is leaving the art oversized.
 const COVER_RESIZE: Duration = Duration::from_secs(20);
 
+/* A whole track decoded and re-encoded, where the cover is a few megabytes of
+   image. Long enough for a flac of a twenty-minute live set on a slow disk,
+   because the cost of being wrong is a conversion that fails for no reason
+   the user can see. */
+const TRANSCODE: Duration = Duration::from_secs(300);
+
 static WRITING: AtomicBool = AtomicBool::new(false);
 
 /// True while a track's tags are being rewritten in place. Quitting during one
@@ -141,6 +147,31 @@ pub fn set_fields(path: &Path, fields: &Fields) -> Result<()> {
     })
 }
 
+/* `alac` and `m4a` both write `.m4a`, so the extension cannot say which one
+   a file holds, and "already in the target format" is wrong in both
+   directions without this: an AAC file sits untouched in a folder being
+   brought to alac, and an alac file does the same in one going to m4a.
+
+   Returns the `FORMATS` name, so callers compare it against `cfg.format`
+   like any other. `None` is a file that is not MPEG-4 at all, or one whose
+   codec lofty could not read, and the caller falls back to the extension:
+   guessing here would rewrite a file on no evidence. */
+pub fn mp4_format(path: &Path) -> Option<&'static str> {
+    use lofty::config::ParseOptions;
+    use lofty::mp4::{Mp4Codec, Mp4File};
+
+    let mut file = std::fs::File::open(path).ok()?;
+    // Parsed for the codec alone, which lives in the properties.
+    let parsed = Mp4File::read_from(&mut file, ParseOptions::new()).ok()?;
+    match parsed.properties().codec()? {
+        Mp4Codec::ALAC => Some("alac"),
+        Mp4Codec::AAC => Some("m4a"),
+        // MP3 or FLAC in an MPEG-4 container is neither of the two formats
+        // earworm writes here, and nothing should claim otherwise.
+        _ => None,
+    }
+}
+
 /// Embedding a PNG as image/jpeg produces a file players silently refuse to
 /// show art for, so the bytes decide the mime type.
 pub fn image_extension(data: &[u8]) -> Option<&'static str> {
@@ -216,6 +247,9 @@ fn shrink(image: &[u8]) -> Option<Vec<u8>> {
             ])
             .args(["-q:v", "3"])
             .arg(&to)
+            // Same reason as `transcode`: an inherited stdin lets ffmpeg read
+            // the terminal earworm holds in raw mode.
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null()),
         COVER_RESIZE,
@@ -244,6 +278,84 @@ pub fn set_cover(path: &Path, image: &[u8]) -> Result<()> {
                 .build(),
         );
     })
+}
+
+/* Re-encodes one track into `format`, leaving the source untouched: the
+   caller is what decides the old file is safe to remove, and only once this
+   output has been verified. Here rather than in a module of its own because
+   ffmpeg-on-an-audio-file already lives beside `shrink`.
+
+   `-vn` drops the embedded picture rather than letting ffmpeg carry it, and
+   `-map_metadata` is left alone so anything earworm does not model survives.
+   The tags that matter are written afterwards through lofty, which knows
+   which tag type each container takes, where ffmpeg's field mapping across
+   containers is inconsistent in exactly the way that has already cost a day. */
+pub fn transcode(from: &Path, to: &Path, format: &str, source: Option<&str>) -> Result<()> {
+    let lossless = crate::config::lossless(format);
+    /* Not a pipe: `run_bounded` polls `try_wait` and drains nothing until the
+       child has exited, so a stderr pipe that fills its buffer would hang
+       ffmpeg until the deadline killed it. A file never fills. */
+    let log = std::env::temp_dir().join(format!(
+        "earworm-convert-{}-{:?}.log",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let mut last = String::from("no encoder ran");
+    /* The encoder's name is not the same on every ffmpeg build, so the list
+       is tried in order. A build with neither is the error worth reporting. */
+    for encoder in crate::config::encoders(format) {
+        let _ = std::fs::remove_file(to);
+        let errors = std::fs::File::create(&log).ok();
+        let mut cmd = std::process::Command::new("ffmpeg");
+        cmd.args(["-v", "error", "-y", "-i"])
+            .arg(from)
+            .args(["-vn", "-c:a", encoder]);
+        /* Generous on purpose for a lossy target. The source is already lossy
+           and whatever this throws away cannot be got back, where the cost of
+           being too generous is only disk. */
+        if !lossless {
+            cmd.args(["-b:a", "192k"]);
+        }
+        /* A lossy source decodes to float, and ffmpeg then writes 24-bit
+           flac or alac: twice the size to store the decoder's own rounding,
+           since there was never more than 16 bits of anything in it. Only
+           when the source is known and lossy, so a genuinely deeper file is
+           never quietly flattened. The two encoders disagree about the
+           spelling and each refuses the other's. */
+        if lossless && source.is_some_and(|from| !crate::config::lossless(from)) {
+            cmd.args(["-sample_fmt", if format == "alac" { "s16p" } else { "s16" }]);
+        }
+        cmd.arg(to)
+            // Inherited, ffmpeg reads the terminal earworm has in raw mode and
+            // eats the keys meant for the UI.
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(errors.map_or_else(std::process::Stdio::null, std::process::Stdio::from));
+
+        let outcome = lookup::run_bounded(&mut cmd, TRANSCODE);
+        let said = || {
+            std::fs::read_to_string(&log)
+                .ok()
+                .and_then(|text| {
+                    text.lines()
+                        .rev()
+                        .find(|l| !l.trim().is_empty())
+                        .map(|l| l.trim().to_string())
+                })
+                .unwrap_or_else(|| "ffmpeg said nothing".into())
+        };
+        match outcome {
+            Some(out) if out.status.success() => {
+                let _ = std::fs::remove_file(&log);
+                return Ok(());
+            }
+            Some(_) => last = said(),
+            None => last = format!("{encoder} did not finish within {}s", TRANSCODE.as_secs()),
+        }
+    }
+    let _ = std::fs::remove_file(&log);
+    let _ = std::fs::remove_file(to);
+    anyhow::bail!("{last}")
 }
 
 pub struct CoverState {
@@ -518,16 +630,7 @@ mod tests {
         /* Driven off FORMATS, so a format added to the table without a
            container earworm can tag fails here rather than at the end of
            somebody's download. */
-        for (format, ext) in crate::config::FORMATS {
-            let codecs: &[&str] = match format {
-                "opus" => &["libopus", "opus"],
-                "m4a" => &["aac", "libfdk_aac"],
-                "mp3" => &["libmp3lame", "mp3"],
-                "flac" => &["flac"],
-                "vorbis" => &["libvorbis", "vorbis"],
-                "alac" => &["alac"],
-                other => panic!("{other} has no codec here, so nothing tests its container"),
-            };
+        for (format, ext, codecs) in crate::config::FORMATS {
             let file: PathBuf = dir.join(format!("{format}.{ext}"));
             if bare(&file, codecs).is_none() {
                 eprintln!("skipped {ext}: ffmpeg could not write it");
@@ -554,6 +657,158 @@ mod tests {
         /* The branch under test only runs for a file with no tag, so a
            fixture that arrives tagged would pass while saying nothing. */
         assert!(!untagged.is_empty(), "every fixture came with a tag already");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+
+    /* `alac` and `m4a` both write `.m4a`, so without reading the codec a
+       folder of one counts as already being the other and the conversion
+       skips every file in it. */
+    #[test]
+    fn the_codec_tells_alac_and_m4a_apart_behind_one_extension() {
+        let dir = std::env::temp_dir().join(format!("earworm-mp4codec-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let aac = dir.join("aac.m4a");
+        let alac = dir.join("alac.m4a");
+        if bare(&aac, crate::config::encoders("m4a")).is_none()
+            || bare(&alac, crate::config::encoders("alac")).is_none()
+        {
+            eprintln!("skipped: ffmpeg could not write both m4a codecs");
+            std::fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+        // Same extension on both, so only the codec can be answering.
+        assert_eq!(aac.extension(), alac.extension());
+        assert_eq!(mp4_format(&aac), Some("m4a"));
+        assert_eq!(mp4_format(&alac), Some("alac"));
+        // Not an MPEG-4 file at all, where a guess would re-encode on nothing.
+        let opus = dir.join("not.opus");
+        if bare(&opus, crate::config::encoders("opus")).is_some() {
+            assert_eq!(mp4_format(&opus), None);
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* Driven off FORMATS so a format added to the table without a working
+       encoder fails here rather than part-way through somebody's library. The
+       tags are what the conversion exists to carry, and the container change
+       is exactly where lofty's tag-type choice has to hold. */
+    #[test]
+    fn a_transcode_lands_in_the_target_container_and_keeps_its_tags() {
+        let dir = std::env::temp_dir().join(format!("earworm-transcode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let source = dir.join("source.flac");
+        if bare(&source, crate::config::encoders("flac")).is_none() {
+            eprintln!("skipped: ffmpeg could not write the source");
+            std::fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+        let fields = Fields {
+            artist: "Kraftwerk".into(),
+            title: "Autobahn".into(),
+            album: "Autobahn".into(),
+            year: Some(1974),
+        };
+        set_fields(&source, &fields).unwrap();
+
+        let mut ran = 0;
+        for (format, ext, _) in crate::config::FORMATS {
+            let out = dir.join(format!("{format}.{ext}"));
+            if let Err(err) = transcode(&source, &out, format, Some("flac")) {
+                eprintln!("skipped {format}: {err}");
+                continue;
+            }
+            ran += 1;
+            assert!(std::fs::metadata(&out).unwrap().len() > 0, "{format} is empty");
+            /* ffmpeg carries the tags of its own accord for most containers,
+               but not all of them and not the same fields, which is why the
+               swap writes them again through lofty. Written here the same way
+               so the assertion is about the container taking them. */
+            set_fields(&out, &fields).unwrap_or_else(|e| panic!("{format}: {e}"));
+            let back = read(&out).unwrap();
+            assert_eq!(back.artist, "Kraftwerk", "{format}");
+            assert_eq!(back.title, "Autobahn", "{format}");
+            assert_eq!(back.album, "Autobahn", "{format}");
+            assert_eq!(back.year, Some(1974), "{format}");
+            // The container is the point: an .m4a that is still flac inside
+            // would pass every tag assertion above.
+            if ext == "m4a" {
+                assert_eq!(mp4_format(&out), Some(format), "{format}");
+            }
+        }
+        assert!(ran > 0, "no format transcoded, so this asserted nothing");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* A lossy source decodes to float and ffmpeg then writes 24-bit flac,
+       which is twice the size to store the decoder's own rounding. A file
+       that really does carry more depth must still keep it, which is the
+       half that makes this a rule rather than a blanket downgrade. */
+    #[test]
+    fn a_lossy_source_does_not_become_a_24_bit_lossless_file() {
+        let dir = std::env::temp_dir().join(format!("earworm-depth-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let depth = |path: &Path| -> Option<u32> {
+            let out = std::process::Command::new("ffprobe")
+                .args(["-v", "error", "-select_streams", "a:0"])
+                .args(["-show_entries", "stream=bits_per_raw_sample"])
+                .args(["-of", "default=noprint_wrappers=1:nokey=1"])
+                .arg(path)
+                .output()
+                .ok()?;
+            String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+        };
+
+        // A 24-bit source, which is the case that must not be flattened.
+        let deep = dir.join("deep.flac");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"])
+            .args(["-t", "0.3", "-c:a", "flac", "-sample_fmt", "s32", "-y"])
+            .arg(&deep)
+            .status();
+        if !made.is_ok_and(|s| s.success()) || depth(&deep) != Some(24) {
+            eprintln!("skipped: ffmpeg or ffprobe could not make a 24-bit fixture");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        // Lossless in, so the depth is real and stays.
+        let kept = dir.join("kept.flac");
+        transcode(&deep, &kept, "flac", Some("flac")).unwrap();
+        assert_eq!(depth(&kept), Some(24), "a real 24-bit source was flattened");
+
+        /* The same bytes described as having come from a lossy format, which
+           is the only thing that changes: whatever depth ffmpeg reads off the
+           decoder there is the decoder's, not the recording's. */
+        let flat = dir.join("flat.flac");
+        transcode(&deep, &flat, "flac", Some("opus")).unwrap();
+        assert_eq!(depth(&flat), Some(16), "a lossy source still wrote 24-bit");
+
+        // A target that is not lossless has no depth to argue about.
+        let lossy = dir.join("lossy.opus");
+        if transcode(&deep, &lossy, "opus", Some("flac")).is_ok() {
+            assert!(lossy.is_file());
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A failed transcode must leave nothing behind for the swap to adopt.
+    #[test]
+    fn a_transcode_that_fails_writes_no_output() {
+        let dir = std::env::temp_dir().join(format!("earworm-badconv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("not-audio.flac");
+        std::fs::write(&source, b"this is not a flac file").unwrap();
+        let out = dir.join("out.opus");
+        assert!(transcode(&source, &out, "opus", Some("flac")).is_err());
+        assert!(!out.exists(), "a failed transcode left a file behind");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

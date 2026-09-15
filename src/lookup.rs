@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
@@ -121,23 +122,67 @@ fn encode(value: &str) -> String {
     out
 }
 
+static CHILD: AtomicU32 = AtomicU32::new(0);
+
+/* The same promise `ytdlp::stop` makes, for the other half of the
+   subprocesses. A transcode is minutes long and writes into the user's
+   playlist folder, so quitting without this leaves an ffmpeg running after
+   the terminal is restored, still writing a file nothing will ever clean up.
+   One registration inside `run_bounded` rather than one per caller: the
+   answer to "how does earworm stop a child it is waiting on" has to be in
+   the same place as the waiting. */
+pub fn stop() {
+    STOPPING.store(true, Ordering::SeqCst);
+    let pid = CHILD.swap(0, Ordering::SeqCst);
+    if pid != 0 {
+        let _ = Command::new("kill").arg(pid.to_string()).status();
+    }
+}
+
+/* Latched, and the reason is `transcode`: killing its ffmpeg makes the call
+   come back a failure, and a failure is what makes it try the next encoder in
+   the list. Without this the shutdown killed one child and the very next line
+   spawned another, orphaned this time because nothing is left to kill it. It
+   also closes the gap between the cancel check at the top of a loop and the
+   spawn a few lines later.
+
+   Process-wide and never cleared, which is the trap the colour depth
+   documents: nothing in the suite may call `stop`, or every bounded
+   subprocess after it in that binary returns `None`. */
+static STOPPING: AtomicBool = AtomicBool::new(false);
+
 /// std has no timeout on `output()`, and a wedged fpcalc would stall the run on
 /// one unreadable file.
 /// The caller sets the stdio, since which streams are worth capturing is the
 /// caller's business and a piped stream nobody drains can fill and block.
 pub fn run_bounded(cmd: &mut Command, limit: Duration) -> Option<std::process::Output> {
+    // Nothing new starts once the shutdown has begun. See `STOPPING`.
+    if STOPPING.load(Ordering::SeqCst) {
+        return None;
+    }
     let mut child = cmd.spawn().ok()?;
+    CHILD.store(child.id(), Ordering::SeqCst);
     let deadline = Instant::now() + limit;
     loop {
+        /* Killed from the shutdown path rather than by this loop, so the exit
+           does not wait out a transcode. `try_wait` then reports the child
+           gone and the caller sees the same failure a timeout gives it. */
         match child.try_wait() {
-            Ok(Some(_)) => return child.wait_with_output().ok(),
+            Ok(Some(_)) => {
+                CHILD.store(0, Ordering::SeqCst);
+                return child.wait_with_output().ok();
+            }
             Ok(None) if Instant::now() >= deadline => {
                 let _ = child.kill();
                 let _ = child.wait();
+                CHILD.store(0, Ordering::SeqCst);
                 return None;
             }
             Ok(None) => sleep(Duration::from_millis(50)),
-            Err(_) => return None,
+            Err(_) => {
+                CHILD.store(0, Ordering::SeqCst);
+                return None;
+            }
         }
     }
 }
@@ -701,3 +746,5 @@ mod tests {
         assert!(!plausible(&bad, "Boards of Canada", "Roygbiv"));
     }
 }
+
+

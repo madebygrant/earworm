@@ -19,6 +19,11 @@ pub struct Cli {
     #[arg(short, long, value_name = "NAME")]
     pub format: Option<String>,
 
+    /// Leave tracks already on disk in the format they were downloaded in,
+    /// whatever `convert` says in the config
+    #[arg(long)]
+    pub no_convert: bool,
+
     /// Keep YouTube's own artist/track, skip title parsing
     #[arg(short = 'P', long)]
     pub no_parse: bool,
@@ -100,6 +105,7 @@ pub struct Cli {
 pub struct FileConfig {
     pub dir: Option<String>,
     pub format: Option<String>,
+    pub convert: Option<bool>,
     pub parse: Option<bool>,
     pub m3u8: Option<bool>,
     pub cover: Option<bool>,
@@ -134,19 +140,26 @@ impl FileConfig {
     }
 }
 
-/* yt-dlp's name for the format paired with the extension it actually writes.
-   The two disagree for `vorbis` and `alac`, and both halves are needed:
-   `run` passes the name to --audio-format while `scan` predicts filenames
-   with the extension. wav and aac are deliberately absent: neither carries
-   tags or cover art, so earworm would do a third of its job and report it
-   as finished. */
-pub const FORMATS: [(&str, &str); 6] = [
-    ("opus", "opus"),
-    ("m4a", "m4a"),
-    ("mp3", "mp3"),
-    ("flac", "flac"),
-    ("vorbis", "ogg"),
-    ("alac", "m4a"),
+/* yt-dlp's name for the format, the extension it actually writes, and the
+   ffmpeg encoders that produce it. The first two disagree for `vorbis` and
+   `alac`, and both are needed: `run` passes the name to --audio-format while
+   `scan` predicts filenames with the extension. wav and aac are deliberately
+   absent: neither carries tags or cover art, so earworm would do a third of
+   its job and report it as finished.
+
+   The encoders are a list because the name is not the same on every ffmpeg
+   build: `libvorbis` and `libopus` are the usual external ones and some
+   builds carry only the native encoder under the bare format name. Whoever
+   runs them tries the list in order. One table rather than two, so a format
+   added here without a working encoder fails in the fixtures that read this
+   same column rather than in somebody's folder. */
+pub const FORMATS: [(&str, &str, &[&str]); 6] = [
+    ("opus", "opus", &["libopus", "opus"]),
+    ("m4a", "m4a", &["aac", "libfdk_aac"]),
+    ("mp3", "mp3", &["libmp3lame", "mp3"]),
+    ("flac", "flac", &["flac"]),
+    ("vorbis", "ogg", &["libvorbis", "vorbis"]),
+    ("alac", "m4a", &["alac"]),
 ];
 
 pub const DEFAULT_FORMAT: &str = "opus";
@@ -160,17 +173,47 @@ pub const DEFAULT_FORMAT: &str = "opus";
 pub fn extension(format: &str) -> &'static str {
     FORMATS
         .iter()
-        .find(|(name, _)| *name == format)
+        .find(|(name, _, _)| *name == format)
         .map_or_else(
             || unreachable!("no extension for {format}, which FORMATS should have refused"),
-            |(_, ext)| *ext,
+            |(_, ext, _)| *ext,
         )
+}
+
+/// Whether `format` stores the audio without throwing anything away. Not a
+/// claim about the recording: every one of these ultimately comes from
+/// YouTube, which serves Opus or AAC.
+pub fn lossless(format: &str) -> bool {
+    matches!(format, "flac" | "alac")
+}
+
+/// The ffmpeg encoders that write `format`, in the order to try them. See
+/// `FORMATS` for why it is a list.
+pub fn encoders(format: &str) -> &'static [&'static str] {
+    FORMATS
+        .iter()
+        .find(|(name, _, _)| *name == format)
+        .map_or_else(
+            || unreachable!("no encoder for {format}, which FORMATS should have refused"),
+            |(_, _, codecs)| *codecs,
+        )
+}
+
+pub fn save_format(path: &std::path::Path, format: &str) -> Result<()> {
+    save_key(path, "format", &format!("\"{format}\""))
+}
+
+pub fn save_convert(path: &std::path::Path, on: bool) -> Result<()> {
+    save_key(path, "convert", if on { "true" } else { "false" })
 }
 
 /// Writes one key back in place, leaving comments and every other line as
 /// they were: the file is hand-edited, and rewriting it from the parsed
 /// struct would drop the comments and flatten the formatting.
-pub fn save_format(path: &std::path::Path, format: &str) -> Result<()> {
+///
+/// `value` is TOML as it should appear after the `=`, quotes included, so a
+/// caller writing a string is the one that quotes it.
+fn save_key(path: &std::path::Path, key: &str, value: &str) -> Result<()> {
     /* Only an absent file is an empty one. Any other read error — a
        permission denial, a byte that is not UTF-8, a directory sitting on the
        path — used to come back as "the config was empty", and the whole file
@@ -189,11 +232,11 @@ pub fn save_format(path: &std::path::Path, format: &str) -> Result<()> {
         toml::from_str::<FileConfig>(&old)
             .with_context(|| format!("{} does not parse", path.display()))?;
     }
-    let line = format!("format = \"{format}\"");
+    let line = format!("{key} = {value}");
     let mut out = String::new();
     let mut replaced = false;
     for existing in old.lines() {
-        out.push_str(if names_format(existing) && !replaced {
+        out.push_str(if names_key(existing, key) && !replaced {
             replaced = true;
             &line
         } else {
@@ -215,11 +258,11 @@ pub fn save_format(path: &std::path::Path, format: &str) -> Result<()> {
    appended a second one. That is a duplicate key, so the re-parse refused it,
    and every save after that failed the same way: the setting could never be
    written again. */
-fn names_format(line: &str) -> bool {
+fn names_key(line: &str, key: &str) -> bool {
     let rest = line.trim_start();
-    rest.strip_prefix("format")
-        .or_else(|| rest.strip_prefix("\"format\""))
-        .or_else(|| rest.strip_prefix("'format'"))
+    rest.strip_prefix(key)
+        .or_else(|| rest.strip_prefix(&format!("\"{key}\"")))
+        .or_else(|| rest.strip_prefix(&format!("'{key}'")))
         .is_some_and(|rest| rest.trim_start().starts_with('='))
 }
 
@@ -268,6 +311,14 @@ pub struct Config {
     pub dir: PathBuf,
     /// yt-dlp's name for the format, not the extension. See `FORMATS`.
     pub format: String,
+    /* Whether tracks already on disk follow `format` when their playlist is
+       next synced. Off unless the file turns it on, which is the opposite of
+       every other setting here and deliberate: `format` means "format for new
+       downloads", and a plain format change that rewrote the library would
+       turn one pick into an unattended rewrite of every folder under --dir.
+       Only a sync acts on it; opening a folder from the library converts
+       nothing, because that path never touches the network or the encoder. */
+    pub convert: bool,
     /* The folder this run must write into, for a playlist somebody has
        renamed. `None` is every other run, where yt-dlp names the folder from
        the playlist's title. Not a setting and not in the file: it belongs to
@@ -323,6 +374,13 @@ impl Config {
         let off = |id: &str, from_file: Option<bool>| {
             if given(id) { false } else { from_file.unwrap_or(true) }
         };
+        /* Same shape as `off` and the same rule about the command line only
+           ever switching something off, but defaulting the other way. The one
+           setting that rewrites files already on disk does not get to be on
+           because nobody said otherwise. */
+        let opt_in = |id: &str, from_file: Option<bool>| {
+            if given(id) { false } else { from_file.unwrap_or(false) }
+        };
 
         let dir = if given("dir") {
             cli.dir
@@ -342,8 +400,8 @@ impl Config {
         /* Checked here rather than left to yt-dlp: an unknown name gets as
            far as the download before failing, by which time the scan has
            already predicted filenames with an extension nothing will write. */
-        if !FORMATS.iter().any(|(name, _)| *name == format) {
-            let known: Vec<&str> = FORMATS.iter().map(|(name, _)| *name).collect();
+        if !FORMATS.iter().any(|(name, _, _)| *name == format) {
+            let known: Vec<&str> = FORMATS.iter().map(|(name, _, _)| *name).collect();
             anyhow::bail!("unknown format \"{format}\", expected one of {}", known.join(", "));
         }
 
@@ -352,6 +410,7 @@ impl Config {
             dir: expand(&dir),
             folder: None,
             format,
+            convert: opt_in("no_convert", file.convert),
             config_file,
             parse: off("no_parse", file.parse),
             m3u8: off("no_m3u8", file.m3u8),
@@ -384,8 +443,9 @@ impl Config {
     pub fn describe(&self) -> String {
         let on = |flag: bool| if flag { "on" } else { "off" };
         format!(
-            "format {} · parse {} · lookup {} · apple {} · cover {} · m3u8 {} · prompts {} · rename {}",
+            "format {} · convert {} · parse {} · lookup {} · apple {} · cover {} · m3u8 {} · prompts {} · rename {}",
             self.format,
+            on(self.convert),
             on(self.parse),
             on(self.lookup),
             on(self.apple),
@@ -422,6 +482,53 @@ mod tests {
         let mut argv = vec!["earworm".to_string(), "--config".into(), file.path.clone()];
         argv.extend(args.iter().map(|a| a.to_string()));
         run(argv)
+    }
+
+    /* The one setting here that is off unless the file says otherwise, and
+       the reason is that it rewrites files already on disk: a `format` change
+       alone must never do that. The flag still only switches it off, which is
+       the rule every other setting follows. */
+    #[test]
+    fn convert_is_off_unless_the_file_turns_it_on() {
+        assert!(!build("", &[]).convert, "on with nothing asking for it");
+        assert!(!build("convert = false\n", &[]).convert);
+        assert!(build("convert = true\n", &[]).convert);
+        // The command line can switch it off and never on.
+        assert!(!build("convert = true\n", &["--no-convert"]).convert);
+        // And it is independent of the format, which is the whole point.
+        let cfg = build("format = \"flac\"\n", &[]);
+        assert_eq!(cfg.format, "flac");
+        assert!(!cfg.convert, "picking a format turned conversion on");
+    }
+
+    /// Written back the same way the format is, so the next start reads it.
+    #[test]
+    fn saving_convert_keeps_the_rest_of_the_file() {
+        let mut file = temp("saveconvert");
+        write!(file.handle, "# mine\nformat = \"flac\"\n").unwrap();
+        save_convert(std::path::Path::new(&file.path), true).unwrap();
+
+        let back = build_at(&file.path);
+        assert!(back.convert);
+        assert_eq!(back.format, "flac");
+        let text = std::fs::read_to_string(&file.path).unwrap();
+        assert!(text.contains("# mine"), "the file was rewritten: {text:?}");
+
+        // And off again, in place rather than appended a second time.
+        save_convert(std::path::Path::new(&file.path), false).unwrap();
+        let text = std::fs::read_to_string(&file.path).unwrap();
+        assert_eq!(text.matches("convert").count(), 1, "{text:?}");
+        assert!(!build_at(&file.path).convert);
+    }
+
+    /// Every format has to name an encoder, or converting to it fails at the
+    /// point somebody is waiting on it rather than here.
+    #[test]
+    fn every_format_names_an_encoder() {
+        for (name, _, codecs) in FORMATS {
+            assert!(!codecs.is_empty(), "{name} has no encoder");
+            assert_eq!(encoders(name), codecs, "{name}");
+        }
     }
 
     /// Reads a config file back through the real parser, which is the only
@@ -548,7 +655,7 @@ mod tests {
        else. Between them there is no input that reaches the unreachable. */
     #[test]
     fn every_format_offered_resolves_and_nothing_else_is_accepted() {
-        for (name, ext) in FORMATS {
+        for (name, ext, _) in FORMATS {
             assert_eq!(extension(name), ext, "{name}");
             assert!(!ext.is_empty(), "{name} has no extension");
             assert_eq!(
@@ -635,12 +742,16 @@ mod tests {
 
         // A key that merely starts with the word is a different key, and a
         // commented-out one is not a key at all.
-        assert!(names_format("format = \"opus\""));
-        assert!(names_format("  \"format\"  = 'mp3'"));
-        assert!(names_format("'format'= 1"));
-        assert!(!names_format("formats = 1"));
-        assert!(!names_format("formatting = 1"));
-        assert!(!names_format("# format = opus"));
+        assert!(names_key("format = \"opus\"", "format"));
+        assert!(names_key("  \"format\"  = 'mp3'", "format"));
+        assert!(names_key("'format'= 1", "format"));
+        assert!(!names_key("formats = 1", "format"));
+        assert!(!names_key("formatting = 1", "format"));
+        assert!(!names_key("# format = opus", "format"));
+        // The same rule has to hold for the second key that goes through it.
+        assert!(names_key("convert = true", "convert"));
+        assert!(!names_key("converted = true", "convert"));
+        assert!(!names_key("format = \"opus\"", "convert"));
     }
 
     /* A config that was already broken is not something the edit did, and

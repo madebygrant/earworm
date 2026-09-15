@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -159,10 +160,24 @@ pub(crate) fn scan_with(bin: &str, cfg: &Config) -> Result<Listing> {
 /// `Skipped` is the one status that also belongs here: it is how the run says
 /// it was never asked for this track, and the archive is what makes yt-dlp
 /// honour that without narrowing the listing the way `--playlist-items` would.
-pub(crate) fn write_archive(tracks: &[Track], path: &Path) -> Result<usize> {
+///
+/// `refetch` names the track indices a conversion wants downloaded again
+/// because their format cannot be converted without stacking a second lossy
+/// generation. Their files are on disk, so without this they would be exactly
+/// the tracks yt-dlp skipped. A parameter rather than a `Status`, because
+/// `counts()` is hand-kept and a variant missing from it does not fail to
+/// compile.
+pub(crate) fn write_archive(
+    tracks: &[Track],
+    path: &Path,
+    refetch: &HashSet<usize>,
+) -> Result<usize> {
     let mut file = std::fs::File::create(path)?;
     let mut count = 0;
     for track in tracks {
+        if refetch.contains(&track.index) {
+            continue;
+        }
         if track.status == Status::Skipped || track.path.as_deref().is_some_and(Path::is_file) {
             writeln!(file, "youtube {}", track.id)?;
             count += 1;
@@ -185,15 +200,26 @@ impl Drop for Download {
     }
 }
 
-pub fn run(cfg: &Config, tracks: &mut [Track], tx: &Sender<Msg>) -> Result<()> {
-    run_with("yt-dlp", cfg, tracks, tx)
+pub fn run(
+    cfg: &Config,
+    tracks: &mut [Track],
+    tx: &Sender<Msg>,
+    refetch: &HashSet<usize>,
+) -> Result<()> {
+    run_with("yt-dlp", cfg, tracks, tx, refetch)
 }
 
 /// Takes the binary for the same reason `scan_with` does: a test that
 /// asserted on a helper building these arguments would leave the call site
 /// free to pass anything, which is how the scan's format came to be right in
 /// the helper and hardcoded at the call.
-fn run_with(bin: &str, cfg: &Config, tracks: &mut [Track], tx: &Sender<Msg>) -> Result<()> {
+fn run_with(
+    bin: &str,
+    cfg: &Config,
+    tracks: &mut [Track],
+    tx: &Sender<Msg>,
+    refetch: &HashSet<usize>,
+) -> Result<()> {
     /* A retry downloads a second time in the same process, and the guard
        removes this whole directory on the way out, so the runs cannot share
        a name. */
@@ -209,7 +235,7 @@ fn run_with(bin: &str, cfg: &Config, tracks: &mut [Track], tx: &Sender<Msg>) -> 
         thumbs: cfg.cover.then(|| scratch.join("thumbs")),
         scratch,
     };
-    write_archive(&*tracks, &guard.archive)?;
+    write_archive(&*tracks, &guard.archive, refetch)?;
     if let Some(dir) = &guard.thumbs {
         std::fs::create_dir_all(dir)?;
     }
@@ -385,7 +411,8 @@ mod tests {
                 &bin,
                 format!(
                     "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\" >> \"{}\"; done\n\
-                     printf 'id1\t1\tTitle\t{}\n'\n",
+                     printf 'id1\t1\tTitle\t{}
+'\n",
                     log.display(),
                     dir.join("music").join("track").display()
                 ),
@@ -453,7 +480,7 @@ mod tests {
             cfg.cover = cover;
             let mut tracks = vec![Track::new(1, "id".into(), "n".into(), dir.join("a.opus"))];
             let (tx, _rx) = std::sync::mpsc::channel();
-            run_with(&bin.display().to_string(), &cfg, &mut tracks, &tx).unwrap();
+            run_with(&bin.display().to_string(), &cfg, &mut tracks, &tx, &HashSet::new()).unwrap();
             let args = std::fs::read_to_string(&log).unwrap_or_default();
             let _ = std::fs::remove_dir_all(&dir);
             args
@@ -493,11 +520,40 @@ mod tests {
         tracks[2].status = Status::Skipped;
 
         let path = dir.join("archive");
-        assert_eq!(write_archive(&tracks, &path).unwrap(), 2);
+        assert_eq!(write_archive(&tracks, &path, &HashSet::new()).unwrap(), 2);
         let body = std::fs::read_to_string(&path).unwrap();
         assert!(body.contains("youtube have"), "{body:?}");
         assert!(body.contains("youtube skip"), "{body:?}");
         assert!(!body.contains("youtube want"), "the run would not fetch it: {body:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* The refetch set is the whole mechanism behind converting an mp3: its
+       file is on disk, so without being left out of the archive it is exactly
+       the track yt-dlp skips, and nothing is ever downloaded again. Read back
+       off the file the download was handed, not off the helper that built it. */
+    #[test]
+    fn a_refetched_track_is_left_out_of_the_archive() {
+        let dir = std::env::temp_dir().join(format!("earworm-refetch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (one, two) = (dir.join("01 - A.mp3"), dir.join("02 - B.opus"));
+        std::fs::write(&one, "audio").unwrap();
+        std::fs::write(&two, "audio").unwrap();
+
+        let tracks = vec![
+            Track::new(1, "stale".into(), "01 - A.mp3".into(), one),
+            Track::new(2, "fine".into(), "02 - B.opus".into(), two),
+        ];
+        let path = dir.join("archive");
+        let refetch = HashSet::from([1usize]);
+        assert_eq!(write_archive(&tracks, &path, &refetch).unwrap(), 1);
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !body.contains("youtube stale"),
+            "the track being converted would have been skipped: {body:?}"
+        );
+        assert!(body.contains("youtube fine"), "{body:?}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

@@ -117,6 +117,13 @@ pub struct Facts<'a> {
     pub apple: bool,
     pub format: &'a str,
     pub extension: &'a str,
+    /// Whether tracks already on disk follow `format` at the next sync.
+    pub convert: bool,
+    /* Files under --dir that are in some other format, and the folders they
+       are spread over. Gathered by the caller, like everything else here, so
+       the report stays testable as the text it is. `None` when the directory
+       is not there to walk. */
+    pub off_format: Option<(usize, usize)>,
     pub dir: &'a Path,
     /// `None` when the directory is not there yet.
     pub playlists: Option<usize>,
@@ -184,6 +191,27 @@ pub fn report(facts: &Facts) -> (String, bool) {
         "format",
         &format!("{} · writes .{}", facts.format, facts.extension),
     ));
+    /* The answer to "did my format change take", which is otherwise one
+       folder at a time. Silent at zero: a row saying nothing is wrong is a
+       row the reader has to check every time. */
+    out.push_str(&row(
+        true,
+        "convert",
+        &match (facts.convert, facts.off_format) {
+            (false, Some((n, folders))) if n > 0 => format!(
+                "off · {n} tracks in {folders} playlists are not {}",
+                facts.format
+            ),
+            (false, _) => "off · tracks already on disk keep their format".into(),
+            (true, Some((0, _)) | None) => {
+                format!("on · everything under --dir is already {}", facts.format)
+            }
+            (true, Some((n, folders))) => format!(
+                "on · {n} tracks in {folders} playlists become {} at the next sync",
+                facts.format
+            ),
+        },
+    ));
     let dir = facts.dir.display();
     out.push_str(&match facts.playlists {
         Some(1) => row(true, "directory", &format!("{dir} · 1 playlist")),
@@ -231,6 +259,8 @@ mod tests {
             config_exists: false,
             key: true,
             format: "opus",
+            convert: false,
+            off_format: Some((0, 0)),
             extension: "opus",
             dir,
             playlists: Some(7),

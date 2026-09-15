@@ -41,12 +41,13 @@ call and file write. Nothing that blocks touches the render loop.
 - **A worker panic must not hang the UI.** The event loop treats
   `TryRecvError::Disconnected` as fatal, not as "no messages yet".
 - **`Status` must be `settled()` for the run to finish.** A terminal status
-  missing from that list hangs the UI forever. `settled()` is an exhaustive
-  match, so a new variant fails to compile there; `App::counts()` is a
-  hand-kept array and does not, which is exactly where `Skipped` was first
-  missed. A settled status absent from `counts()` is counted in the header's
-  total and left out of the tally beside it, and the two disagree with nothing
-  saying why.
+  missing from that list hangs the UI forever, and `settled()` is an
+  exhaustive match so a new variant fails to compile there. The tally beside
+  the header used to be the other half of this trap, read off a hand-kept
+  array that a new variant did not break: that is where `Skipped` was first
+  missed, counted in the header's total and absent from the tally with nothing
+  saying why. `counts()` is built from the tracks now and `tally()` is
+  exhaustive too, so both ends fail to compile rather than going quiet.
 - **`Msg::Quit` exists so cancelling the first URL prompt ends the tool.** The
   worker drops its sender straight after, so `main`'s disconnect branch has to
   check `app.quit` before deciding the worker died.
@@ -343,10 +344,174 @@ call and file write. Nothing that blocks touches the render loop.
   almost anything, so the test that covers this asks for an mp3 with
   `-id3v2_version 0 -write_id3v1 0` and asserts at least one fixture arrived
   untagged.
-- **Changing the format converts nothing.** The manifest records each track by
-  the filename it has, so those tracks stay downloaded and stay as they are,
-  and a folder switched part-way holds both. Re-fetching them would be a far
-  more expensive guess than leaving them alone.
+- **The `.m3u8` moves with the sidecar, per track, or a half-converted folder
+  reads as a folder full of departures.** `write_playlist` runs once at the
+  end of the pass and builds the file from the tracks that are `listed`,
+  which nothing is until the tagging pass sets it, so it cannot simply be
+  called earlier. Quitting part-way through a conversion therefore left the
+  playlist naming the old filenames, and `mark_departed` matches names: every
+  converted track failed while the unconverted ones still matched, which is
+  exactly enough to get past the "nothing matched, believe none of it" guard,
+  so each converted track was called `Gone`. Renumbered past the playlist,
+  never tagged again, refused a rename, dropped from the next playlist
+  written. `repoint_playlist` renames the one entry, between the rename and
+  the removal of the old file so the playlist never names a file that is not
+  there. Reproduced on a real folder: six of twelve converted, six dead
+  entries, six departures.
+- **`mark_departed` matches the stem, not the whole filename.** A conversion
+  changes a track's extension and nothing else, and the playlist cannot be
+  kept in step atomically: `repoint_playlist` narrows the gap to one track and
+  one instant, and this is what makes even that harmless. Two files differing
+  only by extension both match one entry, which errs towards calling nothing
+  departed, and that is the safe answer here for the same reason the guard
+  below it gives.
+- **`lookup::stop` is `ytdlp::stop` for everything else, and it latches.** A
+  transcode is minutes of ffmpeg writing into the user's playlist folder, so
+  quitting without it left an orphan running after the terminal was restored.
+  The registration lives inside `run_bounded`, with the waiting, rather than
+  at each call site. The latch is the half that is not obvious: killing the
+  child makes the call return a failure, and a failure is what makes
+  `transcode` try the next encoder in its list, so the shutdown killed one
+  ffmpeg and the next line spawned another that nothing was left to kill. It
+  also closes the gap between a loop's cancel check and the spawn a few lines
+  later. Verified by hand, like `ytdlp::stop`, which has no test either: 417ms
+  and a SIGTERM against a 60s bound, and the retry refused in microseconds.
+  **Nothing in the suite may call it.** It is process-wide and never cleared,
+  so one call makes every bounded subprocess after it in that binary return
+  `None`, which is the trap the colour depth already documents.
+- **A killed transcode's scratch file is swept, not overwritten.** The kill
+  comes from the shutdown path, so the loop never reaches the cleanup in its
+  own error arm. Writing the same name again covers only a repeat of the same
+  track into the same format, and changing format in between strands a
+  multi-megabyte file in the music folder for good. `sweep_scratch` matches
+  earworm's own hidden `SCRATCH` prefix, so it can never take a file somebody
+  else put there, and one constant names it for both the writer and the sweep.
+- **Changing the format converts nothing. `convert` is what does, and only a
+  sync.** The manifest records each track by the filename it has, so those
+  tracks stay downloaded and a folder switched part-way holds both. That is
+  the guarantee `format` makes and it cannot be the one that breaks it: a
+  plain menu pick that rewrote the library would turn one keystroke into an
+  unattended rewrite of every folder under `--dir` the next time cron ran a
+  resync. So `convert` is a second key, off by default, and it is the one
+  setting here that does not go through `off`: `opt_in` is the same rule
+  about the command line only ever switching something off, defaulting the
+  other way. `set_format` asks about it straight after a format pick, since
+  that is the one moment the question is in the user's head, and never when
+  it is already on.
+- **The conversion lives in `pipeline`, so `--resync` and a URL run get it
+  the same way.** Opening a folder from the library converts nothing: that
+  path is offline and read-only by design. `to_bring` is empty whenever
+  `convert` is off, which is the single point the promise above rests on.
+- **`bring` is decided before the download and nowhere else.** That is the
+  last moment at which every track either holds the file an earlier run left
+  or holds nothing at all; the `@D` line overwrites `track.path` for anything
+  yt-dlp fetches, so the old path has to have been remembered by then. Only
+  `Have` is considered: `Gone` holds no playlist position and its index is
+  synthetic, `Skipped` was never fetched, `Pending` is about to arrive in the
+  target format anyway.
+- **`bestaudio` on YouTube is the Opus stream, and the whole conversion table
+  follows from that.** Measured with `yt-dlp -f bestaudio --print
+  %(acodec)s`: itag 251, Opus in WebM, with the AAC stream (itag 140) present
+  and not chosen. So `--audio-format opus` copies what it already has, which
+  `ffprobe` confirms on a real download: the file tags `ENCODER=Lavf`, the
+  muxer, where a re-encode names the encoder instead, and the bitrate is
+  YouTube's itag rather than an ffmpeg default. Every other format is ffmpeg
+  re-encoding that same Opus, **`m4a` included**: an earworm `.m4a` is not
+  YouTube's AAC, it is Opus transcoded to AAC. That makes `m4a`, `mp3` and
+  `vorbis` on disk two generations deep where `opus`, `flac` and `alac` are
+  one, and it is why `m4a` is refetched rather than converted. It is also why
+  an `opus` *target* is refetched from anything: a download remuxes, so it
+  costs one generation against the two any conversion would. The first
+  version of this table had both wrong, on the assumption that a container
+  YouTube serves is a container yt-dlp picks.
+- **`alac` and `m4a` share an extension, so the codec has to be read.**
+  Without `tag::mp4_format` an AAC file sits untouched in a folder being
+  brought to alac and an alac file does the same going the other way, because
+  both are already `.m4a` on disk. `None` from it is a real "cannot tell" and
+  the track is left alone: falling back to the extension would pick one of
+  the two at random and re-encode on no evidence. The library's `off_format`
+  count *does* fall back to the extension, and says so, because counting from
+  a filename is the whole reason it costs no disk.
+- **A refetch is left out of the archive, not given a `Status`.**
+  `write_archive` names every id whose file exists, so an mp3 being converted
+  is exactly the track yt-dlp would skip. A `Status::Refetch` would have to be
+  added to `counts()` by hand, which is how `Skipped` came to be counted in
+  the header total and missing from the tally beside it.
+- **A converted track goes back to `Have`, never through `identify`.** The
+  tags come off the old file and are written onto the new one, so sending it
+  to the lookup afterwards would replace a hand-typed correction with a guess.
+  `tag_tracks`'s `Have` branch keeps a `source` the same pass already set, or
+  "on disk" overwrites the one word saying this run rewrote the file.
+- **Nothing is deleted until the replacement has been read back.** A video
+  pulled from YouTube since the first download cannot be fetched again. The
+  read-back is load-bearing only when the old file has no readable tags:
+  otherwise writing them onto a bad replacement fails first and the swap ends
+  there anyway, which is what made the first version of that test pass against
+  its own bug.
+- **The replacement has to be the format that was asked for, not merely
+  readable.** On the refetch path it is whatever yt-dlp wrote, so a
+  postprocessor falling back to the source container would be renamed,
+  recorded in the sidecar and reported as converted while being nothing of
+  the kind, and `format_on_disk` would then say `Leave` about it on every
+  later sync: the row claims success for good. The target name takes its
+  extension from `config::extension` for the same reason.
+- **`swap_in` hands the old file back rather than removing it, and the caller
+  moves the sidecar first.** Killed in between, the manifest names the
+  replacement, which is on disk, and the next sync sees a track already in the
+  target format and leaves it alone. Removed first, the manifest names a file
+  that has gone.
+- **A name already taken is this pass's own leftover unless a track holds
+  it.** An interrupted swap renames the replacement into place and dies before
+  the sidecar moves, so refusing every collision wedged the track: every later
+  sync planned the same conversion, hit the guard, and on the refetch path
+  fetched a file and threw it away, for good. `files_held` is what tells the
+  two apart, the replacement is logged when it happens, and the refusal names
+  the next step because the reader otherwise has to work out that renaming one
+  of them is the answer.
+- **The pick gate governs the conversion too.** It only ever marks unpicked
+  `Pending` tracks `Skipped`, which says nothing about what is already on
+  disk, so a run where somebody asked for two new tracks also re-downloaded
+  every mp3 in the folder with nothing on that screen mentioning it.
+  `ask_which` returns its answer and `to_bring` honours it. `--resync` passes
+  no gate and so converts the whole folder, which is the point of it.
+- **Both halves report what they could not do.** A folder where every
+  transcode failed for want of an encoder reported as a clean sync, because
+  only the successes were counted. The refetch half separates "never arrived"
+  from "arrived and could not be used": one message covering both told the
+  reader the wrong one half the time.
+- **The swap renames over the old file rather than removing it first.**
+  `fs::rename` replaces atomically, so the `alac`-over-`m4a` case never has a
+  moment with no file in it. An earlier version removed the old one first for
+  no gain.
+- **Tags go on through lofty, never ffmpeg's `-map_metadata`.** `with_tag`
+  knows which tag type each container takes; ffmpeg's field mapping across
+  containers is inconsistent in exactly the way this codebase has already paid
+  for once. `-vn` drops the picture for the same reason and `set_cover` puts
+  it back.
+- **A lossy source never becomes a 24-bit lossless file.** ffmpeg decodes
+  opus to float and then writes 24-bit flac or alac, which is twice the size
+  to store the decoder's own rounding: on a real folder that was 436MB against
+  235MB for the same audio. Forced only when the source format is known and
+  lossy, so a genuinely deeper file is not quietly flattened. The two encoders
+  disagree about the spelling and each refuses the other's, `s16` for flac and
+  `s16p` for alac.
+- **`FORMATS` carries the encoders, and the fixtures read the same column.**
+  The name is not the same on every ffmpeg build, which is not hypothetical:
+  this machine has no `libvorbis` and falls through to the native `vorbis`.
+  A second copy of that list in the test file is one that goes stale.
+- **`transcode` writes its stderr to a file, not a pipe.** `run_bounded` polls
+  `try_wait` and drains nothing until the child has exited, so a pipe that
+  fills its buffer hangs ffmpeg until the deadline kills it. Its stdin is
+  `null` as well, and so is `shrink`'s: an inherited one lets ffmpeg read the
+  terminal earworm is holding in raw mode and eat the keys meant for the UI.
+- **`counts()` is built from the tracks, not from a list of statuses.**
+  `tally()` is exhaustive and decides both whether a status is counted and
+  where it sits, so a new one is either given a column or deliberately left
+  out and neither can be forgotten. The first attempt kept a hand-kept
+  `TALLY` array and read it here, which still compiled with a variant missing
+  and still dropped a whole column: proved by adding one. `TALLY` is now
+  `#[cfg(test)]` and nothing in the running tool reads it, so forgetting an
+  entry costs coverage rather than correctness.
 - **`save_format` edits one line and re-parses before writing.** The config is
   hand-edited, so rebuilding it from the parsed struct would drop every
   comment. A file earworm can no longer read is worse than one that never
