@@ -223,11 +223,13 @@ fn names_format(line: &str) -> bool {
         .is_some_and(|rest| rest.trim_start().starts_with('='))
 }
 
-/* Written beside the config and renamed over it, so a reader sees either the
+/* Written beside the target and renamed over it, so a reader sees either the
    whole old file or the whole new one. `fs::write` truncates first, and a
-   crash or a full disk between the truncate and the write leaves a config the
-   next start refuses to read. */
-fn write_atomically(path: &std::path::Path, text: &str) -> Result<()> {
+   crash or a full disk between the truncate and the write leaves a file the
+   next start refuses to read. Shared with the update cache: one answer to
+   "how does earworm replace a file it owns", or the weaker one gets copied
+   into the next place that cannot afford it. */
+pub fn write_atomically(path: &std::path::Path, text: &str) -> Result<()> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
     }

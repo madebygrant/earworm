@@ -200,6 +200,18 @@ fn run(
         {
             match update_rx.try_recv() {
                 Ok(latest) => {
+                    /* The intro is the notice's only drawn surface, and
+                       `intro = false` is a supported setting: without this
+                       the probe runs, writes its cache and throws the answer
+                       away, which is the one thing a separate `update_check`
+                       key says the user did not ask for. Said once, when it
+                       arrives, rather than parked on a bar it would nag from.
+                       Not while the intro is up, which is about to say it. */
+                    if !app.intro() {
+                        app.say(format!(
+                            "v{latest} is out  ·  earworm --check has the command"
+                        ));
+                    }
                     app.update = Some(latest);
                     update_taken = true;
                 }
@@ -305,7 +317,14 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         app.show_help = false;
         return;
     }
-    if app.view == View::Library {
+    /* Before the filter box, because both screens share it and the search
+       screen is the one that is unusable without it: `/` there edits the
+       query the list is built from rather than narrowing a list. */
+    if app.view == View::Found && !app.typing_filter {
+        handle_found_key(app, code, mods);
+        return;
+    }
+    if app.view == View::Library && !app.typing_filter {
         handle_library_key(app, code, mods);
         return;
     }
@@ -408,6 +427,38 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     }
 }
 
+/* Movement and the filter box are the same keys as everywhere else. Enter is
+   the only one that means something new: it opens the folder the result is in
+   and puts the cursor on the track, which is the whole point of the screen. */
+fn handle_found_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    match code {
+        KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.quit = true,
+        KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
+        KeyCode::Char('q') => app.quit = true,
+        /* Back to the library rather than out: the search is a step from it,
+           and Esc unwinds one step everywhere else in the tool. The query is
+           kept, since it is what narrowed the folder list too. */
+        KeyCode::Esc => app.view = View::Library,
+        KeyCode::Char('/') => app.typing_filter = true,
+        KeyCode::Char('l') => app.show_logs = !app.show_logs,
+        KeyCode::Char('j') | KeyCode::Down => app.found_step(true),
+        KeyCode::Char('k') | KeyCode::Up => app.found_step(false),
+        KeyCode::PageDown => app.page_found(true),
+        KeyCode::PageUp => app.page_found(false),
+        KeyCode::Char('d') if mods.contains(KeyModifiers::CONTROL) => app.page_found(true),
+        KeyCode::Char('u') if mods.contains(KeyModifiers::CONTROL) => app.page_found(false),
+        KeyCode::Char('g') => app.found_jump(false),
+        KeyCode::Char('G') => app.found_jump(true),
+        KeyCode::Enter if app.can_find() => {
+            if let Some((shelf, (name, _))) = app.found_at() {
+                let (folder, name) = (shelf.path.clone(), name.clone());
+                app.send(Cmd::Open(folder, Some(name)));
+            }
+        }
+        _ => {}
+    }
+}
+
 /* `y`, `q` and Enter all mean yes, so a second `q` answers the question the
    first one raised and nobody who meant it has to read the box. Everything
    else means no: this is the guard on the one key that can still lose work,
@@ -466,6 +517,13 @@ fn handle_pick_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
    Enter only puts the keys back; the filter itself stays until Esc. */
 fn handle_filter_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     match code {
+        /* The search screen is its query, so clearing it leaves a list of
+           nothing with the box still open: one Esc goes back to the library
+           the search was started from, which is what the empty pane says. */
+        KeyCode::Esc if app.view == View::Found => {
+            app.clear_filter();
+            app.view = View::Library;
+        }
         KeyCode::Esc => app.clear_filter(),
         KeyCode::Enter => app.typing_filter = false,
         KeyCode::Char('u') if mods.contains(KeyModifiers::CONTROL) => {
@@ -510,6 +568,11 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         // Twenty folders is a page and sixty is a search, and the box is the
         // one the track list already uses.
         KeyCode::Char('/') => app.typing_filter = true,
+        /* The same query as the row filter, asked of the tracks instead of
+           the folders. The rows say which folders hold a match and the
+           preview says which tracks one folder at a time; this is the whole
+           library at once, which is what fifty folders needs. */
+        KeyCode::Char('t') if app.can_browse() => app.find_tracks(),
         /* Name is what the worker hands over; the other two answer the
            question this screen is for, which is what needs syncing. */
         KeyCode::Char('o') => {
@@ -528,7 +591,7 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('G') => app.shelf_jump(true),
         KeyCode::Enter if app.can_browse() => {
             if let Some(folder) = app.selected_shelf().map(|s| s.path.clone()) {
-                app.send(Cmd::Open(folder));
+                app.send(Cmd::Open(folder, None));
             }
         }
         /* Free here, unlike on the track list where it marks a row, and this
@@ -900,6 +963,103 @@ mod tests {
         // And the bare key still means undo, which is the arm being guarded.
         handle_key(&mut app, KeyCode::Char('u'), KeyModifiers::NONE);
         assert_eq!(cmds.try_iter().count(), 1, "the guard took the undo as well");
+    }
+
+    fn browsing(shelves: Vec<crate::app::Shelf>) -> (App, mpsc::Receiver<Cmd>) {
+        let (tx, cmds) = mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        app.apply(app::Msg::Library {
+            shelves,
+            show: true,
+        });
+        (app, cmds)
+    }
+
+    fn shelf(name: &str, files: &[&str]) -> crate::app::Shelf {
+        crate::app::Shelf {
+            path: std::path::PathBuf::from("/music").join(name),
+            name: name.into(),
+            url: "u".into(),
+            tracks: files.len(),
+            missing: 0,
+            synced: None,
+            files: files.iter().map(|f| ((*f).to_string(), true)).collect(),
+        }
+    }
+
+    /* `/` on the library put the band up and then sent every letter to the
+       library keys, so typing "no" cycled the sort and `e` opened a rename:
+       the box could be opened and never filled. The screens' own keys have to
+       yield to it, exactly as the track list's already did. */
+    #[test]
+    fn the_filter_box_takes_the_keys_on_the_library_too() {
+        let (mut app, cmds) = browsing(vec![shelf("Focus", &["01 A.opus"])]);
+        handle_key(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
+        assert!(app.typing_filter);
+
+        for c in "neo".chars() {
+            handle_key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        assert_eq!(app.filter, "neo", "the letters went to the library keys");
+        // `o` is the sort key and `e` is rename, and neither may have fired.
+        assert_eq!(app.sort, crate::app::Sort::Name);
+        assert!(cmds.try_recv().is_err(), "typing sent a command");
+
+        // Enter keeps the query and hands the keys back to the screen.
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(!app.typing_filter);
+        handle_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE);
+        assert_eq!(app.sort, crate::app::Sort::Synced, "the keys did not come back");
+    }
+
+    /* The whole point of the screen: it names the folder, and Enter opens it
+       at the track rather than at the top of a forty-row playlist. */
+    #[test]
+    fn enter_on_a_search_result_opens_its_folder_at_that_track() {
+        let (mut app, cmds) = browsing(vec![
+            shelf("Focus", &["01 Eno - Ascent.opus"]),
+            shelf("Sleep", &["01 Neu! - Weissensee.opus"]),
+        ]);
+        app.filter = "weissensee".into();
+        handle_key(&mut app, KeyCode::Char('t'), KeyModifiers::NONE);
+        assert_eq!(app.view, View::Found);
+
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        match cmds.try_recv() {
+            Ok(Cmd::Open(folder, Some(name))) => {
+                assert_eq!(folder, std::path::Path::new("/music/Sleep"));
+                // The filename, since only the worker can turn it into an
+                // index: `open_shelf` numbers from the name and renumbers
+                // around departures.
+                assert_eq!(name, "01 Neu! - Weissensee.opus");
+            }
+            _ => panic!("no command, or one that did not open the folder at the track"),
+        }
+    }
+
+    /* Esc unwinds one step everywhere else, and the search is a step from the
+       library. Ending the session from here would be the behaviour that Esc
+       was taken off the track list for. */
+    #[test]
+    fn escape_leaves_the_search_for_the_library_and_never_the_session() {
+        let (mut app, _cmds) = browsing(vec![shelf("Focus", &["01 Neu! - Hallogallo.opus"])]);
+        app.filter = "neu".into();
+        handle_key(&mut app, KeyCode::Char('t'), KeyModifiers::NONE);
+
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.view, View::Library);
+        assert!(!app.quit);
+        assert_eq!(app.filter, "neu", "Esc took the query the folder list uses too");
+
+        /* From inside the box it is one Esc, not two: the screen is its
+           query, so clearing it would leave a list of nothing on screen. */
+        handle_key(&mut app, KeyCode::Char('t'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.view, View::Library);
+        assert!(app.filter.is_empty());
+        assert!(!app.quit);
     }
 
     /* The guard on the one key that can still lose work, so an unrecognised

@@ -6,6 +6,7 @@ use lofty::config::WriteOptions;
 use lofty::file::{AudioFile, TaggedFile, TaggedFileExt};
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::probe::Probe;
+use lofty::tag::items::Timestamp;
 use lofty::tag::{Accessor, Tag, TagExt};
 
 use crate::app::{Asker, Status};
@@ -39,7 +40,21 @@ pub struct Info {
     pub artist: String,
     pub title: String,
     pub album: String,
+    /// `None` is a file with no year tag, which is not the same as a year of
+    /// zero: one is unknown and the other is a claim.
+    pub year: Option<u16>,
     pub duration: u64,
+}
+
+/* What an edit writes. Album and year travel beside artist and title because
+   `set_fields` writes the whole set: a caller changing one has to carry the
+   others, or a swap would silently drop the album off every track it touched. */
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Fields {
+    pub artist: String,
+    pub title: String,
+    pub album: String,
+    pub year: Option<u16>,
 }
 
 fn open(path: &Path) -> Result<TaggedFile> {
@@ -56,6 +71,9 @@ pub fn read(path: &Path) -> Result<Info> {
         artist: tag.and_then(|t| t.artist()).unwrap_or_default().to_string(),
         title: tag.and_then(|t| t.title()).unwrap_or_default().to_string(),
         album: tag.and_then(|t| t.album()).unwrap_or_default().to_string(),
+        /* `date` reads the full recording date and falls back to a bare
+           year, which is the only one of the two earworm ever writes. */
+        year: tag.and_then(|t| t.date()).map(|d| d.year),
         duration: file.properties().duration().as_secs(),
     })
 }
@@ -89,10 +107,31 @@ pub fn set_album(path: &Path, album: &str) -> Result<()> {
     with_tag(path, |tag| tag.set_album(album.to_string()))
 }
 
-pub fn set_fields(path: &Path, artist: &str, title: &str) -> Result<()> {
+pub fn set_fields(path: &Path, fields: &Fields) -> Result<()> {
     with_tag(path, |tag| {
-        tag.set_artist(artist.to_string());
-        tag.set_title(title.to_string());
+        tag.set_artist(fields.artist.clone());
+        tag.set_title(fields.title.clone());
+        /* Removed rather than set to nothing: lofty writes an empty album as
+           a present-but-blank frame, which reads back as a tagged file whose
+           album happens to be "" and stops `tag_tracks` filling it in. */
+        if fields.album.is_empty() {
+            tag.remove_album();
+        } else {
+            tag.set_album(fields.album.clone());
+        }
+        /* A date with only a year in it, which is what the box asks for and
+           what every source earworm has gives. Written through `set_date`
+           because lofty has no year of its own: it keys the bare `Year` field
+           and the full recording date to the same accessor. */
+        match fields.year {
+            Some(year) => tag.set_date(Timestamp {
+                year,
+                ..Timestamp::default()
+            }),
+            None => {
+                tag.remove_date();
+            }
+        }
     })
 }
 
@@ -349,7 +388,7 @@ fn choose_artist(asker: &Asker, index: usize, old: &str, new: &str) -> (String, 
 
 #[cfg(test)]
 mod tests {
-    use super::{image_extension, open, read, set_fields};
+    use super::{Fields, image_extension, open, read, set_fields};
     use std::path::{Path, PathBuf};
 
     /* Silent, untagged and in whatever container the codec implies, which is
@@ -414,9 +453,19 @@ mod tests {
             if open(&file).unwrap().primary_tag().is_none() {
                 untagged.push(format);
             }
-            set_fields(&file, "Kraftwerk", "Autobahn").unwrap_or_else(|e| panic!("{ext}: {e}"));
+            let fields = Fields {
+                artist: "Kraftwerk".into(),
+                title: "Autobahn".into(),
+                album: "Autobahn".into(),
+                year: Some(1974),
+            };
+            set_fields(&file, &fields).unwrap_or_else(|e| panic!("{ext}: {e}"));
             let back = read(&file).unwrap();
             assert_eq!((back.artist.as_str(), back.title.as_str()), ("Kraftwerk", "Autobahn"), "{ext}");
+            /* Album and year go into the same tag block, so every container
+               that takes the first two has to take these as well. */
+            assert_eq!(back.album, "Autobahn", "{ext}");
+            assert_eq!(back.year, Some(1974), "{ext}");
         }
         /* The branch under test only runs for a file with no tag, so a
            fixture that arrives tagged would pass while saying nothing. */

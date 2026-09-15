@@ -1,6 +1,6 @@
 use std::path::Path;
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 
@@ -20,6 +20,46 @@ const ACOUSTID_MIN_SCORE: f64 = 0.8;
 const ACOUSTID_DELAY: Duration = Duration::from_millis(340);
 const DEEZER_DELAY: Duration = Duration::from_millis(200);
 const ITUNES_DELAY: Duration = Duration::from_millis(200);
+
+/* What these services ask for is a gap between requests, and a request that
+   took longer than the gap has already served it. Sleeping afterwards paid it
+   twice: on a slow connection most of the tagging pass was a sleep on top of
+   a wait that had already happened. Held as the earliest moment the next
+   request may leave, so time on the wire counts toward it. */
+struct Limiter {
+    next: Mutex<Option<Instant>>,
+    gap: Duration,
+}
+
+impl Limiter {
+    const fn new(gap: Duration) -> Self {
+        Self {
+            next: Mutex::new(None),
+            gap,
+        }
+    }
+
+    /// Called before the request, not after: a limiter that paces on the way
+    /// out cannot know how long the call it is pacing took.
+    fn wait(&self) {
+        let now = Instant::now();
+        // Claimed under the lock and slept outside it, so the slot this call
+        // took is spoken for while it waits and callers cannot share one.
+        let at = {
+            let mut next = self.next.lock().unwrap();
+            let at = next.map_or(now, |at| at.max(now));
+            *next = Some(at + self.gap);
+            at
+        };
+        if let Some(pause) = at.checked_duration_since(now) {
+            sleep(pause);
+        }
+    }
+}
+
+static ACOUSTID_RATE: Limiter = Limiter::new(ACOUSTID_DELAY);
+static DEEZER_RATE: Limiter = Limiter::new(DEEZER_DELAY);
+static ITUNES_RATE: Limiter = Limiter::new(ITUNES_DELAY);
 
 // ureq has no timeout by default, and a stalled lookup would hang the worker
 // with no way to skip the track.
@@ -128,9 +168,8 @@ pub fn acoustid(path: &Path, key: &str) -> Option<Match> {
         encode(key),
         encode(&code)
     );
-    let data = get_json(&url);
-    sleep(ACOUSTID_DELAY);
-    let data = data?;
+    ACOUSTID_RATE.wait();
+    let data = get_json(&url)?;
     if data.get("status").and_then(Value::as_str) != Some("ok") {
         return None;
     }
@@ -194,8 +233,8 @@ pub fn deezer(artist: &str, title: &str) -> Option<Match> {
     if query.is_empty() {
         return None;
     }
+    DEEZER_RATE.wait();
     let data = get_json(&format!("{DEEZER_URL}?q={}&limit=1", encode(query)));
-    sleep(DEEZER_DELAY);
     let hit = data?.get("data")?.as_array()?.first()?.clone();
     Some(Match {
         title: hit.get("title")?.as_str()?.to_string(),
@@ -259,11 +298,11 @@ pub fn itunes(artist: &str, title: &str) -> Option<Match> {
     if query.is_empty() {
         return None;
     }
+    ITUNES_RATE.wait();
     let data = get_json(&format!(
         "{ITUNES_URL}?term={}&media=music&entity=song&limit=1",
         encode(query)
     ));
-    sleep(ITUNES_DELAY);
     let hit = data?.get("results")?.as_array()?.first()?.clone();
     itunes_match(&hit)
 }
@@ -324,8 +363,8 @@ pub fn artwork(artist: &str, title: &str, mbid: Option<&str>, apple: bool) -> Ve
     let query = format!("{artist} {title}");
     let query = query.trim();
     if !query.is_empty() {
+        DEEZER_RATE.wait();
         if let Some(data) = get_json(&format!("{DEEZER_URL}?q={}&limit=8", encode(query))) {
-            sleep(DEEZER_DELAY);
             for hit in data.get("data").and_then(Value::as_array).unwrap_or(&vec![]) {
                 let album = hit.get("album");
                 let (Some(name), Some(url)) = (
@@ -341,13 +380,15 @@ pub fn artwork(artist: &str, title: &str, mbid: Option<&str>, apple: bool) -> Ve
                 );
             }
         }
+        if apple {
+            ITUNES_RATE.wait();
+        }
         if apple
             && let Some(data) = get_json(&format!(
                 "{ITUNES_URL}?term={}&media=music&entity=song&limit=8",
                 encode(query)
             ))
         {
-            sleep(ITUNES_DELAY);
             for hit in data
                 .get("results")
                 .and_then(Value::as_array)
@@ -506,6 +547,46 @@ pub fn downgrades(new: &str, old: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /* The gap these services ask for is between requests, so a request that
+       took longer than the gap has already served it. Sleeping afterwards
+       paid it twice, which on a slow connection was most of a tagging pass. */
+    #[test]
+    fn a_request_that_outlasts_the_gap_does_not_wait_again() {
+        let limiter = Limiter::new(Duration::from_millis(60));
+
+        // Nothing has gone out yet, so the first call owes nothing.
+        let at = Instant::now();
+        limiter.wait();
+        assert!(at.elapsed() < Duration::from_millis(40), "{:?}", at.elapsed());
+
+        // Straight afterwards the whole gap is still owed.
+        let at = Instant::now();
+        limiter.wait();
+        assert!(at.elapsed() >= Duration::from_millis(55), "{:?}", at.elapsed());
+
+        // And a call that took longer than the gap has already paid it.
+        sleep(Duration::from_millis(80));
+        let at = Instant::now();
+        limiter.wait();
+        assert!(at.elapsed() < Duration::from_millis(40), "{:?}", at.elapsed());
+    }
+
+    /* The rate is the service's, not one thread's. Holding it across callers
+       is what would make a pool over these lookups safe: the slot is claimed
+       under the lock, so two threads cannot be handed the same one. */
+    #[test]
+    fn the_rate_is_shared_by_everything_that_asks_for_it() {
+        static SHARED: Limiter = Limiter::new(Duration::from_millis(60));
+        let at = Instant::now();
+        std::thread::scope(|scope| {
+            for _ in 0..3 {
+                scope.spawn(|| SHARED.wait());
+            }
+        });
+        // Three requests at one per 60ms is 120ms of gap, whoever asks.
+        assert!(at.elapsed() >= Duration::from_millis(110), "{:?}", at.elapsed());
+    }
 
     #[test]
     fn splits_without_panicking_on_length_changing_lowercase() {

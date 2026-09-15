@@ -111,6 +111,11 @@ pub struct Track {
     pub percent: u16,
     pub artist: String,
     pub title: String,
+    /// Written by the lookup or typed into the edit form. Not on the row,
+    /// which has no column to spare, but the form prefills from it and the
+    /// detail pane shows it.
+    pub album: String,
+    pub year: Option<u16>,
     pub duration: u64,
     pub mbid: Option<String>,
     /// Carries a playlist entry, so an edit can rewrite the .m3u8 in order.
@@ -129,6 +134,8 @@ impl Track {
             source: String::new(),
             note: String::new(),
             percent: 0,
+            album: String::new(),
+            year: None,
             artist: String::new(),
             title: String::new(),
             duration: 0,
@@ -212,6 +219,10 @@ impl Watch {
 pub enum View {
     Tracks,
     Library,
+    /// Every track in the library whose filename matches the filter, flat,
+    /// with the folder each one sits in. The library screen narrows to the
+    /// folders holding a match; this says which tracks they are.
+    Found,
 }
 
 /// Work the UI asks of the worker once the run itself has finished.
@@ -224,8 +235,11 @@ pub enum Cmd {
     Search(usize),
     /// Load a library row from its manifest, with no network behind it. The
     /// folder and not the row: the worker re-reads the library, and a row
-    /// position would then name whatever had moved into it.
-    Open(PathBuf),
+    /// position would then name whatever had moved into it. The filename is
+    /// the track to land on, for a folder opened from a search result: only
+    /// the worker knows what index that file ends up with, since `open_shelf`
+    /// numbers from the filename and renumbers around departures.
+    Open(PathBuf, Option<String>),
     /// Sync the playlist that is open, from the URL its manifest recorded.
     SyncOne,
     ResyncAll,
@@ -359,6 +373,14 @@ pub enum Msg {
         note: Option<String>,
         name: Option<String>,
     },
+    /* Its own message rather than two more fields on `Update`: album and
+       year change only when somebody edits them, where `Update` is sent for
+       every status the run passes through. Same reason `Path` is separate. */
+    Meta {
+        index: usize,
+        album: String,
+        year: Option<u16>,
+    },
     Path {
         index: usize,
         path: PathBuf,
@@ -400,6 +422,10 @@ pub enum Msg {
     /// on the first. The finish menu's answer to "what now" when the run left
     /// guesses behind.
     Review,
+    /// Put the cursor on one track, for a folder opened at a search result.
+    /// Following would drag it off again at the next progress message, so it
+    /// goes off here rather than at the keypress that has no run behind it.
+    Focus(usize),
     /// Nothing to report and nothing to look at, so close the UI outright.
     Quit,
 }
@@ -564,6 +590,30 @@ pub fn scroll_to(offset: usize, at: usize, len: usize, height: usize) -> usize {
     offset.clamp(lowest, highest)
 }
 
+/* A folder is on the list for its own name or for a track inside it. The
+   names come free, but the filenames are the only way to answer "which
+   playlist has that track" without opening folders one at a time, and
+   `Shelf.files` is already in memory from the stat pass `library` does.
+   Short-circuited on the name, and the filenames are lowercased per call
+   rather than kept twice: this runs over every folder on every frame, and a
+   second copy of every filename in the library is the costlier of the two. */
+pub fn shelf_matches(shelf: &Shelf, needle: &str) -> bool {
+    shelf.name.to_lowercase().contains(needle)
+        || shelf
+            .files
+            .iter()
+            .any(|(name, _)| name.to_lowercase().contains(needle))
+}
+
+/* The two boxes `^s` swaps, by label rather than by position: the edit form
+   grew album and year after these, and swapping 0 and 1 would only have gone
+   on working by accident. Shared with the draw, so the key and the hint that
+   advertises it cannot disagree about whether this form has them. */
+pub fn swappable(fields: &[(String, String)]) -> Option<(usize, usize)> {
+    let at = |want: &str| fields.iter().position(|(label, _)| label == want);
+    Some((at("artist")?, at("title")?))
+}
+
 /// Library order. Name is what the worker hands over, so it is the one that
 /// costs nothing; the other two answer "which of these needs a sync".
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -653,10 +703,15 @@ pub struct App {
     pub fields: Vec<String>,
     /// Which box has the keys.
     pub field: usize,
+    /* Which result the search screen is on, as the pair that names it rather
+       than a row number: `found_rows` is recomputed from the filter like
+       every other view, and a sync can rebuild the library underneath it. */
+    pub found: Option<(usize, usize)>,
     /// Where each list last started drawing from. Held across frames so the
     /// rows only move when the cursor approaches an edge.
     pub scroll: usize,
     pub shelf_scroll: usize,
+    pub found_scroll: usize,
     /// Messages that arrived while one was still being read.
     waiting: std::collections::VecDeque<String>,
     /// A question the UI raised itself, waiting on y or n.
@@ -718,8 +773,10 @@ impl App {
             choice: 0,
             fields: Vec::new(),
             field: 0,
+            found: None,
             scroll: 0,
             shelf_scroll: 0,
+            found_scroll: 0,
             waiting: std::collections::VecDeque::new(),
             confirm: None,
             run_started: None,
@@ -801,6 +858,12 @@ impl App {
                 }
                 self.follow_to(index);
             }
+            Msg::Meta { index, album, year } => {
+                if let Some(t) = self.track_mut(index) {
+                    t.album = album;
+                    t.year = year;
+                }
+            }
             Msg::Path { index, path } => {
                 if let Some(t) = self.track_mut(index) {
                     t.path = Some(path);
@@ -863,6 +926,12 @@ impl App {
                 self.follow = false;
                 if let Some(pos) = self.tracks.iter().position(|t| t.status.wants_a_look()) {
                     self.cursor = pos;
+                }
+            }
+            Msg::Focus(index) => {
+                if let Some(pos) = self.tracks.iter().position(|t| t.index == index) {
+                    self.cursor = pos;
+                    self.follow = false;
                 }
             }
             Msg::Unmark => self.marked.clear(),
@@ -1246,7 +1315,7 @@ impl App {
             .library
             .iter()
             .enumerate()
-            .filter(|(_, s)| needle.is_empty() || s.name.to_lowercase().contains(&needle))
+            .filter(|(_, s)| needle.is_empty() || shelf_matches(s, &needle))
             .map(|(pos, _)| pos)
             .collect();
         match self.sort {
@@ -1260,6 +1329,103 @@ impl App {
             }
         }
         rows
+    }
+
+    /* Every matching track in the library, as the folder it is in and its
+       place in that folder's files. Recomputed like `rows()` and
+       `shelf_rows()` rather than stored, so a sync that rebuilds the library
+       cannot leave a result list describing folders that have moved.
+       An empty box is no results and not every track: a search screen with
+       nothing typed is a list of the whole library, which is what the
+       library screen already is. */
+    pub fn found_rows(&self) -> Vec<(usize, usize)> {
+        let needle = self.filter.to_lowercase();
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        self.library
+            .iter()
+            .enumerate()
+            .flat_map(|(shelf, s)| {
+                s.files
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (name, _))| name.to_lowercase().contains(&needle))
+                    .map(move |(file, _)| (shelf, file))
+            })
+            .collect()
+    }
+
+    /// The result under the cursor, or `None` when the list is empty.
+    pub fn found_at(&self) -> Option<(&Shelf, &(String, bool))> {
+        let (shelf, file) = self.found?;
+        let shelf = self.library.get(shelf)?;
+        Some((shelf, shelf.files.get(file)?))
+    }
+
+    /// Search keys, on the screen that has its own cursor and no run behind
+    /// it. Exclusive with `can_command` and `can_browse` on `View`.
+    pub fn can_find(&self) -> bool {
+        self.view == View::Found && self.prompt.is_none() && !self.busy
+    }
+
+    /* Enters the search screen, which is only worth showing with something to
+       look for: an empty box would put up a list of nothing and the filter
+       band would say so with no way to read it as anything but a bug. */
+    pub fn find_tracks(&mut self) {
+        if self.filter.is_empty() {
+            self.typing_filter = true;
+            self.view = View::Found;
+            self.found = None;
+            return;
+        }
+        self.view = View::Found;
+        self.found_snap();
+        if self.found.is_none() {
+            self.view = View::Library;
+            self.say(format!("no track matches {}", self.filter));
+        }
+    }
+
+    fn move_found(&mut self, down: bool, by: usize) {
+        let rows = self.found_rows();
+        let Some(at) = self.found.and_then(|at| rows.iter().position(|r| *r == at)) else {
+            self.found_snap();
+            return;
+        };
+        let next = if down {
+            (at + by).min(rows.len() - 1)
+        } else {
+            at.saturating_sub(by)
+        };
+        self.found = Some(rows[next]);
+    }
+
+    pub fn found_step(&mut self, down: bool) {
+        self.move_found(down, 1);
+    }
+
+    pub fn page_found(&mut self, down: bool) {
+        self.move_found(down, self.viewport.max(1));
+    }
+
+    pub fn found_jump(&mut self, last: bool) {
+        let rows = self.found_rows();
+        if let Some(at) = if last { rows.last() } else { rows.first() } {
+            self.found = Some(*at);
+        }
+    }
+
+    /// Puts the search cursor on a row that is showing, for the same reason
+    /// the other two do it: a selection nobody can see is one Enter still
+    /// acts on. Falls to the first result, since editing the query is a new
+    /// question rather than a move within the old answer.
+    fn found_snap(&mut self) {
+        let rows = self.found_rows();
+        if self.found.is_some_and(|at| rows.contains(&at)) {
+            return;
+        }
+        self.found = rows.first().copied();
     }
 
     /// Whole-library totals for the status bar: what a sync would have to
@@ -1324,8 +1490,14 @@ impl App {
        titles all parsed the wrong way round. Doing it by retyping both boxes
        is the work this key exists to remove. */
     pub fn swap_fields(&mut self) {
-        if self.fields.len() == 2 {
-            self.fields.swap(0, 1);
+        let Some((Prompt::Form { fields, .. }, _)) = &self.prompt else {
+            return;
+        };
+        let Some((artist, title)) = swappable(fields) else {
+            return;
+        };
+        if artist.max(title) < self.fields.len() {
+            self.fields.swap(artist, title);
             self.caret = self.input().chars().count();
         }
     }
@@ -1415,6 +1587,7 @@ impl App {
 
     pub fn snap(&mut self) {
         self.shelf_snap();
+        self.found_snap();
         // Nothing is hidden, so the cursor is already on a row that shows.
         if !self.narrowed() {
             return;
@@ -1664,6 +1837,14 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stocked(name: &str, files: &[&str]) -> Shelf {
+        Shelf {
+            files: files.iter().map(|f| ((*f).to_string(), true)).collect(),
+            tracks: files.len(),
+            ..folder(name, 0, None)
+        }
+    }
 
     fn folder(name: &str, missing: usize, synced: Option<u64>) -> Shelf {
         Shelf {
@@ -1920,6 +2101,115 @@ mod tests {
         assert_eq!(app.shelf, 1, "the cursor stayed on a row nobody can see");
         assert!(app.filtering(), "the band would not say the list is narrowed");
         assert_eq!(app.library_totals(), (30, 0, None));
+    }
+
+    /* Sixty folders and no way to ask which one holds a track: the answer was
+       opening them one at a time. The filenames are already in memory from
+       the stat pass, so the box that narrows by folder name narrows by track
+       as well. */
+    #[test]
+    fn the_library_filter_finds_a_folder_by_a_track_inside_it() {
+        let mut app = library_app(vec![
+            stocked("Focus", &["01 Steve Reich - Music for 18.opus"]),
+            stocked("Road trip", &["01 Neu! - Hallogallo.opus", "02 Can - Spoon.opus"]),
+            stocked("Sleep", &["01 Eno - Ascent.opus"]),
+        ]);
+
+        // A track nobody would guess the folder of from its name.
+        app.filter = "hallogallo".into();
+        assert_eq!(app.shelf_rows(), vec![1]);
+
+        // Case is a tagging accident here as much as anywhere else.
+        app.filter = "NEU!".into();
+        assert_eq!(app.shelf_rows(), vec![1]);
+
+        // The folder's own name still matches, and matching both is one row.
+        app.filter = "o".into();
+        assert_eq!(app.shelf_rows(), vec![0, 1, 2]);
+        app.filter = "focus".into();
+        assert_eq!(app.shelf_rows(), vec![0]);
+
+        // And something in neither place narrows to nothing rather than all.
+        app.filter = "zzzz".into();
+        assert!(app.shelf_rows().is_empty());
+    }
+
+    /* The library screen answers which folders hold a match and its preview
+       answers which tracks, one folder at a time and only where there is room
+       to draw it. This is the same question asked of everything at once. */
+    #[test]
+    fn the_search_screen_lists_every_matching_track_with_its_folder() {
+        let mut app = library_app(vec![
+            stocked("Focus", &["01 Neu! - Hallogallo.opus", "02 Eno - Ascent.opus"]),
+            stocked("Road trip", &["01 Can - Spoon.opus"]),
+            stocked("Sleep", &["01 Neu! - Weissensee.opus"]),
+        ]);
+
+        // Nothing typed is no results, not the whole library: that list is
+        // the library screen, which this one was reached from.
+        assert!(app.found_rows().is_empty());
+
+        app.filter = "neu!".into();
+        app.find_tracks();
+        assert_eq!(app.view, View::Found);
+        assert_eq!(app.found_rows(), vec![(0, 0), (2, 0)]);
+        assert_eq!(app.found, Some((0, 0)), "the cursor did not land on the first");
+
+        // The pair names the track, so the folder comes back with it.
+        let (shelf, (name, _)) = app.found_at().unwrap();
+        assert_eq!(shelf.name, "Focus");
+        assert_eq!(name, "01 Neu! - Hallogallo.opus");
+
+        app.found_step(true);
+        assert_eq!(app.found_at().unwrap().0.name, "Sleep");
+        // Clamped at both ends rather than wrapping, like every other list.
+        app.found_step(true);
+        assert_eq!(app.found, Some((2, 0)));
+        app.found_jump(false);
+        assert_eq!(app.found, Some((0, 0)));
+    }
+
+    /* The cursor is the pair and not a row number, because a sync rebuilds
+       the library underneath it and editing the query rebuilds the list. */
+    #[test]
+    fn the_search_cursor_survives_the_list_being_rebuilt() {
+        let mut app = library_app(vec![
+            stocked("Focus", &["01 Neu! - Hallogallo.opus"]),
+            stocked("Sleep", &["01 Neu! - Weissensee.opus"]),
+        ]);
+        app.filter = "neu!".into();
+        app.find_tracks();
+        app.found_step(true);
+        assert_eq!(app.found, Some((1, 0)));
+
+        // A narrower query drops the row the cursor was on.
+        app.filter = "hallogallo".into();
+        app.snap();
+        assert_eq!(app.found, Some((0, 0)), "the cursor stayed on a row nobody can see");
+
+        // And a query matching nothing leaves nothing for Enter to act on.
+        app.filter = "zzzz".into();
+        app.snap();
+        assert_eq!(app.found, None);
+        assert!(app.found_at().is_none());
+    }
+
+    /* A screen listing nothing, with the box that fills it already closed,
+       is a dead end: the key says so and stays where it was. */
+    #[test]
+    fn searching_for_something_that_is_not_there_stays_on_the_library() {
+        let mut app = library_app(vec![stocked("Focus", &["01 Eno - Ascent.opus"])]);
+        app.filter = "hallogallo".into();
+        app.find_tracks();
+        assert_eq!(app.view, View::Library);
+        assert!(app.stage.contains("no track matches"), "{}", app.stage);
+
+        // With nothing typed it opens the box instead, which is the one thing
+        // that can turn an empty screen into a useful one.
+        app.filter.clear();
+        app.find_tracks();
+        assert_eq!(app.view, View::Found);
+        assert!(app.typing_filter);
     }
 
     /* Scrolled back means reading something, and the tail is where a running
@@ -2445,6 +2735,77 @@ mod tests {
         app.close_fields();
         assert_eq!(app.answers(), Vec::<String>::new());
         assert_eq!(app.caret, 0);
+    }
+
+    /* `^s` is the commonest correction in the tool, and the edit form grew
+       album and year after the two boxes it swaps: by position it would have
+       gone on working only by accident, and only until somebody reordered
+       them. `tag::manual` still asks two, so both shapes have to work. */
+    #[test]
+    fn the_swap_key_finds_its_two_boxes_by_name() {
+        let form = |fields: Vec<(&str, &str)>| {
+            let mut app = App::new(std::sync::mpsc::channel().0, String::new());
+            app.apply(Msg::Ask(
+                Prompt::Form {
+                    header: "track 4".into(),
+                    note: String::new(),
+                    fields: fields
+                        .into_iter()
+                        .map(|(l, v)| (l.to_string(), v.to_string()))
+                        .collect(),
+                    escape: Escape::Skip,
+                },
+                std::sync::mpsc::channel().0,
+            ));
+            app
+        };
+
+        let mut wide = form(vec![
+            ("artist", "Roygbiv"),
+            ("title", "Boards Of Canada"),
+            ("album", "Music Has the Right to Children"),
+            ("year", "1998"),
+        ]);
+        wide.swap_fields();
+        assert_eq!(
+            wide.answers(),
+            [
+                "Boards Of Canada",
+                "Roygbiv",
+                "Music Has the Right to Children",
+                "1998"
+            ],
+            "the swap reached a box it was not aimed at"
+        );
+
+        // The two-box form `tag::manual` asks is the same key.
+        let mut pair = form(vec![("artist", "Roygbiv"), ("title", "Boards Of Canada")]);
+        pair.swap_fields();
+        assert_eq!(pair.answers(), ["Boards Of Canada", "Roygbiv"]);
+
+        /* Named and not positional, which is the whole claim: artist and
+           title sit at 0 and 1 in both forms above, so those two pass either
+           way and cannot say which rule is in force. */
+        let mut moved = form(vec![
+            ("album", "Music Has the Right to Children"),
+            ("artist", "Roygbiv"),
+            ("title", "Boards Of Canada"),
+        ]);
+        moved.swap_fields();
+        assert_eq!(
+            moved.answers(),
+            [
+                "Music Has the Right to Children",
+                "Boards Of Canada",
+                "Roygbiv"
+            ]
+        );
+
+        /* A form with neither box has nothing to swap, and the hint that
+           advertises the key reads the same answer. */
+        let mut other = form(vec![("url", "https://example.com")]);
+        other.swap_fields();
+        assert_eq!(other.answers(), ["https://example.com"]);
     }
 
     /* With no offset of its own, ratatui scrolls the least it can to make

@@ -296,17 +296,28 @@ fn draw_band(frame: &mut Frame, area: Rect, left: String, mut right: String) {
 /* One band for both narrowings and both screens: what it has to say is that
    the list is not all of it, which is the same news whichever narrowed it. */
 fn draw_filter_bar(frame: &mut Frame, app: &App, area: Rect) {
-    let (shown, total) = if app.view == View::Library {
-        (app.shelf_rows().len(), app.library.len())
-    } else {
-        (app.shown(), app.tracks.len())
+    let (shown, total) = match app.view {
+        View::Library => (app.shelf_rows().len(), app.library.len()),
+        // Every track in the library is what a search was asked of, not the
+        // tracks of whichever playlist happens to be open behind it.
+        View::Found => (
+            app.found_rows().len(),
+            app.library.iter().map(|s| s.files.len()).sum(),
+        ),
+        View::Tracks => (app.shown(), app.tracks.len()),
     };
     let caret = if app.typing_filter { "\u{2588}" } else { "" };
     // The review has no text to show, so it names itself instead.
     let left = if app.review && app.filter.is_empty() && !app.typing_filter {
         " REVIEW  tracks nothing confirmed".to_string()
     } else {
-        let word = if app.review { "REVIEW" } else { "FILTER" };
+        let word = match (app.view, app.review) {
+            // Its own word, because the box is the list here rather than a
+            // narrowing of one: an empty query is an empty screen.
+            (View::Found, _) => "SEARCH",
+            (_, true) => "REVIEW",
+            (_, false) => "FILTER",
+        };
         format!(" {word}  /{}{}", app.filter, caret)
     };
     let right = if app.typing_filter {
@@ -342,14 +353,27 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     }
     spans.push(dim("  ·  "));
     // The stage belongs to the last run, which the library screen is not.
-    let stage = if app.view == View::Library && !app.busy {
-        "library".to_string()
-    } else {
-        app.stage.clone()
+    let stage = match app.view {
+        View::Library if !app.busy => "library".to_string(),
+        View::Found if !app.busy => "search".to_string(),
+        _ => app.stage.clone(),
     };
     spans.push(Span::styled(stage, Style::new().fg(CREAM)));
 
-    if app.view == View::Library {
+    if app.view == View::Found {
+        /* How many folders the matches are spread over, which is the thing
+           the flat list cannot say and the reason to look at it at all. */
+        let rows = app.found_rows();
+        let folders: std::collections::HashSet<usize> =
+            rows.iter().map(|(shelf, _)| *shelf).collect();
+        let tracks = if rows.len() == 1 { "track" } else { "tracks" };
+        let plural = if folders.len() == 1 { "playlist" } else { "playlists" };
+        spans.push(dim("  ·  "));
+        spans.push(Span::styled(
+            format!("{} {tracks} in {} {plural}", rows.len(), folders.len()),
+            Style::new().fg(CREAM),
+        ));
+    } else if app.view == View::Library {
         let count = app.library.len();
         let plural = if count == 1 { "playlist" } else { "playlists" };
         spans.push(dim("  ·  "));
@@ -434,6 +458,85 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
     match app.view {
         View::Tracks => draw_tracks(frame, app, area),
         View::Library => draw_library(frame, app, area),
+        View::Found => draw_found(frame, app, area),
+    }
+}
+
+/* Every matching track in the library, flat, with the folder it sits in. The
+   library screen answers "which folders hold a match" and its preview answers
+   "which tracks" one folder at a time; this is the same question asked of the
+   whole library at once, which is what a fifty-folder library needs. */
+fn draw_found(frame: &mut Frame, app: &mut App, area: Rect) {
+    let rows = app.found_rows();
+    if rows.is_empty() {
+        let said = match app.filter.is_empty() {
+            true => " type to search every folder   esc goes back".to_string(),
+            false => format!(" no track matches {}   esc goes back", app.filter),
+        };
+        frame.render_widget(Paragraph::new(Line::from(dim(said))), area);
+        return;
+    }
+    let width = area.width as usize;
+    app.viewport = area.height as usize;
+
+    /* One folder column for the list, so the titles beside it line up: the
+       folder is the answer the screen exists to give, and a ragged column
+       makes it the thing that is hardest to read. */
+    let longest = rows
+        .iter()
+        .map(|(shelf, _)| cols(&app.library[*shelf].name))
+        .max()
+        .unwrap_or(0);
+    let name_width = longest.min(width.saturating_sub(20).max(10));
+
+    let at = rows.iter().position(|row| Some(*row) == app.found);
+    let items: Vec<ListItem> = rows
+        .iter()
+        .map(|row| {
+            let (shelf, file) = *row;
+            let shelf = &app.library[shelf];
+            let (name, here) = &shelf.files[file];
+            let folder = truncate(&shelf.name, name_width);
+            let pad = name_width.saturating_sub(cols(&folder));
+            // The number and extension are the filename's, not the track's.
+            let title = name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem);
+            let selected = app.found == Some(*row);
+            ListItem::new(Line::from(vec![
+                Span::styled(if selected { "▌" } else { " " }, Style::new().fg(TEAL)),
+                // Same mark the library preview uses, for the same reason.
+                Span::styled(
+                    if *here { "  " } else { " !" },
+                    Style::new().fg(if *here { DIM } else { AMBER }),
+                ),
+                dim(format!("{folder}{:pad$}", "")),
+                Span::styled(
+                    format!("  {}", truncate(title, width.saturating_sub(name_width + 5))),
+                    row_style(selected),
+                ),
+            ]))
+        })
+        .collect();
+
+    app.found_scroll = app::scroll_to(
+        app.found_scroll,
+        at.unwrap_or(0),
+        rows.len(),
+        area.height as usize,
+    );
+    let mut state = ListState::default().with_offset(app.found_scroll);
+    state.select(at);
+    frame.render_stateful_widget(List::new(items), area, &mut state);
+
+    if rows.len() > area.height as usize {
+        let mut bar_state = ScrollbarState::new(rows.len()).position(at.unwrap_or(0));
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .thumb_style(Style::new().fg(RULE)),
+            area,
+            &mut bar_state,
+        );
     }
 }
 
@@ -475,7 +578,7 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
         let pane = (u32::from(area.width) * 2 / 5).min(60) as u16;
         let [list, preview] =
             Layout::horizontal([Constraint::Min(1), Constraint::Length(pane)]).areas(area);
-        draw_preview(frame, &app.library[selected], preview);
+        draw_preview(frame, &app.library[selected], &app.filter, preview);
         list
     } else {
         area
@@ -553,7 +656,7 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
    third view mode and a second set of keys, and Enter already opens the folder
    properly. What it is for is the `n missing` count on the shelf row, which
    says a sync would re-download something but never which one. */
-fn draw_preview(frame: &mut Frame, shelf: &Shelf, area: Rect) {
+fn draw_preview(frame: &mut Frame, shelf: &Shelf, filter: &str, area: Rect) {
     let block = Block::new()
         .borders(Borders::LEFT)
         .border_style(Style::new().fg(RULE));
@@ -569,12 +672,31 @@ fn draw_preview(frame: &mut Frame, shelf: &Shelf, area: Rect) {
     }
 
     let width = inner.width as usize;
+    /* A folder can be on the list for a track inside it, and the row says
+       only its name. Under a filter the pane is what answers which track, so
+       it shows the ones that matched rather than the first screenful. */
+    let needle = filter.to_lowercase();
+    let matched: Vec<&(String, bool)> = match needle.is_empty() {
+        true => Vec::new(),
+        false => shelf
+            .files
+            .iter()
+            .filter(|(name, _)| name.to_lowercase().contains(&needle))
+            .collect(),
+    };
+    // A folder that matched on its own name shows what it always did.
+    let files: Vec<&(String, bool)> = match matched.is_empty() {
+        true => shelf.files.iter().collect(),
+        false => matched,
+    };
+
     /* A title line, because a bordered column of filenames floats: it says
        nothing about which folder it belongs to or how many rows were left
        out. The missing count is repeated here for the same reason. */
-    let head = match shelf.missing {
-        0 => format!(" {} tracks", shelf.tracks),
-        n => format!(" {} tracks  ·  {n} missing", shelf.tracks),
+    let head = match (files.len() < shelf.files.len(), shelf.missing) {
+        (true, _) => format!(" {} of {} tracks match", files.len(), shelf.tracks),
+        (false, 0) => format!(" {} tracks", shelf.tracks),
+        (false, n) => format!(" {} tracks  ·  {n} missing", shelf.tracks),
     };
     let mut lines = vec![Line::from(Span::styled(
         truncate(&head, width),
@@ -582,13 +704,13 @@ fn draw_preview(frame: &mut Frame, shelf: &Shelf, area: Rect) {
     ))];
     let height = (inner.height as usize).saturating_sub(1);
     // The last line goes to the tail count, so no track is silently dropped.
-    let room = if shelf.files.len() > height {
+    let room = if files.len() > height {
         height.saturating_sub(1)
     } else {
-        shelf.files.len()
+        files.len()
     };
 
-    lines.extend(shelf.files[..room]
+    lines.extend(files[..room]
         .iter()
         .map(|(name, here)| {
             let title = name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem);
@@ -600,11 +722,8 @@ fn draw_preview(frame: &mut Frame, shelf: &Shelf, area: Rect) {
                 Style::new().fg(if *here { CREAM } else { AMBER }),
             ))
         }));
-    if room < shelf.files.len() {
-        lines.push(Line::from(dim(format!(
-            " … {} more",
-            shelf.files.len() - room
-        ))));
+    if room < files.len() {
+        lines.push(Line::from(dim(format!(" … {} more", files.len() - room))));
     }
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -660,10 +779,17 @@ fn draw_detail(frame: &mut Frame, track: &crate::app::Track, area: Rect) {
     ));
     let cream = Style::new().fg(CREAM);
     let faint = Style::new().fg(DIM);
-    for (label, value) in [("artist", &track.artist), ("title", &track.title)] {
+    for (label, value) in [
+        ("artist", &track.artist),
+        ("title", &track.title),
+        ("album", &track.album),
+    ] {
         if !value.is_empty() {
             lines.extend(detail_rows(label, value, cream, width));
         }
+    }
+    if let Some(year) = track.year {
+        lines.extend(detail_rows("year", &year.to_string(), faint, width));
     }
     if track.duration > 0 {
         lines.extend(detail_rows("length", &clock(track.duration), faint, width));
@@ -881,8 +1007,13 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             Style::new().fg(TEAL),
         ));
     }
-    if app.view == View::Library {
+    if app.view == View::Found {
         hints.push(("   enter open".to_string(), Style::new().fg(GOLD)));
+        hints.push(("   / search".to_string(), Style::new().fg(DIM)));
+        hints.push(("   esc library".to_string(), Style::new().fg(DIM)));
+    } else if app.view == View::Library {
+        hints.push(("   enter open".to_string(), Style::new().fg(GOLD)));
+        hints.push(("   t find a track".to_string(), Style::new().fg(DIM)));
         hints.push(("   R resync all".to_string(), Style::new().fg(DIM)));
         hints.push(("   n new URL".to_string(), Style::new().fg(DIM)));
     } else if !app.tracks.is_empty() && app.picking.is_none() {
@@ -934,8 +1065,8 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     /* The hints are the part you cannot recover by looking elsewhere, so both
        the summary and the tally give way before they do. Every status in the
        tally is still readable in the list itself. */
-    // Counted from the tracks, which are not what the library screen lists.
-    let tally: Vec<(Status, String)> = if app.view == View::Library {
+    // Counted from the tracks, which is not what either other screen lists.
+    let tally: Vec<(Status, String)> = if app.view != View::Tracks {
         Vec::new()
     } else {
         app.counts()
@@ -1009,13 +1140,22 @@ fn draw_help(frame: &mut Frame, app: &App) {
         ("", "^d ^u  PgDn PgUp", "by a screenful"),
         ("", "g G", "first, last"),
     ];
-    if app.view == View::Library {
+    if app.view == View::Found {
+        rows.extend([
+            ("open", "enter", "open this track in its playlist"),
+            ("find", "/", "search every folder by track name"),
+            ("view", "l", "yt-dlp output"),
+            ("back", "Esc", "the library"),
+            ("quit", "q  ^c", ""),
+        ]);
+    } else if app.view == View::Library {
         rows.extend([
             ("open", "enter", "read this playlist off disk"),
             ("", "O", "this folder in the file manager"),
             ("name", "e", "rename this playlist"),
             ("", "D", "remove this playlist"),
-            ("find", "/", "filter by name"),
+            ("find", "/", "filter by name or track"),
+            ("", "t", "every matching track, across the library"),
             ("", "o", "order: name, last synced, most missing"),
         ]);
         if app.can_play() {
@@ -1078,6 +1218,10 @@ fn draw_help(frame: &mut Frame, app: &App) {
            it does is the documentation for the behaviour that lost runs. */
         if !app.library.is_empty() {
             rows.push(("back", "Esc", "clear marks, then the library"));
+            /* Not a key here, a route. `t` stays library-only, so without a
+               row naming the two presses the search is invisible from the
+               screen people spend the most time on. */
+            rows.push(("", "Esc t", "find a track in any playlist"));
         }
         rows.push(("quit", "q  ^c", ""));
     }
@@ -1275,7 +1419,12 @@ fn draw_prompt(frame: &mut Frame, app: &App) {
                 format!("enter confirm   ^u clear   ^w word   {}", escape.hint())
             }
             Prompt::Form { escape, fields, .. } => {
-                let swap = if fields.len() == 2 { "^s swap   " } else { "" };
+                // Named rather than counted, like the key itself: the edit
+                // form has four boxes and only two of them swap.
+                let swap = match app::swappable(fields) {
+                    Some(_) => "^s swap   ",
+                    None => "",
+                };
                 format!("tab field   {swap}enter save   {}", escape.hint())
             }
         },
@@ -1438,6 +1587,7 @@ mod tests {
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
+    use std::time::Duration;
 
     /// The bottom row of a rendered frame, trailing spaces trimmed.
     fn status_row(width: u16, tracks: Vec<Track>, logs: Vec<String>) -> String {
@@ -1862,6 +2012,190 @@ mod tests {
 
     fn library_screen(width: u16) -> Vec<String> {
         library_screen_at(width, 0)
+    }
+
+    /* A folder on the list for a track inside it says only its own name on
+       the row, so the pane is what has to answer which track. Showing the
+       first screenful instead would put the matching row off the bottom of a
+       long folder and leave the filter looking broken. */
+    #[test]
+    fn the_preview_shows_what_the_filter_matched_inside_the_folder() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.apply(Msg::Library {
+            shelves: shelves(),
+            show: true,
+        });
+        app.intro_done = true;
+        app.filter = "hallogallo".into();
+        app.snap();
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let rows: Vec<String> = (0..12)
+            .map(|y| {
+                (0..120)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect();
+        let screen = rows.join("\n");
+
+        // One folder holds it, and the band says the list is not all of it.
+        assert!(rows[1].contains("1 of 2 shown"), "{:?}", rows[1]);
+        assert!(screen.contains("Road trip"), "{screen}");
+        assert!(!screen.contains("Focus"), "a folder with no match stayed: {screen}");
+        // The pane names the track and says how much of the folder matched.
+        assert!(rows[2].contains("1 of 9 tracks match"), "{:?}", rows[2]);
+        assert!(screen.contains("Hallogallo"), "{screen}");
+        assert!(
+            !screen.contains("Autobahn"),
+            "the pane showed the folder rather than the match: {screen}"
+        );
+    }
+
+    /* The intro is where the update notice draws, and `intro = false` is a
+       setting: the probe ran, wrote its cache and threw the answer away, so
+       turning off an animation turned off update notifications. */
+    #[test]
+    fn the_update_notice_is_not_lost_with_the_intro_switched_off() {
+        let intro = |on: bool| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(tx, "settings".into());
+            app.update = Some("99.0.0".into());
+            app.intro_done = !on;
+            /* Far enough in for the signature line, which is the last thing
+               the intro draws and the only part that carries the notice. */
+            app.started = std::time::Instant::now() - Duration::from_millis(1500);
+            /* What `main` does with the probe's answer when the intro is not
+               up to say it: the drawn surface is the bar rather than nothing. */
+            if !app.intro() {
+                app.say("v99.0.0 is out  ·  earworm --check has the command");
+            }
+            let mut terminal = Terminal::new(TestBackend::new(110, 14)).unwrap();
+            terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..14)
+                .map(|y| {
+                    (0..110)
+                        .map(|x| buffer[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        // With the intro on it is the intro's to say, as it always was.
+        let animated = intro(true);
+        assert!(animated.contains("99.0.0"), "the intro lost the notice:\n{animated}");
+
+        // And with it off the news still reaches the screen.
+        let bare = intro(false);
+        assert!(bare.contains("99.0.0"), "the notice went with the intro:\n{bare}");
+        // Pointing at where the command to act on it lives.
+        assert!(bare.contains("--check"), "{bare}");
+    }
+
+    /* `t` is library-only, like `space` and `f`: it is about the library
+       rather than the playlist on screen. That makes it invisible from the
+       track list, which is the screen people spend the most time on, so the
+       route is what the help names. */
+    #[test]
+    fn the_track_help_names_the_way_to_the_search() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.tracks = vec![track_named(1, "Autobahn")];
+        app.done = Some(Ok("finished".into()));
+        app.intro_done = true;
+        app.show_help = true;
+
+        let help = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+            terminal.draw(|f| super::draw(f, app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..40)
+                .map(|y| {
+                    (0..100)
+                        .map(|x| buffer[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        /* No library behind the run, so there is nowhere for Esc to go and
+           nothing to search: the row would document a key that refuses. */
+        assert!(!help(&mut app).contains("any playlist"));
+
+        app.apply(Msg::Library {
+            shelves: shelves(),
+            show: false,
+        });
+        let with = help(&mut app);
+        assert!(with.contains("Esc t"), "no route to the search:\n{with}");
+        assert!(with.contains("any playlist"), "{with}");
+    }
+
+    /* The flat list across the whole library, which is the thing neither the
+       rows nor the preview can show: the preview is one folder at a time and
+       only where there is room for it at all. */
+    #[test]
+    fn the_search_screen_names_the_folder_beside_every_match() {
+        let screen = |width: u16, filter: &str| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(tx, "settings".into());
+            app.apply(Msg::Library {
+                shelves: shelves(),
+                show: true,
+            });
+            app.intro_done = true;
+            app.filter = filter.into();
+            app.find_tracks();
+            let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+            terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..12)
+                .map(|y| {
+                    (0..width)
+                        .map(|x| buffer[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                        .trim_end()
+                        .to_string()
+                })
+                .collect::<Vec<String>>()
+        };
+
+        // "Track 1" is in Focus; "Autobahn" and the rest are in Road trip.
+        let rows = screen(90, "track 1");
+        let all = rows.join("\n");
+        assert!(rows[0].contains("search"), "{:?}", rows[0]);
+        /* The count the flat list cannot give itself: 1, 10 through 19, and
+           the folder they are all in. */
+        assert!(rows[0].contains("11 tracks in 1 playlist"), "{:?}", rows[0]);
+        assert!(rows[1].contains("SEARCH"), "{:?}", rows[1]);
+        assert!(all.contains("Focus"), "no folder column: {all}");
+        assert!(all.contains("Artist - Track 1"), "{all}");
+        // The number and extension belong to the filename, not the track.
+        assert!(!all.contains(".opus"), "the row kept the extension: {all}");
+        assert!(rows[11].contains("enter open"), "{:?}", rows[11]);
+
+        /* A missing file carries the same mark it does in the preview, since
+           it is the same fact about the same file. */
+        let missing = screen(90, "hallogallo");
+        let all = missing.join("\n");
+        assert!(all.contains("Road trip"), "{all}");
+        assert!(all.contains('!'), "a missing file lost its mark: {all}");
+
+        // Nothing typed is a prompt to type, not a list of the whole library.
+        let empty = screen(90, "");
+        assert!(
+            empty.join("\n").contains("type to search"),
+            "{:?}",
+            empty.join("\n")
+        );
     }
 
     fn library_screen_at(width: u16, shelf: usize) -> Vec<String> {
@@ -3037,4 +3371,5 @@ mod tests {
         assert!(top.contains("earworm  ·"), "{top:?}");
     }
 }
+
 

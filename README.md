@@ -222,8 +222,9 @@ touch, and failures](docs/images/keys.png)
 | `L` `J` `K` | grow the log pane to half the screen, scroll it |
 | `/` | filter the list by name or status |
 | `v` | show only the tracks nothing has confirmed |
-| `e` | edit artist and title (after the run) |
+| `e` | edit artist, title, album and year (after the run) |
 | `u` | undo the last tag change (after the run) |
+| `Esc` `t` | find a track in any playlist (the search is a library key) |
 | `tab` `^s` | next field, swap artist and title (in the edit form) |
 | `c` | choose cover art (after the run) |
 | `T` | search again for the track under the cursor (after the run) |
@@ -262,7 +263,8 @@ to act on:
 | `e` | rename this playlist |
 | `D` | remove this playlist: forget it or delete its folder |
 | `O` | open this folder in the file manager |
-| `/` | filter the folders by name |
+| `/` | filter the folders by name, or by a track inside them |
+| `t` | every matching track across the library, flat |
 | `o` | order: name, last synced, most missing |
 | `p` | play the folder under the cursor in cliamp (only while it is running) |
 | `space` | play/pause cliamp (only while it is running) |
@@ -442,13 +444,21 @@ them:
 │                                                         │
 │ artist  Boards of Canada█                               │
 │ title   Roygbiv                                         │
+│ album   Music Has the Right to Children                 │
+│ year    1998                                            │
 │                                                         │
 │ tab field   ^s swap   enter save   esc skip             │
 └─────────────────────────────────────────────────────────┘
 ```
 
-`tab` moves between them, `^s` swaps the two, and `enter` saves both. The same
-form is what the run shows when it cannot work a track out on its own.
+`tab` moves between the boxes, `^s` swaps artist and title wherever they sit,
+and `enter` saves the lot. Album and year may be left empty, which removes the
+tag; a year that is not four digits refuses the edit rather than quietly
+dropping what the file already had.
+
+The run asks a shorter version of the same form when it cannot work a track
+out on its own: artist and title only, since the album is what the lookup is
+there to find.
 
 ### Fixing several tracks at once
 
@@ -489,6 +499,30 @@ anything the manifest names that is no longer on disk marked `!` in amber. That
 turns the `2 missing` on the row into something you can act on without opening
 the folder. It is read-only and starts from the top, with a count of what it
 could not fit. Below about 100 columns it makes way for the rows themselves.
+
+`/` searches inside those folders as well as across their names, so typing a
+track you half remember narrows the library to whatever holds it and the pane
+lists the matches with `3 of 42 tracks match` above them. Nothing is read off
+disk to do it: the filenames are already in hand from the pass that counted
+what was missing.
+
+`t` takes the same query and lists every match flat, with the folder each one
+is in:
+
+```
+ earworm  ·  search  ·  4 tracks in 3 playlists
+ SEARCH  /neu!                          4 of 612 shown  ·  esc clears
+▌  Focus        01 Neu! - Hallogallo
+   Road trip  ! 02 Neu! - Negativland
+   Sleep        01 Neu! - Weissensee
+   Sleep        07 Neu! - Isi
+```
+
+`enter` opens that playlist and puts the cursor on the track, `esc` goes back
+to the folders, and `/` edits the query from either screen. A `!` means the
+manifest names a file that is no longer on disk, the same mark the preview
+uses. This is the screen for a library too big to scroll, and it is the only
+way to see matches from several folders at once.
 
 Only one playlist is on screen at a time, because a track's number is its
 position in its own playlist and two playlists both have a track 1.

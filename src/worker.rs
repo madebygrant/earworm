@@ -397,6 +397,8 @@ fn open_shelf(
         if let Ok(info) = tag::read(&file) {
             track.artist = info.artist;
             track.title = info.title;
+            track.album = info.album;
+            track.year = info.year;
             track.duration = info.duration;
             // An untagged file would otherwise read as "? - ?", which says
             // less about which track it is than the filename does.
@@ -702,6 +704,8 @@ fn tag_tracks(
             if let Ok(info) = tag::read(&path) {
                 track.artist = info.artist;
                 track.title = info.title;
+                track.album = info.album;
+                track.year = info.year;
                 track.duration = info.duration;
                 track.listed = true;
                 track.name = label(&track.title, &track.artist);
@@ -712,6 +716,7 @@ fn tag_tracks(
                     note: None,
                     name: Some(track.name.clone()),
                 });
+                offer_meta(tx, track);
             }
             continue;
         }
@@ -733,17 +738,22 @@ fn tag_tracks(
                 track.mbid = out.mbid;
                 let info = tag::read(&path).ok();
                 track.duration = info.as_ref().map(|i| i.duration).unwrap_or(0);
+                track.album = info.as_ref().map(|i| i.album.clone()).unwrap_or_default();
+                track.year = info.as_ref().and_then(|i| i.year);
                 track.listed = true;
                 track.name = label(&track.title, &track.artist);
 
                 /* Only when the lookup found no real album: a playlist name is
                    a worse answer than the release the track came from. */
-                if cfg.album
-                    && !playlist.is_empty()
-                    && info.is_none_or(|i| i.album.is_empty())
-                    && let Err(err) = tag::set_album(&path, playlist)
-                {
-                    let _ = tx.send(Msg::Log(format!("album: {err}")));
+                if cfg.album && !playlist.is_empty() && track.album.is_empty() {
+                    match tag::set_album(&path, playlist) {
+                        // Or the row and the file disagree, and the edit form
+                        // prefills an album the track no longer has.
+                        Ok(()) => track.album = playlist.to_string(),
+                        Err(err) => {
+                            let _ = tx.send(Msg::Log(format!("album: {err}")));
+                        }
+                    }
                 }
 
                 let _ = tx.send(Msg::Update {
@@ -753,6 +763,9 @@ fn tag_tracks(
                     note: Some(out.note),
                     name: Some(track.name.clone()),
                 });
+                // After the playlist-name fallback, or the pane shows the
+                // album the file had rather than the one it now holds.
+                offer_meta(tx, track);
                 rename(cfg, tx, track);
             }
             Err(err) => {
@@ -1014,8 +1027,8 @@ fn serve(
            ones that went to the network have an outcome worth a question at
            the end, which is what `synced` carries. */
         let synced = match cmd {
-            Cmd::Open(folder) => {
-                report(tx, open_row(cfg, tx, tracks, &folder));
+            Cmd::Open(folder, land_on) => {
+                report(tx, open_row(cfg, tx, tracks, &folder, land_on.as_deref()));
                 None
             }
             Cmd::SyncOne => Some(sync_open(cfg, tx, cancel, tracks)),
@@ -1125,6 +1138,7 @@ fn open_row(
     tx: &Sender<Msg>,
     tracks: &mut Vec<Track>,
     folder: &Path,
+    land_on: Option<&str>,
 ) -> Result<()> {
     // Re-read rather than trusting what the screen was showing: the folder may
     // have gone away between the listing and the keypress.
@@ -1134,6 +1148,25 @@ fn open_row(
         .find(|s| s.path == folder)
         .context("that playlist is no longer there")?;
     let summary = open_shelf(cfg, tx, tracks, &shelf)?;
+    /* Matched on the filename, because that is all a search result knows and
+       the index is worked out here: `open_shelf` numbers from the filename
+       and numbers departures past the playlist, so the row this lands on is
+       not the one the file's own number names. */
+    if let Some(wanted) = land_on {
+        match tracks
+            .iter()
+            .find(|t| t.path.as_ref().and_then(|p| p.file_name()).is_some_and(|n| n == wanted))
+        {
+            Some(track) => {
+                let _ = tx.send(Msg::Focus(track.index));
+            }
+            /* Deleted between the library being read and the keypress, which
+               is the same race `open_row` re-reads the library for. */
+            None => {
+                let _ = tx.send(Msg::Flash(format!("{wanted} is no longer in this folder")));
+            }
+        }
+    }
     let _ = tx.send(Msg::Done {
         result: Ok(summary),
         stage: "opened",
@@ -1272,8 +1305,9 @@ fn retry(
 pub struct Undo {
     /// How the UI names it on the status bar, so `u` says what it would do.
     what: String,
-    /// Track index, artist and title as they were before the write.
-    fields: Vec<(usize, String, String)>,
+    /// Track index and every tag the write could have touched, as they were
+    /// before it. The whole set, because `write_track` writes the whole set.
+    fields: Vec<(usize, tag::Fields)>,
 }
 
 /// Tells the UI what `u` would put back, or that there is nothing. A key the
@@ -1291,7 +1325,7 @@ fn undo(cfg: &Config, tx: &Sender<Msg>, tracks: &mut [Track], held: &mut Option<
     };
     offer_undo(tx, held);
     let mut back = 0;
-    for (index, artist, title) in fields {
+    for (index, was) in fields {
         let Some(pos) = tracks.iter().position(|t| t.index == index) else {
             continue;
         };
@@ -1299,7 +1333,7 @@ fn undo(cfg: &Config, tx: &Sender<Msg>, tracks: &mut [Track], held: &mut Option<
            these values back, which is exactly as much as the tags are worth
            now. The status word is provenance, and restoring `ok` would claim
            a lookup that is no longer what is in the file. */
-        match write_track(cfg, tx, tracks, pos, artist, title, "undone") {
+        match write_track(cfg, tx, tracks, pos, was, "undone") {
             Ok(()) => back += 1,
             Err(err) => {
                 let _ = tx.send(Msg::Log(format!("undo: track {index}: {err}")));
@@ -1314,6 +1348,30 @@ fn undo(cfg: &Config, tx: &Sender<Msg>, tracks: &mut [Track], held: &mut Option<
     Ok(())
 }
 
+/* Album and year reach the UI on their own message, so every path that fills
+   them in has to send it: the worker's copy of a track is not the one the
+   detail pane draws, and a run that skipped this showed no album until the
+   folder was reopened from the library. */
+fn offer_meta(tx: &Sender<Msg>, track: &Track) {
+    let _ = tx.send(Msg::Meta {
+        index: track.index,
+        album: track.album.clone(),
+        year: track.year,
+    });
+}
+
+/* What the row currently holds, for a caller changing some of it. Every write
+   writes the whole set, so a bulk change to the artist has to carry the album
+   and year it is not touching or it would clear them off every track. */
+fn held_fields(track: &Track) -> tag::Fields {
+    tag::Fields {
+        artist: track.artist.clone(),
+        title: track.title.clone(),
+        album: track.album.clone(),
+        year: track.year,
+    }
+}
+
 /// Writes one track's tags and brings everything that follows from them back
 /// into line: the row, the filename, and the name the playlist will use.
 fn write_track(
@@ -1321,8 +1379,7 @@ fn write_track(
     tx: &Sender<Msg>,
     tracks: &mut [Track],
     pos: usize,
-    artist: String,
-    title: String,
+    fields: tag::Fields,
     source: &str,
 ) -> Result<()> {
     let path = tracks[pos].path.clone().context("track has no file")?;
@@ -1332,7 +1389,13 @@ fn write_track(
             tracks[pos].index
         );
     }
-    tag::set_fields(&path, &artist, &title)?;
+    tag::set_fields(&path, &fields)?;
+    let tag::Fields {
+        artist,
+        title,
+        album,
+        year,
+    } = fields;
 
     let departed = tracks[pos].status == Status::Gone;
     /* A departed track stays departed: it is still not in the playlist, and
@@ -1342,6 +1405,8 @@ fn write_track(
     let track = &mut tracks[pos];
     track.artist = artist;
     track.title = title;
+    track.album = album;
+    track.year = year;
     track.name = label(&track.title, &track.artist);
     track.status = status;
     track.source = source.into();
@@ -1356,6 +1421,7 @@ fn write_track(
         note: Some(String::new()),
         name: Some(track.name.clone()),
     });
+    offer_meta(tx, track);
     // Its index is synthetic, so renaming would stamp a playlist position
     // this track no longer has onto the file, next to the real one.
     if !departed {
@@ -1373,19 +1439,19 @@ fn bulk(
     held: &mut Option<Undo>,
     targets: &[usize],
     what: &str,
-    mut fields: impl FnMut(&Track) -> (String, String),
+    mut fields: impl FnMut(&Track) -> tag::Fields,
 ) -> Result<()> {
     let mut changed = 0;
     let mut failed = 0;
     // Collected as the write succeeds, so a track that could not be written
     // is not one `u` claims to put back.
-    let mut before: Vec<(usize, String, String)> = Vec::new();
+    let mut before: Vec<(usize, tag::Fields)> = Vec::new();
     for target in targets {
         let Some(pos) = tracks.iter().position(|t| t.index == *target) else {
             continue;
         };
-        let (artist, title) = fields(&tracks[pos]);
-        if let Some(missing) = match (artist.is_empty(), title.is_empty()) {
+        let next = fields(&tracks[pos]);
+        if let Some(missing) = match (next.artist.is_empty(), next.title.is_empty()) {
             (true, true) => Some("artist and title"),
             (true, false) => Some("artist"),
             (false, true) => Some("title"),
@@ -1395,12 +1461,8 @@ fn bulk(
             let _ = tx.send(Msg::Log(format!("{what}: track {target} has no {missing}")));
             continue;
         }
-        let was = (
-            tracks[pos].index,
-            tracks[pos].artist.clone(),
-            tracks[pos].title.clone(),
-        );
-        match write_track(cfg, tx, tracks, pos, artist, title, what) {
+        let was = (tracks[pos].index, held_fields(&tracks[pos]));
+        match write_track(cfg, tx, tracks, pos, next, what) {
             Ok(()) => {
                 changed += 1;
                 before.push(was);
@@ -1440,8 +1502,10 @@ fn swap(
     held: &mut Option<Undo>,
     targets: &[usize],
 ) -> Result<()> {
-    bulk(cfg, tx, tracks, held, targets, "swapped", |track| {
-        (track.title.clone(), track.artist.clone())
+    bulk(cfg, tx, tracks, held, targets, "swapped", |track| tag::Fields {
+        artist: track.title.clone(),
+        title: track.artist.clone(),
+        ..held_fields(track)
     })
 }
 
@@ -1467,8 +1531,9 @@ fn artist(
     if new.is_empty() {
         bail!("artist cannot be empty  ·  type a name, or esc leaves them alone");
     }
-    bulk(cfg, tx, tracks, held, targets, "set artist on", |track| {
-        (new.clone(), track.title.clone())
+    bulk(cfg, tx, tracks, held, targets, "set artist on", |track| tag::Fields {
+        artist: new.clone(),
+        ..held_fields(track)
     })
 }
 
@@ -1493,30 +1558,50 @@ fn edit(
         vec![
             ("artist".into(), tracks[pos].artist.clone()),
             ("title".into(), tracks[pos].title.clone()),
+            ("album".into(), tracks[pos].album.clone()),
+            (
+                "year".into(),
+                tracks[pos].year.map(|y| y.to_string()).unwrap_or_default(),
+            ),
         ],
         Escape::Skip,
     ) else {
         return cancelled(tx);
     };
-    let [artist, title] = answers.as_slice() else {
+    let [artist, title, album, year] = answers.as_slice() else {
         return cancelled(tx);
     };
-    let (artist, title) = (artist.clone(), title.clone());
     if artist.is_empty() || title.is_empty() {
         bail!("artist and title cannot be empty  ·  esc leaves the track alone");
     }
+    /* Album and year may be cleared, so empty is an answer rather than a
+       refusal: only a year that is not a year is worth stopping for, since
+       writing it would silently drop what was already in the file. */
+    let year = match year.is_empty() {
+        true => None,
+        false => Some(
+            year.parse::<u16>()
+                .ok()
+                // The range the message promises: `12345` parses as a u16 and
+                // used to be written while the error said four digits.
+                .filter(|y| (1000..=9999).contains(y))
+                .context("a year is four digits  ·  esc leaves the track alone")?,
+        ),
+    };
 
-    let was = (
-        tracks[pos].index,
-        tracks[pos].artist.clone(),
-        tracks[pos].title.clone(),
-    );
-    write_track(cfg, tx, tracks, pos, artist, title, "typed")?;
+    let previous = (tracks[pos].index, held_fields(&tracks[pos]));
+    let fields = tag::Fields {
+        artist: artist.clone(),
+        title: title.clone(),
+        album: album.clone(),
+        year,
+    };
+    write_track(cfg, tx, tracks, pos, fields, "typed")?;
     save_manifest(cfg, tracks);
     write_playlist(cfg, tracks)?;
     *held = Some(Undo {
         what: format!("the edit of track {index}"),
-        fields: vec![was],
+        fields: vec![previous],
     });
     offer_undo(tx, held);
     let _ = tx.send(Msg::Flash(format!("saved track {index}")));
@@ -1572,9 +1657,18 @@ fn search(
        so: it is still not in the playlist, and re-listing it would rename it
        to a position it does not hold. */
     let status = if departed { Status::Gone } else { Status::Ok };
+    /* `apply` has already written the hit's album into the file, so the row
+       reads it back rather than guessing: an edit straight afterwards has to
+       prefill what the track actually holds. */
+    let written = tag::read(&path).ok();
     let track = &mut tracks[pos];
     track.artist = artist;
     track.title = title;
+    track.album = written
+        .as_ref()
+        .map(|i| i.album.clone())
+        .unwrap_or_default();
+    track.year = written.as_ref().and_then(|i| i.year);
     track.name = label(&track.title, &track.artist);
     track.status = status;
     track.source = m.source.into();
@@ -1590,6 +1684,7 @@ fn search(
         note: Some(track.note.clone()),
         name: Some(track.name.clone()),
     });
+    offer_meta(tx, track);
     if !departed {
         rename(cfg, tx, &mut tracks[pos]);
     }
@@ -2349,8 +2444,7 @@ pub mod tests {
             &channel().0,
             &mut one,
             0,
-            "A".into(),
-            "B".into(),
+            named("A", "B"),
             "typed",
         )
         .unwrap_err()
@@ -3168,6 +3262,214 @@ pub mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /* The worker's copy of a track is not the one the detail pane draws, so a
+       run that filled the album in and said nothing left the pane blank until
+       the folder was reopened from the library: the same track, two answers,
+       depending on how you got to it. */
+    #[test]
+    fn a_run_tells_the_ui_about_the_album_it_wrote() {
+        let dir = scratch("runmeta");
+        let file = dir.join("01 - A.opus");
+        if tiny_opus(&file).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        tag::set_fields(
+            &file,
+            &tag::Fields {
+                artist: "Neu!".into(),
+                title: "Hallogallo".into(),
+                album: "Neu!".into(),
+                year: Some(1972),
+            },
+        )
+        .unwrap();
+
+        let mut tracks = vec![Track::new(1, "a".into(), "01 - A.opus".into(), file)];
+        // Already on disk, which is the branch a re-run takes for every
+        // track it does not have to fetch.
+        tracks[0].status = Status::Have;
+
+        let (tx, rx) = channel();
+        let asker = Asker { tx: tx.clone(), enabled: false };
+        let mut cover = CoverState { written: true };
+        let mut cfg = config(false);
+        cfg.lookup = false;
+        tag_tracks(
+            &cfg,
+            &tx,
+            &AtomicBool::new(false),
+            &mut tracks,
+            "Focus",
+            &asker,
+            &mut cover,
+            None,
+        );
+
+        let meta: Vec<(String, Option<u16>)> = rx
+            .try_iter()
+            .filter_map(|m| match m {
+                Msg::Meta { album, year, .. } => Some((album, year)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            meta,
+            vec![("Neu!".to_string(), Some(1972))],
+            "the run kept the album to itself"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* Every write writes the whole set, so a change to the artist has to
+       carry the album and year it is not touching. Without that a swap over
+       twenty tracks quietly stripped the album off all of them, and the row
+       looked right because the row never showed it. */
+    #[test]
+    fn a_bulk_change_to_the_artist_keeps_the_album_and_the_year() {
+        let dir = scratch("keepalbum");
+        let file = dir.join("01 - A.opus");
+        if tiny_opus(&file).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        tag::set_fields(
+            &file,
+            &tag::Fields {
+                artist: "Neu!".into(),
+                title: "Hallogallo".into(),
+                album: "Neu!".into(),
+                year: Some(1972),
+            },
+        )
+        .unwrap();
+
+        let mut tracks = vec![Track::new(1, "a".into(), "01 - A.opus".into(), file.clone())];
+        tracks[0].artist = "Neu!".into();
+        tracks[0].title = "Hallogallo".into();
+        tracks[0].album = "Neu!".into();
+        tracks[0].year = Some(1972);
+        tracks[0].listed = true;
+
+        let cfg = config(false);
+        let (tx, _rx) = channel();
+        let mut held: Option<Undo> = None;
+        swap(&cfg, &tx, &mut tracks, &mut held, &[1]).unwrap();
+
+        // The file, not only the row: the row could be right about an album
+        // the write had already cleared.
+        let back = tag::read(&file).unwrap();
+        assert_eq!((back.artist.as_str(), back.title.as_str()), ("Hallogallo", "Neu!"));
+        assert_eq!(back.album, "Neu!", "the swap took the album with it");
+        assert_eq!(back.year, Some(1972), "the swap took the year with it");
+        assert_eq!(tracks[0].album, "Neu!");
+        assert_eq!(tracks[0].year, Some(1972));
+
+        // And the undo puts back all four, not the two it changed.
+        undo(&cfg, &tx, &mut tracks, &mut held).unwrap();
+        let back = tag::read(&file).unwrap();
+        assert_eq!((back.artist.as_str(), back.title.as_str()), ("Neu!", "Hallogallo"));
+        assert_eq!(back.album, "Neu!");
+        assert_eq!(back.year, Some(1972));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* The two new boxes may be cleared, so empty is an answer. A year that is
+       not a year is not: writing it would drop whatever the file already had
+       and say nothing. */
+    #[test]
+    fn the_edit_form_asks_for_album_and_year_and_refuses_a_year_that_is_not_one() {
+        let dir = scratch("editmeta");
+        let file = dir.join("01 - A.opus");
+        if tiny_opus(&file).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        tag::set_fields(
+            &file,
+            &tag::Fields {
+                artist: "Neu!".into(),
+                title: "Hallogallo".into(),
+                album: "Neu!".into(),
+                year: Some(1972),
+            },
+        )
+        .unwrap();
+
+        let answered = |reply: Vec<&str>| {
+            let mut tracks = vec![Track::new(1, "a".into(), "01 - A.opus".into(), file.clone())];
+            tracks[0].artist = "Neu!".into();
+            tracks[0].title = "Hallogallo".into();
+            tracks[0].album = "Neu!".into();
+            tracks[0].year = Some(1972);
+            tracks[0].listed = true;
+            let cfg = config(false);
+            let (tx, rx) = channel();
+            let asker = Asker { tx: tx.clone(), enabled: true };
+            let mut held: Option<Undo> = None;
+            let values: Vec<String> = reply.iter().map(|v| (*v).to_string()).collect();
+            std::thread::scope(|scope| {
+                let worker =
+                    scope.spawn(|| edit(&cfg, &tx, &mut tracks, &asker, &mut held, 1));
+                let mut boxes = Vec::new();
+                while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
+                    if let Msg::Ask(crate::app::Prompt::Form { fields, .. }, back) = msg {
+                        boxes = fields;
+                        back.send(Reply::Fields(values.clone())).unwrap();
+                        break;
+                    }
+                }
+                (boxes, worker.join().unwrap())
+            })
+        };
+
+        // Prefilled from what the track holds, in the order the form asks.
+        let (boxes, result) = answered(vec!["Neu!", "Hallogallo", "Neu! 2", "1973"]);
+        result.unwrap();
+        let labels: Vec<&str> = boxes.iter().map(|(l, _)| l.as_str()).collect();
+        assert_eq!(labels, ["artist", "title", "album", "year"]);
+        assert_eq!(boxes[3].1, "1972", "the year box did not prefill");
+        let back = tag::read(&file).unwrap();
+        assert_eq!(back.album, "Neu! 2");
+        assert_eq!(back.year, Some(1973));
+
+        // Cleared is an answer: the tag goes rather than the edit refusing.
+        let (_, result) = answered(vec!["Neu!", "Hallogallo", "", ""]);
+        result.unwrap();
+        let back = tag::read(&file).unwrap();
+        assert!(back.album.is_empty(), "the album survived being cleared");
+        assert_eq!(back.year, None, "the year survived being cleared");
+
+        // And nonsense in the year box stops the write rather than losing it.
+        tag::set_fields(
+            &file,
+            &tag::Fields {
+                artist: "Neu!".into(),
+                title: "Hallogallo".into(),
+                album: "Neu!".into(),
+                year: Some(1972),
+            },
+        )
+        .unwrap();
+        for bad in ["last year", "12345", "999", "-1", "1.9.7.2"] {
+            let (_, result) = answered(vec!["Neu!", "Hallogallo", "Neu!", bad]);
+            let err = match result {
+                Err(err) => err.to_string(),
+                Ok(()) => panic!("{bad} was written as a year"),
+            };
+            assert!(err.contains("a year is four digits"), "{bad}: {err}");
+            assert_eq!(
+                tag::read(&file).unwrap().year,
+                Some(1972),
+                "{bad}: the year was lost anyway"
+            );
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// A real opus file, since `tag::set_fields` has to succeed for the code
     /// under test to be reached at all. `None` if ffmpeg is not installed.
     fn tiny_opus(at: &Path) -> Option<()> {
@@ -3203,14 +3505,14 @@ pub mod tests {
         let (tx, _rx) = channel();
         let cfg = config(true);
 
-        write_track(&cfg, &tx, &mut tracks, 1, "New".into(), "Title".into(), "typed").unwrap();
+        write_track(&cfg, &tx, &mut tracks, 1, named("New", "Title"), "typed").unwrap();
         assert!(orphan.is_file(), "the departed file was moved");
         assert!(
             !dir.join("02 - New - Title.opus").exists(),
             "a departed track was given a playlist number"
         );
 
-        write_track(&cfg, &tx, &mut tracks, 0, "New".into(), "Title".into(), "typed").unwrap();
+        write_track(&cfg, &tx, &mut tracks, 0, named("New", "Title"), "typed").unwrap();
         assert!(
             dir.join("01 - New - Title.opus").is_file(),
             "a listed track stopped being renamed, so the guard is too wide"
@@ -3231,7 +3533,7 @@ pub mod tests {
             let _ = std::fs::remove_dir_all(&dir);
             return;
         }
-        tag::set_fields(&third, "Cee", "Sea").unwrap();
+        tag::set_fields(&third, &named("Cee", "Sea")).unwrap();
         // Track 2 is recorded but its file has been deleted by hand.
         manifest::write_synced(
             &dir,
@@ -3396,7 +3698,7 @@ pub mod tests {
         // `manual` and the second would then rename and re-list the track.
         let pos = tracks.iter().position(|t| t.status == Status::Gone).unwrap();
         for title in ["N", "N again"] {
-            write_track(&cfg, &channel().0, &mut tracks, pos, "F".into(), title.into(), "typed")
+            write_track(&cfg, &channel().0, &mut tracks, pos, named("F", title), "typed")
                 .unwrap();
             assert!(departed.is_file(), "the departed file was renamed");
             assert!(!tracks[pos].listed, "the edit put it back in the playlist");
@@ -3621,7 +3923,7 @@ pub mod tests {
         tracks[0].artist.clear();
         let mut held = Some(Undo {
             what: "the edit of track 4".into(),
-            fields: vec![(4, "Neu!".into(), "Hallogallo".into())],
+            fields: vec![(4, named("Neu!", "Hallogallo"))],
         });
 
         assert!(search(&config(true), &tx, &mut tracks, &asker, &mut held, 4).is_err());
@@ -3644,6 +3946,16 @@ pub mod tests {
         track.artist = "Ed Sheeran".into();
         track.title = "Sapphire".into();
         track
+    }
+
+    /// Just the two fields most of these tests care about; album and year
+    /// ride along empty, which is what an untagged fixture has anyway.
+    pub fn named(artist: &str, title: &str) -> tag::Fields {
+        tag::Fields {
+            artist: artist.into(),
+            title: title.into(),
+            ..tag::Fields::default()
+        }
     }
 
     pub fn config(rename: bool) -> Config {

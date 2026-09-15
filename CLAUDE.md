@@ -184,9 +184,9 @@ call and file write. Nothing that blocks touches the render loop.
 - **`Msg::Library` carries `show`,** because the same message refreshes the
   counts after a sync. Showing the library then would swap the screen out from
   under the run the user is watching.
-- **`can_command` and `can_browse` are exclusive on `View`.** The two screens
-  move different cursors, so a key live on the wrong one acts on a row that is
-  not there.
+- **`can_command`, `can_browse` and `can_find` are exclusive on `View`.** The
+  three screens move different cursors, so a key live on the wrong one acts on
+  a row that is not there.
 - **`save_manifest` is keyed on the file, not on `listed`.** A departed track
   is unlisted but must stay in `.earworm`, or a video returning to the
   playlist downloads again beside the copy on disk.
@@ -336,6 +336,11 @@ call and file write. Nothing that blocks touches the render loop.
 - **`save_format` re-parses the file before editing it too.** A config that was
   already broken is not something the edit did, and "the edited config no
   longer parses" sends the reader to the wrong line.
+- **One replace for every file earworm owns.** `config::write_atomically` is
+  what both the config and the update cache go through. A torn cache costs
+  only an extra probe, so it could have kept `fs::write`, but two answers to
+  "how does earworm replace a file" is how the weaker one gets copied into
+  the next place that cannot afford it.
 - **The write is a temp file renamed over the resolved path.** `fs::write`
   truncates first, so a crash between the truncate and the write leaves a
   config that will not load. The rename follows the symlink, because a config
@@ -422,7 +427,34 @@ call and file write. Nothing that blocks touches the render loop.
   neither of them is where typing lands.
 - **`edit` and `tag::manual` ask the same form.** Both used to ask artist
   then title in sequence, so the second question covered the answer to the
-  first at the moment you wanted to compare them.
+  first at the moment you wanted to compare them. They no longer ask the same
+  boxes: `edit` asks four and `manual` two, because during a run the album
+  comes from the lookup and the question is which track this is.
+- **`^s` finds its two boxes by label, never by position.** They sit at 0 and
+  1 in both forms, so a positional swap goes on working right up until
+  somebody reorders them, and a test over either form passes either way.
+  `swappable` is what the key and the hint advertising it both read, so the
+  two cannot disagree about whether this form has them.
+- **A write writes every tag, so a caller changing one carries the rest.**
+  `tag::Fields` is the whole set and `set_fields` writes all of it, which is
+  what `held_fields` exists to supply: without it a swap or an `A` across
+  twenty tracks stripped the album and year off all of them, and the row
+  looked right because the row has no column for either.
+- **An empty album or year removes the tag rather than writing a blank one.**
+  lofty writes an empty album as a present-but-blank frame, which reads back
+  as a tagged file whose album happens to be `""` and stops `tag_tracks`
+  filling it in from the playlist name.
+- **lofty 0.25 has no year of its own.** `date()` reads the recording date and
+  falls back to the bare `Year` field; `set_date` writes a `Timestamp` whose
+  month and day are `None`. A year that will not parse refuses the edit rather
+  than writing nothing over what the file had.
+- **`Msg::Meta` carries album and year, not `Msg::Update`.** They change only
+  when somebody edits them, where `Update` is sent for every status a run
+  passes through. Same reason `Path` is its own message. Every path that
+  fills them in has to send it, which is what `offer_meta` is for: the
+  worker's `Track` is not the one `draw_detail` reads, and `tag_tracks`
+  filling in the album without saying so left the pane blank after a run and
+  populated after reopening the same folder from the library.
 - **The header's right half is dropped whole, never truncated.** Half a
   progress bar is a lie about how far along the run is. The left half names
   what you are looking at, so it is what stays.
@@ -463,10 +495,26 @@ call and file write. Nothing that blocks touches the render loop.
   channel knows it exists. Its one answer per session is a flag, not
   `app.update.is_none()`: a probe that found nothing has *sent* nothing, so
   without the flag the disconnected channel is re-polled every frame.
+- **The notice needs a surface that is not the intro.** `intro = false` is a
+  setting and `update_check` is a separate one, so an intro nobody draws must
+  not take update notifications with it: the probe otherwise ran, wrote its
+  cache and threw the answer away. `main` says it once as a flash when the
+  answer lands and the intro is not up to say it, rather than parking it on a
+  bar it would nag from for the rest of the session.
 - **`None` from `update::available` is three answers at once** — check off,
   cache stale and network dead, already current — so there is no false row
   in `--check` and no second line in the intro. Silence is the no-news
   answer, and adding a row would have to invent a question.
+- **A stamp ahead of the clock is a clock that moved.** It counts as just
+  written, because the cache is the only throttle there is: subtracting and
+  giving up made the file unreadable instead, and every start went back to
+  GitHub for as long as the clock stayed behind. `read_cache_at` and
+  `write_cache_at` take the path so this is testable without setting
+  `XDG_CACHE_HOME`, which in a threaded test runner is a process-wide change
+  — the same trap the colour depth documents.
+- **`hint_for` is kept apart from the build flag.** `option_env!` resolves at
+  compile time, so only one branch exists in any given binary and a test of
+  `hint()` alone passes by agreeing with however the machine was built.
 - **The cache is the throttle.** Tag plus unix stamp in
   `~/.cache/earworm/latest`, MAX_AGE 24h; the network is touched only when
   the file is missing or old. `--check` is the one synchronous caller, and
@@ -540,6 +588,51 @@ call and file write. Nothing that blocks touches the render loop.
 - **One filter box, two screens.** `snap()` puts both cursors back on a row
   that is showing, because a message can change either list. The band asks
   the view which counts to print.
+- **Every screen's keys yield to the filter box.** `handle_key` checked
+  `View::Library` before `typing_filter`, so `/` on the library raised the
+  band and then sent every letter to the library's own keys: typing "no"
+  cycled the sort and `e` opened a rename. The box could be opened and never
+  filled. The `Found` and `Library` branches both carry `!app.typing_filter`
+  now, which is what the track list always had by sitting after it.
+- **`t` is library-only, like `space` and `f`, and the track list names the
+  route instead.** The search is about the library rather than the playlist on
+  screen, and `T` on the track list already means "look this one up again":
+  two keys a letter apart meaning different searches is the `O`/`o` problem
+  again. So the help there carries an `Esc t` row rather than a key, and only
+  when there is a library behind the run for it to reach.
+- **`View::Found` is the library's filter asked of the tracks.** The rows say
+  which folders hold a match and the preview says which tracks, one folder at
+  a time and only above `PREVIEW_FROM`; the search screen is the whole library
+  at once, which is the case neither of those covers. Same box, same query:
+  `t` switches between them, so the answer does not change when the screen
+  does.
+- **The search cursor is the `(shelf, file)` pair, never a row number.**
+  `found_rows` is recomputed from the filter like `rows()` and `shelf_rows()`,
+  so a sync rebuilding the library, or a keystroke in the box rebuilding the
+  list, would leave a row number pointing at a different track. `found_snap`
+  falls to the first result rather than the nearest: editing the query is a
+  new question, not a move within the old answer.
+- **An empty query is no results, not every track.** A search screen listing
+  the whole library is the library screen, which is where `t` was pressed.
+  `find_tracks` opens the box instead, and refuses to leave the library at
+  all when the query matches nothing: a screen of nothing with the box already
+  closed is a dead end.
+- **`Cmd::Open` carries the filename to land on, and the worker resolves it.**
+  `open_shelf` numbers tracks from the filename and numbers departures past
+  the playlist, so the index a search result would compute is not the one the
+  row ends up with. `Msg::Focus` carries the answer back and clears `follow`,
+  or the next progress message drags the cursor off the track that was asked
+  for.
+- **The library filter matches a folder's name or a track inside it.**
+  `Shelf.files` is already in memory from the stat pass `library` does, so
+  answering "which playlist holds that track" costs no disk and no worker
+  round trip, and without it the answer was opening folders one at a time.
+  `shelf_matches` short-circuits on the name; the filenames are lowercased per
+  call rather than kept twice, since a second copy of every filename in the
+  library is the costlier half. The preview is what says *which* track
+  matched, so below `PREVIEW_FROM` a folder can be on the list with nothing on
+  screen saying why: `t` is the answer to that, and the reason it is offered
+  in the status bar rather than only under `h`.
 - **Undo holds the values, not a diff, and only one level.** The edit worth
   taking back is the one just seen landing on the row; a stack would be a
   second history to keep in step with the files on disk. It clears itself
@@ -673,6 +766,13 @@ call and file write. Nothing that blocks touches the render loop.
   its buffer and blocks the child forever.
 - **ureq's global timeout defaults to `None`.** The shared agent in
   `lookup::agent()` sets it. Don't build a bare `Agent`.
+- **The rate limit is paced before a request, never after it.** What these
+  services ask for is a gap between requests, and one that took longer than
+  the gap has already served it: `sleep` after every call paid it twice, and
+  on a slow connection that was most of the tagging pass. `Limiter` holds the
+  earliest moment the next request may leave, claimed under the lock and
+  slept outside it, so the rate is the service's rather than one caller's and
+  a pool over these lookups would still honour it.
 - **Never embed an AcoustID key.** It comes from `ACOUSTID_API_KEY` only.
 
 ### Drawing and config
