@@ -2,8 +2,7 @@
 
 **Playlist in, library out.**
 
-A terminal app that turns a YouTube playlist into a folder of tagged audio
-files with cover art.
+A terminal app that turns a YouTube playlist into audio files with verified tags, cover art and an .m3u8.
 
 ![A playlist open in earworm: the track list on the left, the selected track's
 tags and file path in a pane on the right, and the run's settings along the
