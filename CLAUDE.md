@@ -108,6 +108,19 @@ call and file write. Nothing that blocks touches the render loop.
 - **Never `bail!` out of the pipeline for a download failure.** yt-dlp exits
   non-zero if any single entry fails, and aborting throws away the tags, cover
   and playlist for every track that succeeded. Carry it into the summary.
+- **An edit survives a resync through three links, and the guarantee is the
+  join.** `manifest::read` points the scan at the renamed file so it comes
+  back `Have` rather than being predicted absent; `write_archive` names every
+  id whose file exists so yt-dlp skips it rather than writing over it; and
+  `tag_tracks`'s `Have` branch reads the tags off disk and neither identifies
+  nor renames. Each link has its own test, and
+  `a_resync_keeps_the_name_an_edit_gave_a_track` is the three in a row,
+  driven through a stub yt-dlp printing the filename the template would have
+  predicted. Note what it does *not* claim: the number in the filename does
+  not follow a reordered playlist, because `rename` runs only in the identify
+  arm that `Have` skips. The `.m3u8` is written in the new order with the
+  current filenames and `open_shelf` renumbers from those, so it stays
+  self-consistent while drifting from the playlist position.
 - **Renaming and `scan` are coupled through `manifest.rs`.** `scan` decides a
   track is already downloaded by predicting yt-dlp's filename, which a rename
   invalidates. The sidecar closes that gap, so anything that moves a file must
@@ -209,6 +222,29 @@ call and file write. Nothing that blocks touches the render loop.
   retry time the tracks that worked are `ok` or `manual`, so keying on
   `Status::Have` would leave them out, and yt-dlp remuxing them fails the whole
   run.
+- **`--embed-thumbnail` belongs with the other cover arguments.** It sat in
+  the unconditional block, so `--no-cover` embedded YouTube's thumbnail in
+  every track while its own help promised nothing was embedded. It stays on
+  by default because it is what carries art for a track the lookup could not
+  place, which on a folder of Art Tracks is all of them.
+- **The embedded cover is capped at `COVER_MAX`, which is Deezer's
+  `cover_xl`.** The number is "no larger than the best source earworm would
+  pick for itself" rather than a taste. YouTube serves an Art Track's
+  thumbnail at 2048 square: on a real folder that was 2.9MB of art on 3.5MB of
+  audio, the same image in all twelve files. `cap_cover` measures with
+  `jpeg_size` and returns early when it is already small, so it costs one tag
+  read per new track and nothing on a later pass. A picture that is not a
+  JPEG cannot be measured and is left alone, which is right: the only ones
+  that are not come from the `c` picker, where somebody chose the file.
+- **`shrink` goes through files, not pipes.** `run_bounded` polls `try_wait`
+  and never writes to the child, so a piped stdin nobody closes leaves ffmpeg
+  waiting for input that is not coming. It also checks the output is a JPEG
+  before writing it back, or a truncated resize replaces good art with
+  something no player will show.
+- **`run_with` takes the binary, like `scan_with`.** Asserting on a helper
+  that built the download's arguments would leave the call site free to pass
+  anything, which is exactly how the scan's format came to be right in the
+  helper and hardcoded at the call.
 - **A pass deletes only the folder image it wrote.** Every track carries the
   art embedded, so `cover.jpg` is a leftover once the pass finishes, but one
   the user dropped in by hand or chose with `c` is not: `folder_covers` reads

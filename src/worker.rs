@@ -766,6 +766,23 @@ fn tag_tracks(
                 // After the playlist-name fallback, or the pane shows the
                 // album the file had rather than the one it now holds.
                 offer_meta(tx, track);
+                /* Last, so it measures whatever finally ended up in the file:
+                   `--embed-thumbnail` is the fallback for a track the lookup
+                   could not place, and for a YouTube Art Track that is 2048
+                   square and several times the size of the audio. */
+                match tag::cap_cover(&path) {
+                    Ok(true) => {
+                        let _ = tx.send(Msg::Log(format!(
+                            "cover: track {} resized to {}px",
+                            track.index,
+                            tag::COVER_MAX
+                        )));
+                    }
+                    Ok(false) => {}
+                    Err(err) => {
+                        let _ = tx.send(Msg::Log(format!("cover: track {}: {err}", track.index)));
+                    }
+                }
                 rename(cfg, tx, track);
             }
             Err(err) => {
@@ -3262,6 +3279,119 @@ pub mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /* The chain behind "does a resync keep what I typed". Every link is
+       tested on its own; this is the three of them in a row, because the
+       guarantee lives in the join and not in any one of them:
+
+         1. the sidecar maps the id to the renamed file, so the scan follows
+            it instead of the name yt-dlp would predict,
+         2. the archive names that id, so the download skips it rather than
+            writing over it,
+         3. the `Have` branch reads the tags off disk and neither identifies
+            nor renames, so the row comes back saying what was typed.
+
+       Driven through a stub yt-dlp that prints the path the scan would have
+       predicted, which is exactly what a real resync of a renamed folder
+       hands back. */
+    #[test]
+    fn a_resync_keeps_the_name_an_edit_gave_a_track() {
+        let dir = scratch("resyncedit");
+        let downloaded = dir.join("01 - Original Title.opus");
+        if tiny_opus(&downloaded).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let mut cfg = config(true);
+        cfg.dir = dir.parent().unwrap().to_path_buf();
+        cfg.url = "https://www.youtube.com/playlist?list=PL1".into();
+
+        // What the first run left behind: one track, tagged by the lookup.
+        let mut tracks = vec![Track::new(
+            1,
+            "vid1".into(),
+            "Original Title".into(),
+            downloaded.clone(),
+        )];
+        tracks[0].listed = true;
+        let (tx, _rx) = channel();
+
+        // And then the edit, which renames the file and records the new name.
+        write_track(
+            &cfg,
+            &tx,
+            &mut tracks,
+            0,
+            named("Kraftwerk", "Autobahn"),
+            "typed",
+        )
+        .unwrap();
+        sync_manifest(&cfg, &tracks);
+        let edited = tracks[0].path.clone().unwrap();
+        assert_ne!(edited, downloaded, "the edit did not rename the file");
+        assert!(!downloaded.exists() && edited.is_file());
+
+        /* The resync. The stub prints what yt-dlp would: the id, the upstream
+           title, and the filename the template predicts, which is the name
+           the track no longer has. */
+        let bin = dir.join("yt-dlp");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\nprintf 'vid1\t1\tOriginal Title\t{}\\n'\n",
+                downloaded.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let listing = crate::ytdlp::scan_with(&bin.display().to_string(), &cfg).unwrap();
+        let mut found = listing.tracks;
+
+        // 1. The sidecar won: the scan is pointing at the renamed file.
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].path.as_deref(), Some(edited.as_path()));
+        assert_eq!(
+            found[0].status,
+            Status::Have,
+            "the scan would have downloaded it again beside the renamed copy"
+        );
+
+        // 2. Which is what puts it in the archive, so the download skips it.
+        let archive = dir.join("archive");
+        crate::ytdlp::write_archive(&found, &archive).unwrap();
+        assert!(
+            std::fs::read_to_string(&archive).unwrap().contains("vid1"),
+            "the download would have written over the edited file"
+        );
+
+        // 3. And the tag pass reads what is on disk rather than looking it up.
+        let asker = Asker { tx: tx.clone(), enabled: false };
+        let mut cover = CoverState { written: true };
+        tag_tracks(
+            &cfg,
+            &tx,
+            &AtomicBool::new(false),
+            &mut found,
+            "Focus",
+            &asker,
+            &mut cover,
+            None,
+        );
+
+        assert_eq!(found[0].artist, "Kraftwerk", "the resync took the artist back");
+        assert_eq!(found[0].title, "Autobahn", "the resync took the title back");
+        // The row label is title then artist, which is how the list reads.
+        assert_eq!(found[0].name, "Autobahn - Kraftwerk");
+        // The file too, not only the row: nothing renamed it back.
+        assert!(edited.is_file(), "the resync renamed the file");
+        assert!(!downloaded.exists(), "the upstream name came back");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /* The worker's copy of a track is not the one the detail pane draws, so a
        run that filled the album in and said nothing left the pane blank until
        the folder was reopened from the library: the same track, two answers,
@@ -3472,7 +3602,7 @@ pub mod tests {
 
     /// A real opus file, since `tag::set_fields` has to succeed for the code
     /// under test to be reached at all. `None` if ffmpeg is not installed.
-    fn tiny_opus(at: &Path) -> Option<()> {
+    pub fn tiny_opus(at: &Path) -> Option<()> {
         let made = std::process::Command::new("ffmpeg")
             .args(["-v", "error", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono"])
             .args(["-t", "0.2", "-c:a", "libopus", "-y"])

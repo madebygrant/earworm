@@ -9,9 +9,15 @@ use lofty::probe::Probe;
 use lofty::tag::items::Timestamp;
 use lofty::tag::{Accessor, Tag, TagExt};
 
+use std::time::Duration;
+
 use crate::app::{Asker, Status};
 use crate::config::Config;
 use crate::lookup::{self, Match};
+
+/// One image through ffmpeg, which is a decode and an encode of a few
+/// megabytes. Generous, since the alternative is leaving the art oversized.
+const COVER_RESIZE: Duration = Duration::from_secs(20);
 
 static WRITING: AtomicBool = AtomicBool::new(false);
 
@@ -145,6 +151,83 @@ pub fn image_extension(data: &[u8]) -> Option<&'static str> {
     } else {
         None
     }
+}
+
+/* No bigger than Deezer's `cover_xl`, which is the largest earworm would
+   ever choose for itself: the cap is "not larger than our own best source"
+   rather than a number to argue about. YouTube serves an Art Track's
+   thumbnail at 2048 square, and `--embed-thumbnail` puts that in every file
+   the lookup could not place, where it is several times the size of the
+   audio it is attached to. */
+pub const COVER_MAX: u16 = 1000;
+
+/// The embedded front cover, for carrying art across a rewrite or measuring
+/// what is already there. `None` when the file has no picture.
+pub fn read_cover(path: &Path) -> Option<Vec<u8>> {
+    let file = open(path).ok()?;
+    let tag = file.primary_tag().or_else(|| file.first_tag())?;
+    let front = tag
+        .pictures()
+        .iter()
+        .find(|p| p.pic_type() == PictureType::CoverFront)
+        .or_else(|| tag.pictures().first())?;
+    Some(front.data().to_vec())
+}
+
+/* Shrinks an oversized embedded cover in place, and says whether it had to.
+   Measured with `jpeg_size`, so a picture that is not a JPEG is left alone:
+   the only ones that are not come from the `c` picker, where somebody chose
+   the file on purpose. */
+pub fn cap_cover(path: &Path) -> Result<bool> {
+    let Some(image) = read_cover(path) else {
+        return Ok(false);
+    };
+    let (w, h) = lookup::jpeg_size(&image);
+    if w == 0 || (w <= COVER_MAX && h <= COVER_MAX) {
+        return Ok(false);
+    }
+    let smaller = shrink(&image).context("could not resize the cover")?;
+    set_cover(path, &smaller)?;
+    Ok(true)
+}
+
+/* Through files rather than pipes: `run_bounded` polls `try_wait` and never
+   writes to the child, so a piped stdin nobody closes would leave ffmpeg
+   waiting for input that is not coming. */
+fn shrink(image: &[u8]) -> Option<Vec<u8>> {
+    let dir = std::env::temp_dir().join(format!(
+        "earworm-cover-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).ok()?;
+    let (from, to) = (dir.join("in.jpg"), dir.join("out.jpg"));
+    let _ = std::fs::remove_file(&to);
+    std::fs::write(&from, image).ok()?;
+
+    let out = lookup::run_bounded(
+        std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-i"])
+            .arg(&from)
+            // Never upscales, and keeps whatever aspect the art came with.
+            .args([
+                "-vf",
+                &format!("scale={COVER_MAX}:{COVER_MAX}:force_original_aspect_ratio=decrease"),
+            ])
+            .args(["-q:v", "3"])
+            .arg(&to)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+        COVER_RESIZE,
+    );
+    let smaller = out
+        .filter(|o| o.status.success())
+        .and_then(|_| std::fs::read(&to).ok())
+        // A truncated write and a wrong format both fail here rather than
+        // replacing good art with something no player will show.
+        .filter(|bytes| image_extension(bytes) == Some("jpg"));
+    let _ = std::fs::remove_dir_all(&dir);
+    smaller
 }
 
 pub fn set_cover(path: &Path, image: &[u8]) -> Result<()> {
@@ -388,7 +471,8 @@ fn choose_artist(asker: &Asker, index: usize, old: &str, new: &str) -> (String, 
 
 #[cfg(test)]
 mod tests {
-    use super::{Fields, image_extension, open, read, set_fields};
+    use super::*;
+    use crate::lookup;
     use std::path::{Path, PathBuf};
 
     /* Silent, untagged and in whatever container the codec implies, which is
@@ -473,6 +557,73 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A square JPEG of `px`, the shape YouTube serves an Art Track's
+    /// thumbnail in. `None` if ffmpeg is not installed.
+    fn square_jpeg(at: &Path, px: u32) -> Option<()> {
+        std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i"])
+            .arg(format!("testsrc=size={px}x{px}:duration=1:rate=1"))
+            .args(["-frames:v", "1", "-y"])
+            .arg(at)
+            .status()
+            .ok()
+            .filter(|s| s.success())
+            .map(|_| ())
+    }
+
+    /* YouTube serves an Art Track's thumbnail at 2048 square, and
+       `--embed-thumbnail` puts it in every file the lookup could not place:
+       on a real folder that was 2.9MB of art on 3.5MB of audio, more than a
+       third of every file and the same image in all twelve. */
+    #[test]
+    fn an_oversized_cover_is_shrunk_and_a_small_one_is_left_alone() {
+        let dir = std::env::temp_dir().join(format!("earworm-cap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let track = dir.join("01 - A.opus");
+        let big = dir.join("big.jpg");
+        if crate::worker::tests::tiny_opus(&track).is_none() || square_jpeg(&big, 2048).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let art = std::fs::read(&big).unwrap();
+        assert_eq!(lookup::jpeg_size(&art).0, 2048, "the fixture is not 2048 wide");
+        set_cover(&track, &art).unwrap();
+        let before = std::fs::metadata(&track).unwrap().len();
+
+        assert!(cap_cover(&track).unwrap(), "an oversized cover was left alone");
+
+        let capped = read_cover(&track).expect("the cover went entirely");
+        let (w, h) = lookup::jpeg_size(&capped);
+        assert!(w <= COVER_MAX && h <= COVER_MAX, "still {w}x{h}");
+        assert_eq!(w, COVER_MAX, "it shrank past the cap rather than to it");
+        // Still a picture a player will show, not a truncated write.
+        assert_eq!(image_extension(&capped), Some("jpg"));
+        assert!(
+            std::fs::metadata(&track).unwrap().len() < before,
+            "the file did not get smaller"
+        );
+        /* Idempotent: a second pass has nothing to do, which is what keeps
+           this off the cost of every later sync. */
+        assert!(!cap_cover(&track).unwrap(), "it resized an already-capped cover");
+
+        // Under the cap is left exactly as it was, bytes included.
+        let small = dir.join("small.jpg");
+        square_jpeg(&small, 600).unwrap();
+        let art = std::fs::read(&small).unwrap();
+        set_cover(&track, &art).unwrap();
+        assert!(!cap_cover(&track).unwrap());
+        assert_eq!(read_cover(&track).unwrap(), art, "a small cover was re-encoded");
+
+        // And a file with no picture at all is not an error.
+        let bare = dir.join("02 - B.opus");
+        crate::worker::tests::tiny_opus(&bare).unwrap();
+        assert!(read_cover(&bare).is_none());
+        assert!(!cap_cover(&bare).unwrap());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn detects_image_types_by_magic_bytes() {
         assert_eq!(image_extension(&[0xFF, 0xD8, 0xFF, 0xE0]), Some("jpg"));
@@ -482,4 +633,5 @@ mod tests {
         assert_eq!(image_extension(b""), None);
     }
 }
+
 

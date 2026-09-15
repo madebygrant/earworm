@@ -84,7 +84,10 @@ earworm --check                          # is everything installed, then exit
 
 Tracks land in `<dir>/<playlist name>/`, named `NN - Artist - Title.opus` once
 earworm is confident of the tags, next to `<playlist name>.m3u8`. The cover
-art lives embedded in each track rather than as a folder image.
+art lives embedded in each track rather than as a folder image, capped at
+1000x1000: YouTube serves an album's art at 2048 square for auto-generated
+"Provided to YouTube by" uploads, which is several times the size of the audio
+it is attached to and the same image in every file of the folder.
 
 Opus is the default. `--format` takes `opus`, `m4a`, `mp3`, `flac`, `vorbis`
 or `alac`. Typing a URL offers the format before the download starts, which

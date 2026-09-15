@@ -64,10 +64,12 @@ pub fn scan(cfg: &Config) -> Result<Listing> {
 }
 
 /// Takes the binary so a test can hand it a stub and read back the arguments
-/// this actually ran with. The predicted filename is the whole point of the
+/// this actually ran with. Visible to the crate for the one test that has to
+/// span a scan and the tag pass either side of it, which no single module
+/// can reach. The predicted filename is the whole point of the
 /// scan, and a test of the helper that builds the template passes whatever
 /// the call site chooses to do with it.
-fn scan_with(bin: &str, cfg: &Config) -> Result<Listing> {
+pub(crate) fn scan_with(bin: &str, cfg: &Config) -> Result<Listing> {
     let out = Command::new(bin)
         .args([
             "--skip-download",
@@ -157,7 +159,7 @@ fn scan_with(bin: &str, cfg: &Config) -> Result<Listing> {
 /// `Skipped` is the one status that also belongs here: it is how the run says
 /// it was never asked for this track, and the archive is what makes yt-dlp
 /// honour that without narrowing the listing the way `--playlist-items` would.
-fn write_archive(tracks: &[Track], path: &Path) -> Result<usize> {
+pub(crate) fn write_archive(tracks: &[Track], path: &Path) -> Result<usize> {
     let mut file = std::fs::File::create(path)?;
     let mut count = 0;
     for track in tracks {
@@ -184,6 +186,14 @@ impl Drop for Download {
 }
 
 pub fn run(cfg: &Config, tracks: &mut [Track], tx: &Sender<Msg>) -> Result<()> {
+    run_with("yt-dlp", cfg, tracks, tx)
+}
+
+/// Takes the binary for the same reason `scan_with` does: a test that
+/// asserted on a helper building these arguments would leave the call site
+/// free to pass anything, which is how the scan's format came to be right in
+/// the helper and hardcoded at the call.
+fn run_with(bin: &str, cfg: &Config, tracks: &mut [Track], tx: &Sender<Msg>) -> Result<()> {
     /* A retry downloads a second time in the same process, and the guard
        removes this whole directory on the way out, so the runs cannot share
        a name. */
@@ -204,11 +214,10 @@ pub fn run(cfg: &Config, tracks: &mut [Track], tx: &Sender<Msg>) -> Result<()> {
         std::fs::create_dir_all(dir)?;
     }
 
-    let mut cmd = Command::new("yt-dlp");
+    let mut cmd = Command::new(bin);
     cmd.args([
         "--yes-playlist",
         "--extract-audio",
-        "--embed-thumbnail",
         "--embed-metadata",
         "--quiet",
         "--newline",
@@ -242,6 +251,11 @@ pub fn run(cfg: &Config, tracks: &mut [Track], tx: &Sender<Msg>) -> Result<()> {
     /* --write-thumbnail has no playlist-only mode, so per-track images go to a
     temp dir and are dropped; only pl_thumbnail is kept. */
     if let Some(dir) = &guard.thumbs {
+        /* Here rather than in the unconditional block above, or --no-cover
+           embeds YouTube's thumbnail in every track while its own help
+           promises nothing is embedded. It is the fallback that carries a
+           track the lookup could not place, so it stays on by default. */
+        cmd.arg("--embed-thumbnail");
         cmd.args(["--write-thumbnail", "--convert-thumbnails", "jpg"]);
         cmd.arg("--output")
             .arg(format!("thumbnail:{}/%(id)s.%(ext)s", dir.display()));
@@ -260,7 +274,7 @@ pub fn run(cfg: &Config, tracks: &mut [Track], tx: &Sender<Msg>) -> Result<()> {
 
     let mut child = cmd
         .spawn()
-        .map_err(|e| anyhow::anyhow!(crate::deps::launch_error("yt-dlp", &e)))?;
+        .map_err(|e| anyhow::anyhow!(crate::deps::launch_error(bin, &e)))?;
     CHILD.store(child.id(), Ordering::SeqCst);
 
     let errors = child.stderr.take().unwrap();
@@ -406,6 +420,57 @@ mod tests {
             let template = output_for(format);
             assert!(template.ends_with(ext), "{format} scanned for {template}");
         }
+    }
+
+    /* `--no-cover` promises "nothing fetched, nothing embedded in the
+       tracks", and `--embed-thumbnail` sat in the unconditional block, so
+       every track still carried YouTube's thumbnail. For an Art Track that is
+       2048 square and bigger than the audio it is attached to. */
+    #[test]
+    fn no_cover_embeds_no_thumbnail() {
+        let args_for = |cover: bool| {
+            let dir = std::env::temp_dir()
+                .join(format!("earworm-thumb-{cover}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let bin = dir.join("yt-dlp");
+            let log = dir.join("log");
+            std::fs::write(
+                &bin,
+                format!(
+                    "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\" >> \"{}\"; done\nexit 0\n",
+                    log.display()
+                ),
+            )
+            .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let mut cfg = crate::worker::tests::config(true);
+            cfg.dir = dir.join("music");
+            cfg.cover = cover;
+            let mut tracks = vec![Track::new(1, "id".into(), "n".into(), dir.join("a.opus"))];
+            let (tx, _rx) = std::sync::mpsc::channel();
+            run_with(&bin.display().to_string(), &cfg, &mut tracks, &tx).unwrap();
+            let args = std::fs::read_to_string(&log).unwrap_or_default();
+            let _ = std::fs::remove_dir_all(&dir);
+            args
+        };
+
+        let on = args_for(true);
+        assert!(on.contains("--embed-thumbnail"), "the default lost its art: {on}");
+        assert!(on.contains("--write-thumbnail"), "{on}");
+
+        let off = args_for(false);
+        assert!(
+            !off.contains("--embed-thumbnail"),
+            "--no-cover embedded a thumbnail anyway: {off}"
+        );
+        assert!(!off.contains("--write-thumbnail"), "{off}");
+        // The rest of the download is untouched by the flag.
+        assert!(off.contains("--extract-audio"), "{off}");
     }
 
     /* The archive is what keeps yt-dlp off a track the run was not asked for,
