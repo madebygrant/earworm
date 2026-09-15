@@ -3,9 +3,7 @@
 **Playlist in, library out.**
 
 A terminal app that turns a YouTube playlist into a folder of tagged audio
-files. `01 - Boards of Canada - Roygbiv.opus`, cover art included, not forty
-copies of `Song (Official Audio).opus` with the upload metadata in the artist
-field.
+files with cover art.
 
 ![A playlist open in earworm: the track list on the left, the selected track's
 tags and file path in a pane on the right, and the run's settings along the
