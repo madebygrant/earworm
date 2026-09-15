@@ -172,6 +172,13 @@ const WAVE: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█']
 /* Drawn from the elapsed milliseconds alone, so it runs at the same speed
    whether the event loop is idling at its poll timeout or spinning on
    messages, and skipping it costs nothing that was ever computed. */
+/* What the sign-off says earworm is for, to somebody who has just run it for
+   the first time and is watching the wordmark land. Kept short because the
+   update notice is appended to it and `truncate` drops the tail: on a narrow
+   terminal a long one eats the command that acts on the news. A constant
+   rather than a literal, since the tests assert on it in three places. */
+pub const TAGLINE: &str = "playlist in, library out";
+
 fn draw_intro(frame: &mut Frame, ms: u64, update: Option<&str>) {
     let area = frame.area();
     // Below this the wordmark would wrap into nonsense, so only the wave runs.
@@ -237,7 +244,7 @@ fn draw_intro(frame: &mut Frame, ms: u64, update: Option<&str>) {
 
     // Last, so it reads as a signature rather than part of the animation.
     if ms > wave_at + 250 {
-        let mut sign = format!("youtube playlists, tagged  ·  v{}", update::current());
+        let mut sign = format!("{TAGLINE}  ·  v{}", update::current());
         if let Some(latest) = update {
             /* The numbers lead and the hint yields: a narrow terminal keeps
                the news and drops the way to act on it, not the other round. */
@@ -1041,6 +1048,12 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             if app.tracks.iter().any(|t| t.status == Status::Failed) {
                 extra.push(("   r retry".to_string(), Style::new().fg(AMBER)));
             }
+            /* Counted, because the key deletes files and the number is the
+               first thing anyone would ask. Dim like the `gone` rows it
+               answers: a departure is a fact about the playlist, not a fault. */
+            if app.can_purge() {
+                extra.push((format!("   D delete {} departed", app.purgeable()), Style::new().fg(DIM)));
+            }
         } else {
             extra.push(("   / filter".to_string(), Style::new().fg(DIM)));
         }
@@ -1218,6 +1231,9 @@ fn draw_help(frame: &mut Frame, app: &App) {
             }
             if app.undoable.is_some() {
                 rows.push(("", "u", "undo the last tag change"));
+            }
+            if app.can_purge() {
+                rows.push(("", "D", "delete the departed files"));
             }
             rows.extend([
                 ("marked", "s", "swap artist and title"),
@@ -1593,7 +1609,7 @@ fn take_cols(text: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{bar, popup_width, wrap};
+    use super::{TAGLINE, bar, popup_width, wrap};
     use crate::app::{App, Msg, Shelf, Status, Track, View};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
@@ -2772,6 +2788,36 @@ mod tests {
         assert!(other.contains("… 37 more"), "the pane overflowed: {other:?}");
     }
 
+    /* The key deletes files, so the bar names how many, and it is lit only
+       for departures a listing proved: one read off the playlist file looks
+       identical on the row and must not offer a deletion. */
+    #[test]
+    fn the_bar_offers_a_purge_only_for_proven_departures() {
+        let screen = |proven: bool| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(tx, "settings".into());
+            app.intro_done = true;
+            app.done = Some(Ok(String::new()));
+            for (i, status) in [Status::Ok, Status::Gone, Status::Gone].iter().enumerate() {
+                let mut t = Track::new(i + 1, "id".into(), format!("T{i}"), std::path::PathBuf::from("/x"));
+                t.status = *status;
+                t.departure_proven = proven && *status == Status::Gone;
+                app.tracks.push(t);
+            }
+            let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
+            terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..12)
+                .map(|y| (0..120).map(|x| buffer[(x, y)].symbol().to_string()).collect::<String>())
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let lit = screen(true);
+        assert!(lit.contains("D delete 2 departed"), "{lit:?}");
+        let dark = screen(false);
+        assert!(!dark.contains("D delete"), "offered for offline departures: {dark:?}");
+    }
+
     /* The shelf row already needs its name plus 40 columns of counts, so a
        pane at this width would leave nothing for either. */
     #[test]
@@ -3312,7 +3358,7 @@ mod tests {
             landed.lines().any(|l| l.chars().any(|c| super::WAVE.contains(&c))),
             "no wave: {landed:?}"
         );
-        assert!(landed.contains("youtube playlists, tagged"), "{landed:?}");
+        assert!(landed.contains(TAGLINE), "{landed:?}");
 
         // The reveal is left to right, so an early frame is strictly shorter.
         let widest = |rows: Vec<String>| rows.iter().map(|r| r.chars().count()).max().unwrap_or(0);
@@ -3344,7 +3390,7 @@ mod tests {
     #[test]
     fn the_signature_names_the_update_when_there_is_one() {
         let plain = intro_rows(1400, 100, 14).join("\n");
-        assert!(plain.contains("youtube playlists, tagged"), "{plain:?}");
+        assert!(plain.contains(TAGLINE), "{plain:?}");
         assert!(!plain.contains('→'), "nothing newer said something: {plain:?}");
 
         /* The `v` is added by this line, not carried in: a release tag arrives
@@ -3353,7 +3399,7 @@ mod tests {
            not hardcoded, or a release bump would fail this test. */
         let told = intro_rows_with(1400, 100, 14, Some("0.2.0")).join("\n");
         let want = format!("v{} → v0.2.0", crate::update::current());
-        assert!(told.contains("youtube playlists, tagged"), "{told:?}");
+        assert!(told.contains(TAGLINE), "{told:?}");
         assert!(told.contains(&want), "{told} has no {want}");
         assert!(!told.contains("vv"), "doubled the v: {told:?}");
         assert!(told.contains("cargo install"), "{told:?}");

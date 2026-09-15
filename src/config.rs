@@ -4,7 +4,12 @@ use anyhow::{Context, Result};
 use clap::{ArgMatches, Parser, parser::ValueSource};
 use serde::Deserialize;
 
-/// Download a YouTube playlist as tagged audio files.
+/* `about` with no value reads Cargo.toml's `description`, so that is what
+   `--help` actually prints and editing the line below changes nothing there.
+   Kept saying the same thing, since two answers to "what is this" is how they
+   drift. */
+/// Playlist in, library out. Turns a YouTube playlist into audio files with
+/// verified tags, cover art and an .m3u8.
 #[derive(Parser, Debug)]
 #[command(name = "earworm", version, about, long_about = None)]
 pub struct Cli {

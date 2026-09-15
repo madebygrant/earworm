@@ -177,6 +177,14 @@ pub struct Track {
     pub mbid: Option<String>,
     /// Carries a playlist entry, so an edit can rewrite the .m3u8 in order.
     pub listed: bool,
+    /* Set only by `note_departures`, which has just seen a complete,
+       unnarrowed listing without this video in it. `mark_departed` reads the
+       same fact off the last playlist file instead and leaves this false: a
+       narrowed run writes a short `.m3u8`, so an offline read can call half a
+       folder departed, and deleting on that would take music. Nothing else
+       distinguishes the two `Gone`s, and this is what `D` is allowed to act
+       on. */
+    pub departure_proven: bool,
 }
 
 impl Track {
@@ -198,6 +206,7 @@ impl Track {
             duration: 0,
             mbid: None,
             listed: false,
+            departure_proven: false,
         }
     }
 }
@@ -324,6 +333,10 @@ pub enum Cmd {
     /// Rename a playlist's folder. Carries the folder rather than the row,
     /// for the same reason `Open` does.
     Rename(PathBuf),
+    /// Delete the files of every track a complete listing said had left the
+    /// playlist. No indices: it is the whole set or nothing, and the worker
+    /// re-checks each one rather than trusting the screen.
+    Purge,
     /// Hand a folder to the platform's file manager. Everything downstream of
     /// earworm happens there or in a player, and the alternative is retyping
     /// a path the screen is already showing.
@@ -481,6 +494,10 @@ pub enum Msg {
     /// worker holds the old values, so the UI cannot work this out for
     /// itself, and a key it cannot say is live is a key nobody presses.
     Undoable(Option<String>),
+    /// Rows to take off the list, by track index, after their files have gone.
+    /// Not `Tracks`, which restarts the estimate's clock and means "the scan
+    /// is over"; these rows simply stop existing.
+    Dropped(Vec<usize>),
     /// Narrow the list to the tracks nothing has confirmed and put the cursor
     /// on the first. The finish menu's answer to "what now" when the run left
     /// guesses behind.
@@ -1028,6 +1045,19 @@ impl App {
                 }
             }
             Msg::Unmark => self.marked.clear(),
+            Msg::Dropped(gone) => {
+                self.tracks.retain(|t| !gone.contains(&t.index));
+                for index in &gone {
+                    self.marked.remove(index);
+                }
+                /* The cursor is a position in `tracks`, and the rows it sat
+                   on or after have moved up. Clamped rather than snapped: the
+                   filter's snap only moves a cursor that is on a hidden row,
+                   and one past the end is not hidden, it is nowhere. */
+                if !self.tracks.is_empty() {
+                    self.cursor = self.cursor.min(self.tracks.len() - 1);
+                }
+            }
             Msg::Idle => self.busy = false,
             Msg::Restart => {
                 self.done = None;
@@ -1209,6 +1239,26 @@ impl App {
             && self.prompt.is_none()
             && !self.busy
             && !self.tracks.is_empty()
+    }
+
+    /// Whether `D` has anything to delete. Proven departures only: a `Gone`
+    /// read off the last playlist file is not enough to delete on, and the
+    /// key is not drawn for it rather than drawn and refused. No stat here,
+    /// since this runs in the draw; the worker checks the file is there.
+    pub fn can_purge(&self) -> bool {
+        self.can_command()
+            && self
+                .tracks
+                .iter()
+                .any(|t| t.status == Status::Gone && t.departure_proven)
+    }
+
+    /// How many `D` would delete, for the hint that names it.
+    pub fn purgeable(&self) -> usize {
+        self.tracks
+            .iter()
+            .filter(|t| t.status == Status::Gone && t.departure_proven)
+            .count()
     }
 
     /// Library keys, which unlike the track ones need no finished run behind
@@ -2604,6 +2654,46 @@ mod tests {
         });
         assert_eq!(app.rows(), [0, 1, 2], "the track joined the filter");
         assert!(app.selected().is_some());
+    }
+
+    /* `Dropped` takes rows off the list without `Tracks`'s side effects: the
+       estimate's clock stays where it is, marks on the dropped rows go, and
+       the cursor cannot be left pointing past the end. */
+    #[test]
+    fn dropped_rows_leave_and_take_their_marks_with_them() {
+        let mut app = named(&["A", "B", "C", "D"]);
+        app.run_started = Some(Instant::now() - Duration::from_secs(60));
+        let clock = app.run_started;
+        app.marked.insert(2);
+        app.marked.insert(4);
+        app.cursor = 3;
+
+        app.apply(Msg::Dropped(vec![2, 4]));
+        assert_eq!(app.tracks.iter().map(|t| t.index).collect::<Vec<_>>(), [1, 3]);
+        assert!(!app.marked.contains(&2) && !app.marked.contains(&4), "a mark outlived its row");
+        assert_eq!(app.cursor, 1, "the cursor points past the end");
+        assert_eq!(app.run_started, clock, "the estimate's clock restarted");
+    }
+
+    /* The key is drawn only for departures a listing proved. One read off
+       the playlist file looks the same on the row and must not light it. */
+    #[test]
+    fn purge_is_offered_only_for_proven_departures() {
+        let mut app = named(&["A", "B"]);
+        app.done = Some(Ok(String::new()));
+        assert!(!app.can_purge(), "offered with nothing departed");
+
+        app.tracks[1].status = Status::Gone;
+        assert!(!app.can_purge(), "offered for a departure read offline");
+        assert_eq!(app.purgeable(), 0);
+
+        app.tracks[1].departure_proven = true;
+        assert!(app.can_purge());
+        assert_eq!(app.purgeable(), 1);
+
+        // Never while the worker is busy or the run is still going.
+        app.busy = true;
+        assert!(!app.can_purge());
     }
 
     /* Narrowing the filter under the cursor must move it, or the highlighted

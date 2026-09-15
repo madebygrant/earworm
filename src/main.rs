@@ -424,6 +424,10 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             }
         }
         KeyCode::Char('r') if app.can_command() => app.send(Cmd::Retry),
+        /* Same key as removing a folder on the library screen: one verb,
+           delete, aimed at what this screen is about. Live only with proven
+           departures on the list, or it is a key that can only refuse. */
+        KeyCode::Char('D') if app.can_purge() => app.send(Cmd::Purge),
         KeyCode::Char('S') if app.can_command() => app.send(Cmd::SyncOne),
         KeyCode::Char('p') if app.can_command() && app.can_play() => {
             if let Some(folder) = app.folder.clone() {

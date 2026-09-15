@@ -1656,6 +1656,10 @@ fn serve(
                 report(tx, retry(cfg, tx, tracks, cancel, &asker));
                 None
             }
+            Cmd::Purge => {
+                report(tx, purge(cfg, tx, tracks, &asker));
+                None
+            }
             Cmd::Swap(targets) => {
                 report(tx, swap(cfg, tx, tracks, &mut held, &targets));
                 None
@@ -2378,6 +2382,9 @@ fn note_departures(cfg: &Config, tx: &Sender<Msg>, complete: bool, tracks: &mut 
         let mut track = Track::new(next + offset + 1, id, name, path);
         track.status = Status::Gone;
         track.source = "not in playlist".into();
+        // Established by the listing this function has just checked, which is
+        // the one case a deletion may rest on. See `Track::departure_proven`.
+        track.departure_proven = true;
         tracks.push(track);
     }
 }
@@ -2432,6 +2439,90 @@ fn drop_folder_cover(tracks: &[Track], keep: &[&str]) {
             let _ = std::fs::remove_file(folder.join(name));
         }
     }
+}
+
+/* Deletes the files of the tracks a complete listing said had left the
+   playlist. Three guards, each of which has been needed elsewhere in this
+   file: only `Gone` rows whose departure was proven by a listing rather than
+   read off the last playlist file, only paths under `--dir`, and a question
+   that names the files before anything goes. The manifest then drops them of
+   its own accord, since it keeps an entry only while the file is there, and
+   the `.m3u8` never listed them. */
+fn purge(cfg: &Config, tx: &Sender<Msg>, tracks: &mut Vec<Track>, asker: &Asker) -> Result<()> {
+    let departed: Vec<(usize, PathBuf)> = tracks
+        .iter()
+        .filter(|t| t.status == Status::Gone && t.departure_proven)
+        .filter_map(|t| t.path.clone().map(|p| (t.index, p)))
+        .filter(|(_, p)| p.is_file())
+        .collect();
+    if departed.is_empty() {
+        /* Either nothing has left, or what has was seen offline. The second
+           is the one worth explaining: the row says `gone` and the key does
+           nothing, so the message has to say what would make it work. */
+        let offline = tracks.iter().any(|t| t.status == Status::Gone);
+        if offline {
+            bail!("these departures were read off the last playlist file  ·  S syncs and confirms them");
+        }
+        bail!("nothing here has left the playlist");
+    }
+    // The paths came from a manifest somebody could have edited by hand.
+    if let Some((_, outside)) = departed.iter().find(|(_, p)| !p.starts_with(&cfg.dir)) {
+        bail!("{} is outside {}  ·  nothing deleted", outside.display(), cfg.dir.display());
+    }
+
+    let names: Vec<String> = departed
+        .iter()
+        .map(|(_, p)| p.file_name().unwrap_or_default().to_string_lossy().to_string())
+        .collect();
+    let count = names.len();
+    let files = if count == 1 { "file" } else { "files" };
+    /* The header is a `Block::title` and clips, so the names go in the note,
+       which wraps. Every one of them: a question about deleting music that
+       does not say which music is not a question anybody can answer. */
+    let note = format!(
+        "{}  ·  the playlist no longer has them, and this cannot be undone",
+        names.join(", ")
+    );
+    let Some(choice) = asker.choose_noted(
+        &format!("Delete {count} departed {files}?"),
+        &note,
+        vec!["keep them".into(), format!("delete {count} {files}")],
+    ) else {
+        return cancelled(tx);
+    };
+    if choice == 0 {
+        let _ = tx.send(Msg::Flash(format!("keeping {count} departed {files}")));
+        return Ok(());
+    }
+
+    let mut dropped: Vec<usize> = Vec::new();
+    for (index, path) in &departed {
+        match std::fs::remove_file(path) {
+            Ok(()) => dropped.push(*index),
+            // Already gone is gone, and the row should go with it.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => dropped.push(*index),
+            Err(e) => {
+                let _ = tx.send(Msg::Log(format!("purge: {}: {e}", path.display())));
+            }
+        }
+    }
+    tracks.retain(|t| !dropped.contains(&t.index));
+    let _ = tx.send(Msg::Dropped(dropped.clone()));
+    /* Keyed on the file being there, so the deleted entries fall out of the
+       sidecar here rather than needing to be named. Written before the
+       flash: a sidecar still naming a deleted file would re-list it as
+       missing on the library screen. */
+    save_manifest(cfg, tracks);
+
+    let done = dropped.len();
+    if done < count {
+        let _ = tx.send(Msg::Flash(format!(
+            "deleted {done} of {count}  ·  l has what refused"
+        )));
+    } else {
+        let _ = tx.send(Msg::Flash(format!("deleted {done} departed {files}")));
+    }
+    Ok(())
 }
 
 fn cancelled(tx: &Sender<Msg>) -> Result<()> {
@@ -5596,5 +5687,232 @@ mod convert_tests {
         assert_eq!(crate::app::off_format(&shelf, "flac"), 2);
         // vorbis writes .ogg, so the name is not the extension to compare.
         assert_eq!(crate::app::off_format(&shelf, "vorbis"), 3);
+    }
+}
+#[cfg(test)]
+mod purge_tests {
+    use super::*;
+    use crate::app::{Msg, Reply};
+    use std::sync::mpsc::{self, Receiver};
+
+    fn scratch(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "earworm-purge-{tag}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// One reply to the one question, then everything sent after it.
+    fn answer(rx: &Receiver<Msg>, reply: Reply) -> Vec<Msg> {
+        let mut seen = Vec::new();
+        for msg in rx {
+            let asked = matches!(msg, Msg::Ask(..));
+            if let Msg::Ask(_, back) = &msg {
+                back.send(reply.clone()).unwrap();
+            }
+            seen.push(msg);
+            if asked {
+                break;
+            }
+        }
+        seen
+    }
+
+    /// A folder with two listed tracks and two departed files: one whose
+    /// departure a listing proved, one read off the playlist file offline.
+    fn folder() -> (PathBuf, Vec<Track>) {
+        let dir = scratch("folder");
+        let mut tracks = Vec::new();
+        for (i, name) in ["01 - A.opus", "02 - B.opus"].iter().enumerate() {
+            std::fs::write(dir.join(name), "audio").unwrap();
+            let mut t = Track::new(i + 1, format!("keep{i}"), (*name).into(), dir.join(name));
+            t.status = Status::Have;
+            t.listed = true;
+            tracks.push(t);
+        }
+        for (i, (name, proven)) in [("08 - Proven.opus", true), ("09 - Offline.opus", false)]
+            .iter()
+            .enumerate()
+        {
+            std::fs::write(dir.join(name), "audio").unwrap();
+            let mut t = Track::new(8 + i, format!("gone{i}"), (*name).into(), dir.join(name));
+            t.status = Status::Gone;
+            t.departure_proven = *proven;
+            tracks.push(t);
+        }
+        manifest::write(
+            &dir,
+            "u",
+            tracks
+                .iter()
+                .map(|t| (t.id.clone(), t.path.clone().unwrap())),
+        )
+        .unwrap();
+        (dir, tracks)
+    }
+
+    fn cfg_for(dir: &Path) -> Config {
+        let mut cfg = super::tests::config(true);
+        cfg.dir = dir.parent().unwrap().to_path_buf();
+        cfg
+    }
+
+    fn run_purge(cfg: &Config, tracks: &mut Vec<Track>, reply: Reply) -> (Result<()>, Vec<Msg>) {
+        let (tx, rx) = mpsc::channel();
+        let asker = Asker { tx: tx.clone(), enabled: true };
+        let (out, mut seen) = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| purge(cfg, &tx, tracks, &asker));
+            let seen = answer(&rx, reply);
+            (worker.join().unwrap(), seen)
+        });
+        drop(asker);
+        drop(tx);
+        seen.extend(rx.try_iter());
+        (out, seen)
+    }
+
+    /* The whole distinction the flag exists for. A listing that asked for
+       everything and got it is the one thing a deletion may rest on; the
+       playlist file is the last sync's answer written down, and a narrowed
+       run writes a short one. */
+    #[test]
+    fn only_a_complete_listing_proves_a_departure() {
+        let dir = scratch("proven");
+        let mut listed = vec![Track::new(1, "keep".into(), "01 - A.opus".into(), dir.join("01 - A.opus"))];
+        std::fs::write(dir.join("01 - A.opus"), "audio").unwrap();
+        std::fs::write(dir.join("09 - Old.opus"), "audio").unwrap();
+        manifest::write(
+            &dir,
+            "u",
+            [
+                ("keep".to_string(), dir.join("01 - A.opus")),
+                ("dropped".to_string(), dir.join("09 - Old.opus")),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        note_departures(&super::tests::config(true), &mpsc::channel().0, true, &mut listed);
+        let gone = listed.iter().find(|t| t.status == Status::Gone).expect("no departure row");
+        assert!(gone.departure_proven, "a listing's departure was not marked proven");
+
+        // The same fact read offline, off the playlist file, is not proof.
+        std::fs::write(dir.join(format!("{}.m3u8", dir.file_name().unwrap().to_string_lossy())),
+            "#EXTM3U\n01 - A.opus\n").unwrap();
+        let mut offline = vec![
+            Track::new(1, "keep".into(), "01 - A.opus".into(), dir.join("01 - A.opus")),
+            Track::new(2, "dropped".into(), "09 - Old.opus".into(), dir.join("09 - Old.opus")),
+        ];
+        mark_departed(&dir, &mut offline);
+        assert_eq!(offline[1].status, Status::Gone, "the fixture is not a departure at all");
+        assert!(!offline[1].departure_proven, "an offline read was marked proven");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn purge_deletes_the_proven_departures_and_nothing_else() {
+        let (dir, mut tracks) = folder();
+        let cfg = cfg_for(&dir);
+        let (out, seen) = run_purge(&cfg, &mut tracks, Reply::Choice(1));
+        out.unwrap();
+
+        assert!(!dir.join("08 - Proven.opus").exists(), "the proven departure stayed");
+        assert!(dir.join("09 - Offline.opus").is_file(), "an offline departure was deleted");
+        assert!(dir.join("01 - A.opus").is_file() && dir.join("02 - B.opus").is_file());
+
+        // The row went with the file, and only that row.
+        assert_eq!(tracks.len(), 3);
+        assert!(tracks.iter().all(|t| t.id != "gone0"));
+        assert!(
+            seen.iter().any(|m| matches!(m, Msg::Dropped(ids) if ids == &vec![8usize])),
+            "the screen was not told which row to drop"
+        );
+        /* The raw lines, not `manifest::read`, which drops an entry whose
+           file is gone and so would pass here whether or not the sidecar was
+           rewritten. A stale line is what the library screen counts as a
+           missing file until the next sync, which is the reason the save is
+           there at all. */
+        let left: Vec<String> = manifest::entries(&dir).into_iter().map(|(id, _)| id).collect();
+        assert!(!left.contains(&"gone0".to_string()), "the sidecar still names the deleted file: {left:?}");
+        assert_eq!(left.len(), 3, "{left:?}");
+        // The question named the file it was about.
+        let asked = seen.iter().find_map(|m| match m {
+            Msg::Ask(crate::app::Prompt::Choice { header, note, .. }, _) => Some((header.clone(), note.clone())),
+            _ => None,
+        }).expect("nothing was asked");
+        assert!(asked.0.contains("1 departed file"), "{}", asked.0);
+        assert!(asked.1.contains("08 - Proven.opus"), "{}", asked.1);
+        assert!(!asked.1.contains("09 - Offline"), "offered to delete an unproven one: {}", asked.1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Keeping and escaping are both "no", and no means no file moved.
+    #[test]
+    fn saying_no_or_escaping_deletes_nothing() {
+        for (what, reply) in [("keep", Reply::Choice(0)), ("escape", Reply::Cancel)] {
+            let (dir, mut tracks) = folder();
+            let cfg = cfg_for(&dir);
+            let before = tracks.len();
+            let (out, seen) = run_purge(&cfg, &mut tracks, reply);
+            out.unwrap();
+            assert!(dir.join("08 - Proven.opus").is_file(), "{what} deleted a file");
+            assert_eq!(tracks.len(), before, "{what} dropped a row");
+            assert!(!seen.iter().any(|m| matches!(m, Msg::Dropped(_))));
+            assert_eq!(manifest::read(&dir).len(), 4);
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
+    }
+
+    /* The row says `gone` and the key would do nothing, so the refusal has
+       to say what would make it work: a sync is what proves a departure. */
+    #[test]
+    fn offline_departures_alone_are_refused_with_the_next_step() {
+        let (dir, mut tracks) = folder();
+        // Drop the proven one, leaving only what the playlist file said.
+        tracks.retain(|t| t.id != "gone0");
+        let cfg = cfg_for(&dir);
+        let (tx, _rx) = mpsc::channel();
+        let asker = Asker { tx, enabled: true };
+        let err = purge(&cfg, &asker.tx, &mut tracks, &asker).unwrap_err().to_string();
+        assert!(err.contains("S syncs"), "no next step: {err}");
+        assert!(dir.join("09 - Offline.opus").is_file());
+
+        // And with no departure at all, a different answer.
+        tracks.retain(|t| t.status != Status::Gone);
+        let err = purge(&cfg, &asker.tx, &mut tracks, &asker).unwrap_err().to_string();
+        assert!(err.contains("nothing here has left"), "{err}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The paths come from a manifest somebody could have edited by hand.
+    #[test]
+    fn a_path_outside_the_library_stops_the_whole_purge() {
+        let (dir, mut tracks) = folder();
+        let elsewhere = scratch("elsewhere").join("stray.opus");
+        std::fs::write(&elsewhere, "audio").unwrap();
+        let mut stray = Track::new(20, "stray".into(), "stray.opus".into(), elsewhere.clone());
+        stray.status = Status::Gone;
+        stray.departure_proven = true;
+        tracks.push(stray);
+
+        /* The playlist folder is the library here, so a sibling scratch
+           directory is genuinely outside it. With `--dir` set to the temp
+           root, as the other tests do, the stray would be inside after all,
+           the guard would rightly stay quiet, and the worker would block on a
+           question nobody in this test answers. */
+        let mut cfg = super::tests::config(true);
+        cfg.dir = dir.clone();
+        let (tx, _rx) = mpsc::channel();
+        let asker = Asker { tx, enabled: true };
+        let err = purge(&cfg, &asker.tx, &mut tracks, &asker).unwrap_err().to_string();
+        assert!(err.contains("outside"), "{err}");
+        // Nothing at all, not merely the stray: the question was never asked.
+        assert!(elsewhere.is_file());
+        assert!(dir.join("08 - Proven.opus").is_file());
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(elsewhere.parent().unwrap()).unwrap();
     }
 }

@@ -2,7 +2,7 @@
 name = "earworm"
 version = "0.2.0"
 edition = "2024"
-description = "Earworm is a tool that turns a YouTube playlist into a folder of tagged audio files, with verified tags, cover art and an .m3u8"
+description = "Playlist in, library out. Turns a YouTube playlist into audio files with verified tags, cover art and an .m3u8"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/madebygrant/earworm"
 homepage = "https://github.com/madebygrant/earworm"

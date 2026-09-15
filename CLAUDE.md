@@ -365,6 +365,37 @@ call and file write. Nothing that blocks touches the render loop.
   only by extension both match one entry, which errs towards calling nothing
   departed, and that is the safe answer here for the same reason the guard
   below it gives.
+- **`D` deletes only departures a listing proved, and `Track::departure_proven`
+  is the whole distinction.** Two paths set `Status::Gone` and they are not
+  equal. `note_departures` has just seen a complete, unnarrowed listing with
+  the video missing from it, and marks the row proven. `mark_departed` reads
+  the same fact off the last playlist file when a folder is opened offline,
+  and leaves it false: a narrowed run writes a short `.m3u8`, so an offline
+  read can call half a folder departed, and a deletion resting on that takes
+  music. The key is not drawn for an unproven `gone`, and the worker's refusal
+  says that `S` is what would prove it. The old test comment "reported as
+  gone, a later prune deletes music" was written before the prune existed,
+  and this flag is the answer to it.
+- **`purge` asks with every filename in the note, checks every path is under
+  `--dir`, and re-checks the file is there.** The header clips, so the names
+  go where they wrap; a question about deleting music that does not say which
+  music is not one anybody can answer. The paths come from a sidecar that a
+  hand could have edited, and one outside the library stops the whole purge
+  before the question, not just that file. The manifest then drops the
+  entries by itself, since it keeps one only while the file exists, and the
+  `.m3u8` never listed them; the save is still needed at once, or the library
+  screen counts the deleted files as missing until the next sync. The test
+  for that reads `manifest::entries`, because `manifest::read` filters on the
+  file and passed against the missing save.
+- **`Msg::Dropped` takes rows off the list; `Msg::Tracks` does not mean
+  that.** `Tracks` restarts the estimate's clock and says the scan is over. A
+  dropped row also takes its mark with it, and the cursor is clamped rather
+  than snapped: the filter's snap moves a cursor sitting on a hidden row, and
+  one past the end is not hidden, it is nowhere.
+- **A narrowed run writes a short `.m3u8`.** `note_departures` is silenced by
+  `cfg.extra` but `write_playlist` is not, so `--playlist-items 4` leaves the
+  playlist file naming one track. Found while deciding what a purge may trust;
+  not fixed, and the reason an offline `gone` is never proof.
 - **`lookup::stop` is `ytdlp::stop` for everything else, and it latches.** A
   transcode is minutes of ffmpeg writing into the user's playlist folder, so
   quitting without it left an orphan running after the terminal was restored.
@@ -390,9 +421,9 @@ call and file write. Nothing that blocks touches the render loop.
   sync.** The manifest records each track by the filename it has, so those
   tracks stay downloaded and a folder switched part-way holds both. That is
   the guarantee `format` makes and it cannot be the one that breaks it: a
-  plain menu pick that rewrote the library would turn one keystroke into an
-  unattended rewrite of every folder under `--dir` the next time cron ran a
-  resync. So `convert` is a second key, off by default, and it is the one
+  plain menu pick that rewrote the library would turn one keystroke into a
+  rewrite of every folder under `--dir` at the next `--resync`, which is one
+  more keystroke. So `convert` is a second key, off by default, and the one
   setting here that does not go through `off`: `opt_in` is the same rule
   about the command line only ever switching something off, defaulting the
   other way. `set_format` asks about it straight after a format pick, since

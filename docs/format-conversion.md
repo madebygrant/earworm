@@ -6,7 +6,7 @@ building it:
 
 - **A `convert` key, not a format change.** As planned, and the part worth
   keeping: `format` means "format for new downloads" and a menu pick must not
-  rewrite a library unattended.
+  rewrite files it said nothing about.
 - **`alac` and `m4a` share an extension**, so the decision reads the codec off
   the container for `.m4a` files. `Mp4Properties::codec()` exists in lofty
   0.25, so this cost nothing beyond the call.
@@ -54,9 +54,9 @@ The format setting means "format for new downloads". The menu says so, the
 README says so, and CLAUDE.md records why: re-fetching a whole folder is a far
 more expensive guess than leaving it alone. If a plain format change made the
 next `--resync` rewrite the library, someone who set flac for one car stereo
-would find their whole collection several times larger the next morning,
-unattended, from a `--resync` in cron. That is the one thing the tool promised
-not to do.
+would find their whole collection several times larger, from a keypress that
+said nothing about the files already on disk. That is the one thing the tool
+promised not to do.
 
 So: a second key, `convert`, off by default.
 
