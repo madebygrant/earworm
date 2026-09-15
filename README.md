@@ -2,10 +2,10 @@
 
 **Playlist in, library out.**
 
-A terminal app that turns a YouTube playlist into a folder of properly tagged,
-properly named, properly illustrated audio files. Not 40 downloads with
-`(Official Video)` baked into the artist name — a music library your player
-trusts.
+A terminal app that turns a YouTube playlist into a folder of tagged audio
+files. `01 - Boards of Canada - Roygbiv.opus`, cover art included, not forty
+copies of `Song (Official Audio).opus` with the upload metadata in the artist
+field.
 
 ![A playlist open in earworm: the track list on the left, the selected track's
 tags and file path in a pane on the right, and the run's settings along the
@@ -19,47 +19,42 @@ earworm 'https://youtube.com/playlist?list=...'
 
 ## Features
 
-yt-dlp already downloads. earworm does everything that comes after, which is
-the part that decides whether the result sounds like a library or like a pile
-of files:
+yt-dlp downloads the audio. earworm does the rest, which is what separates a
+download from a music library:
 
-- **Tags you can trust.** earworm splits artist and title out of the video
-  title, then *checks* that guess — fingerprint against AcoustID, search
-  against Deezer, then Apple Music. `guessed` is a status word, not a silent
-  default, and when nothing fits, earworm asks instead of writing a tag it
-  doesn't believe.
-- **Cover art, embedded and sane.** Every track carries its art inside the
-  file, capped at 1000×1000 — because YouTube's auto-generated albums serve
-  2.9 MB of 2048² thumbnail that ends up in all twelve tracks.
-- **It remembers.** Every playlist is a folder with an `.m3u8` and a
-  `.earworm` manifest recording the URL. Re-running skips what it has,
-  re-syncs what's new, and reports what left the playlist. No download
-  history to re-walk.
-- **A library, not a log file.** Open any folder from disk, fix a tag
-  downloaded weeks ago, rename a playlist and keep the rename through the
-  next sync, search every track you own across every folder.
-- **Transcodes that don't throw away work.** Switch format and old tracks
-  come along on their next sync, tags and art intact — in whatever way
-  costs the fewest generations of lossy encoding, which is a genuinely
-  strange and interesting table. See [docs/formats.md](docs/formats.md).
-- **It plays.** With [cliamp](https://docs.cliamp.stream) running, one key
-  hands the playlist over, with the right order and the tags showing.
-- **Nothing is so settled you can't change it.** Edit, undo, re-search,
-  retry. One key each.
+- **Tagging that checks itself.** Artist and title are parsed out of the video
+  title, then confirmed against AcoustID fingerprints, Deezer and Apple Music.
+  A track that survives none of that is marked `guessed`, and earworm asks
+  about it rather than writing a tag it can't back up.
+- **Cover art embedded at a sane size.** YouTube serves 2048² thumbnails for
+  its auto-generated albums. earworm keeps them out of your files: what gets
+  embedded is capped at 1000×1000.
+- **Re-runs skip work you already did.** Each playlist folder keeps an
+  `.earworm` manifest with its URL and current filenames. Sync it again and
+  earworm fetches only the new tracks, reports the ones that left the
+  playlist, and reads the tags it already wrote instead of looking them up.
+- **Fix anything weeks later.** Every folder opens from disk, offline. Edit
+  tags, swap artist and title, search `/` across every folder you own, rename
+  a playlist and have the rename survive the next sync.
+- **Change format without throwing away what you have.** Tracks already on
+  disk convert on their next sync in whatever way costs the least re-encoding.
+  Why some never re-encode at all is [documented](docs/formats.md), because
+  the answer surprised me too.
+- **Plays through [cliamp](https://docs.cliamp.stream).** `p` hands over the
+  playlist in the right order, tags as track titles.
+- **Retries and undos.** `r` re-downloads whatever failed. `u` puts back the
+  last tag edit.
 
-## The shape of a run
+## How a run goes
 
-Type a URL, and the run pauses between reading the playlist and downloading
-it to let you choose what it fetches:
+Give it a URL and earworm does the whole job: read the playlist, download,
+identify, tag, add art, name files, write the `.m3u8`. One step waits for
+you. Before downloading, the run shows the list and asks which tracks you
+want.
 
-```
- PICK  158 of 361 selected       space  ·  a all  ·  enter downloads  ·  esc none
-```
-
-The gate exists because you can't know whether you want the whole thing until
-you see it has 361 tracks. Everything else — extraction, lookup, tagging,
-cover art, the playlist file, the library, retry — is covered by the guides
-below. The defaults are ones worth keeping.
+Enter takes all of them. Esc takes none. `space` and the `/` filter are there
+for everything in between, which you will need the first time a playlist
+turns out to be 361 tracks of seminar recordings.
 
 ## Where to go next
 
@@ -76,11 +71,10 @@ below. The defaults are ones worth keeping.
 
 ## Who it's for
 
-You, if you download playlists and then rename things by hand. earworm was
-built on a real music library and behaves the way a library behaves: it
-answers questions about itself (`--list`, `--check`), it never deletes what
-you didn't ask it to, and when it's unsure it says so on screen instead of
-being quietly wrong on every one of 40 tracks.
+People who download playlists and then rename the files by hand. earworm
+doesn't delete anything you didn't ask it to, shows you when it isn't sure
+about a tag, and answers `--list` and `--check` in plain text so scripts can
+use them too.
 
 ## Licence
 
