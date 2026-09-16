@@ -255,9 +255,14 @@ pub struct Playback {
 }
 
 impl Playback {
+    /* Compared composed, because this path came back out of cliamp and the
+       shelf's came off disk. Which form cliamp emits is its business and can
+       change; a Korean folder name silently never matching is not a failure
+       anything on screen would explain. */
     /// Whether this row is the one cliamp has loaded.
     pub fn on(&self, folder: &Path) -> bool {
-        self.folder.as_deref() == Some(folder)
+        let same = |path: &Path| crate::config::composed(&path.to_string_lossy());
+        self.folder.as_deref().map(same) == Some(same(folder))
     }
 }
 
@@ -2820,6 +2825,22 @@ mod tests {
 
         let stream = at(Player::Running, None, true);
         assert!(!stream.on(Path::new("/music/Focus")), "a stream marked a row");
+    }
+
+    /* The shelf's path came off disk and this one came back out of cliamp, so
+       a Korean folder can arrive in either form and the row would silently
+       never light up. Both spellings are the same folder. */
+    #[test]
+    fn a_korean_folder_is_on_air_in_either_form() {
+        let decomposed = "/music/음모와 사극";
+        let composed = "/music/음모와 사극";
+        assert_ne!(decomposed, composed, "the fixture has nothing to decompose");
+        for reported in [decomposed, composed] {
+            let now = at(Player::Running, Some(reported), true);
+            assert!(now.on(Path::new(composed)), "composed shelf missed {reported:?}");
+            assert!(now.on(Path::new(decomposed)), "decomposed shelf missed {reported:?}");
+            assert!(!now.on(Path::new("/music/Focus")), "it matched another folder");
+        }
     }
 
     fn shelf(name: &str) -> Shelf {

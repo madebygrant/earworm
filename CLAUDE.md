@@ -179,6 +179,27 @@ call and file write. Nothing that blocks touches the render loop.
   copied to; an absolute one is valid only on the machine that wrote it, and
   the whole playlist breaks the moment it reaches a phone or another user's
   home. `last_playlist` matches on the filename for the same reason.
+- **The `.m3u8` names them decomposed, and every comparison composes first.**
+  macOS stores these names composed and APFS ignores the difference on lookup,
+  so the bug is invisible here: copying the folder to an iPhone hands the
+  filenames over decomposed, iOS compares bytes, and the playlist names
+  nothing. Confirmed in VLC on iOS with one Korean track listed four ways in
+  one file: decomposed plays, composed does not, and percent-encoding changes
+  neither, which is what rules out the `.m3u8` URI rules as the cause. The
+  second half is what makes the first safe. `mark_departed` matches stems by
+  string equality, so decomposed entries against composed filenames miss every
+  Hangul or accented name while the ASCII ones still match, which is exactly
+  enough to clear the "believe none of it" guard and call the rest `Gone`: the
+  half-converted folder's bug reached by a different road, and `stem_of` is the
+  one place it is closed. `repoint_playlist` matches composed for the same
+  reason and because every playlist written before this holds composed entries.
+  Relative names alone do not make a folder portable; this is the other half of
+  that promise. What it costs is the opposite case: on a byte-exact filesystem
+  holding composed files, Linux or Android, decomposed is now the wrong form and
+  the entries name nothing there. That was chosen rather than overlooked, on one
+  user who is on Apple hardware, and it is the point at which this becomes a
+  setting rather than a constant. `Playback::on` composes both sides too, since
+  one path comes back out of cliamp and the other came off disk.
 - **`mark_departed` reads the folder's `.m3u8` to decide what is still in the
   playlist,** because offline there is no listing to ask and that file is the
   last sync's answer already written down. It sets `Status::Gone` rather than

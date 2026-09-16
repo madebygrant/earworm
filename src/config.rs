@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{ArgMatches, Parser, parser::ValueSource};
+use unicode_normalization::UnicodeNormalization;
 use serde::Deserialize;
 
 /* `about` with no value reads Cargo.toml's `description`, so that is what
@@ -269,6 +270,21 @@ fn names_key(line: &str, key: &str) -> bool {
         .or_else(|| rest.strip_prefix(&format!("\"{key}\"")))
         .or_else(|| rest.strip_prefix(&format!("'{key}'")))
         .is_some_and(|rest| rest.trim_start().starts_with('='))
+}
+
+/* The same filename reaches earworm in two forms. macOS stores these names
+   composed and hands them over decomposed to anything copying the folder off
+   the machine, and APFS ignores the difference on lookup, so the two are the
+   same file here and different strings everywhere a string is compared. One
+   pair, because a second copy of this is one that goes stale. */
+pub fn composed(name: &str) -> String {
+    name.nfc().collect()
+}
+
+/* Canonical, never compatibility: `nfkd` would rewrite a ligature or a
+   full-width digit in a filename, which is a different file. */
+pub fn decomposed(name: &str) -> String {
+    name.nfd().collect()
 }
 
 /* Written beside the target and renamed over it, so a reader sees either the

@@ -8,7 +8,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use anyhow::{Context, Result, bail};
 
 use crate::app::{Asker, Cmd, Escape, Msg, Reply, Shelf, Status, Track, Watch};
-use crate::config::{self, Config};
+use crate::config::{self, Config, composed, decomposed};
 use crate::lookup;
 use crate::manifest;
 use crate::player;
@@ -492,9 +492,16 @@ fn mark_departed(folder: &Path, tracks: &mut [Track]) {
     }
 }
 
+/* Composed, because `write_playlist` writes decomposed entries and the files
+   are on disk composed. Matched raw, every Hangul or accented name misses while
+   the ASCII ones still match, which is exactly enough to clear the "believe
+   none of it" guard below and call the rest `Gone`: the half-converted folder's
+   bug by a different road. */
 fn stem_of(path: &Path) -> String {
-    path.file_stem().unwrap_or_default().to_string_lossy().to_string()
+    composed(&path.file_stem().unwrap_or_default().to_string_lossy())
 }
+
+
 
 /// Filenames from the folder's own `.m3u8`, or `None` when it has none, which
 /// is every folder synced with `--no-m3u8`. Matched by name rather than by the
@@ -924,14 +931,20 @@ fn repoint_playlist(folder: &Path, from: &std::ffi::OsStr, to: &std::ffi::OsStr)
     let mut out = String::with_capacity(text.len());
     for line in text.lines() {
         let entry = line.trim();
-        // `#EXTINF` carries the duration and title, never the filename.
+        /* `#EXTINF` carries the duration and title, never the filename. Matched
+           on the composed form because a playlist written before this folder
+           was last synced holds composed entries, and `from` comes off disk. */
         let hit = !entry.is_empty()
             && !entry.starts_with('#')
-            && Path::new(entry).file_name() == Some(from);
+            && Path::new(entry)
+                .file_name()
+                .is_some_and(|name| composed(&name.to_string_lossy()) == composed(&from.to_string_lossy()));
         if hit {
             changed = true;
             // Through the path, so a relative prefix survives the swap.
-            out.push_str(&Path::new(entry).with_file_name(to).to_string_lossy());
+            out.push_str(&decomposed(
+                &Path::new(entry).with_file_name(to).to_string_lossy(),
+            ));
         } else {
             out.push_str(line);
         }
@@ -2791,7 +2804,12 @@ fn write_playlist(cfg: &Config, tracks: &[Track]) -> Result<Option<PathBuf>> {
             "#EXTINF:{},{}\n{}\n",
             track.duration,
             label(&track.title, &track.artist),
-            entry.display()
+            /* Decomposed, because copying the folder to an iPhone decomposes
+               the filenames and iOS compares bytes, where APFS does not: a
+               composed entry plays here and names nothing there. Verified in
+               VLC on iOS with one track listed four ways. The cost is a
+               byte-exact filesystem, where this is now the wrong form. */
+            decomposed(&entry.to_string_lossy())
         ));
     }
     std::fs::write(&playlist, body)?;
@@ -5633,6 +5651,126 @@ mod convert_tests {
            must not have cost that. */
         assert_eq!(tracks[2].status, Status::Gone, "a real departure went unnoticed");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A Hangul filename, composed here and decomposed the moment the folder is
+    /// copied off the machine. Built rather than typed, so the form is the
+    /// test's and not whatever normalisation this file was saved in.
+    fn korean() -> String {
+        let name = composed("01 - 안예은 - 봄이 온다면.opus");
+        assert_ne!(name, decomposed(&name), "the fixture has nothing to decompose");
+        name
+    }
+
+    fn one_listed(dir: &Path, name: &str) -> Vec<Track> {
+        let mut track = Track::new(1, "v1".into(), name.into(), dir.join(name));
+        track.listed = true;
+        vec![track]
+    }
+
+    /* Composed entries resolve on APFS, which ignores the difference, and name
+       nothing on an iPhone, which compares bytes. Verified in VLC on iOS. */
+    #[test]
+    fn the_playlist_names_its_tracks_decomposed() {
+        let dir = scratch("nfd");
+        let name = korean();
+        std::fs::write(dir.join(&name), "audio").unwrap();
+
+        let cfg = crate::worker::tests::config(true);
+        let playlist = write_playlist(&cfg, &one_listed(&dir, &name)).unwrap().unwrap();
+        let body = std::fs::read_to_string(&playlist).unwrap();
+        assert!(body.contains(&format!("\n{}\n", decomposed(&name))), "{body:?}");
+        assert!(
+            !body.contains(&format!("\n{name}\n")),
+            "the composed name reached the file: {body:?}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* The half the first one rests on. Decomposed entries against composed
+       filenames miss for the Korean track while the ASCII one still matches,
+       which is exactly enough to clear the "believe none of it" guard and call
+       a track that never left departed. */
+    #[test]
+    fn a_decomposed_entry_is_not_read_as_a_departure() {
+        let dir = scratch("nfdgone");
+        let name = korean();
+        for file in [name.as_str(), "02 - Plain.opus"] {
+            std::fs::write(dir.join(file), "audio").unwrap();
+        }
+        let playlist = dir.join(format!("{}.m3u8", dir.file_name().unwrap().to_string_lossy()));
+        std::fs::write(
+            &playlist,
+            format!("#EXTM3U\n{}\n02 - Plain.opus\n", decomposed(&name)),
+        )
+        .unwrap();
+
+        let mut tracks = vec![
+            holding(&dir, 1, &name, Status::Have),
+            holding(&dir, 2, "02 - Plain.opus", Status::Have),
+        ];
+        mark_departed(&dir, &mut tracks);
+        assert_eq!(tracks[0].status, Status::Have, "the Korean track was called departed");
+        assert_eq!(tracks[1].status, Status::Have);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* The two halves as one path, which is the bug as it was reported: sync a
+       folder with Korean filenames, open it from the library, and every one of
+       them reads as a departure. Each half is pinned separately above, and both
+       stay green if a change moves the decomposition somewhere the other half
+       does not look. This is the only test that fails when they disagree. */
+    #[test]
+    fn a_korean_folder_written_then_read_back_holds_no_departures() {
+        let dir = scratch("nfdround");
+        let name = korean();
+        for file in [name.as_str(), "02 - Plain.opus"] {
+            std::fs::write(dir.join(file), "audio").unwrap();
+        }
+        let mut tracks = vec![
+            holding(&dir, 1, &name, Status::Have),
+            holding(&dir, 2, "02 - Plain.opus", Status::Have),
+        ];
+        for track in &mut tracks {
+            track.listed = true;
+        }
+
+        let cfg = crate::worker::tests::config(true);
+        let playlist = write_playlist(&cfg, &tracks).unwrap().unwrap();
+        assert!(playlist.is_file(), "no playlist was written");
+
+        mark_departed(&dir, &mut tracks);
+        assert!(
+            tracks.iter().all(|t| t.status == Status::Have),
+            "a track the playlist names was called departed: {:?}",
+            tracks.iter().map(|t| (&t.name, t.status)).collect::<Vec<_>>()
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* `from` always comes off disk composed, so a byte match finds neither the
+       decomposed entries this writes now nor the composed ones in every .m3u8
+       written before it. Missing one leaves the converted track named by a file
+       that has gone, which is the departure bug this whole pair guards. */
+    #[test]
+    fn a_repoint_finds_an_entry_in_either_form() {
+        for (label, written) in [("composed", korean()), ("decomposed", decomposed(&korean()))] {
+            let dir = scratch(&format!("nfdrepoint-{label}"));
+            let name = korean();
+            let playlist =
+                dir.join(format!("{}.m3u8", dir.file_name().unwrap().to_string_lossy()));
+            std::fs::write(&playlist, format!("#EXTM3U\n{written}\n")).unwrap();
+
+            let to = Path::new(&name).with_extension("flac");
+            let to = to.file_name().unwrap();
+            repoint_playlist(&dir, Path::new(&name).as_os_str(), to);
+
+            let body = std::fs::read_to_string(&playlist).unwrap();
+            let want = decomposed(&to.to_string_lossy());
+            assert!(body.contains(&want), "{label} entry not repointed: {body:?}");
+            assert!(!body.contains(".opus"), "{label} old entry survived: {body:?}");
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
     }
 
     /* A killed ffmpeg never reaches the cleanup in the loop's own error arm,
