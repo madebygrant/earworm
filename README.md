@@ -10,7 +10,7 @@ header](docs/images/earworm.png)
 
 ```sh
 brew install yt-dlp ffmpeg chromaprint
-cargo install --path .
+cargo install --git https://github.com/madebygrant/earworm --tag v0.4.0
 earworm 'https://youtube.com/playlist?list=...'
 ```
 

@@ -18,12 +18,12 @@ brew install yt-dlp ffmpeg chromaprint
 Then earworm itself:
 
 ```sh
-git clone https://github.com/madebygrant/earworm
-cd earworm
-cargo install --path .
+cargo install --git https://github.com/madebygrant/earworm --tag v0.4.0
 ```
 
-To update: `git pull && cargo install --path .`.
+Drop the `--tag` to build from the newest code instead, and see
+[releases](https://github.com/madebygrant/earworm/releases) for the current
+version.
 
 ## Fingerprinting wants a key
 
