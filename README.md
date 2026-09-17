@@ -11,6 +11,9 @@ header](docs/images/earworm.png)
 ```sh
 brew install yt-dlp ffmpeg chromaprint
 cargo install --git https://github.com/madebygrant/earworm --tag v0.4.0
+# To open the TUI
+earworm
+# Or without using the TUI
 earworm 'https://youtube.com/playlist?list=...'
 ```
 
