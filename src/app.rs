@@ -1,10 +1,11 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use std::sync::mpsc::Sender;
 
 use ratatui::style::Color;
 
+use crate::tag::Art;
 use crate::theme::{Palette, Themes};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -764,6 +765,19 @@ pub struct App {
     pub theme_name: String,
     /// Every palette `^t` can reach: the built-ins plus any `[themes.*]`.
     pub themes: Themes,
+    /* The cover under the cursor, as pixels, keyed by the file it came from.
+       `None` is an answer too — asked about, has none — so a folder of
+       untagged files does not pay for the read again on every settle.
+       Cleared whenever the track list is replaced, which is what bounds it to
+       one folder rather than to everything opened this session. */
+    pub art: HashMap<PathBuf, Option<Art>>,
+    /// Asked for and not yet answered, so a slow read is not asked twice.
+    art_pending: Option<PathBuf>,
+    /* How much room the detail pane has for a picture, in cells. Set by the
+       draw and read by the loop that asks for one, because only the layout
+       knows: the same bargain `viewport` makes with `page`. `None` when the
+       pane is too narrow or too short to carry one. */
+    pub art_size: Option<(u16, u16)>,
     /// Where `^t` writes the theme it lands on. Read off the config in `main`
     /// before the worker takes it, like `format`; `None` under --no-config,
     /// which asked for the file to stay out of the run.
@@ -876,6 +890,9 @@ impl App {
             theme: Palette::default(),
             theme_name: crate::config::DEFAULT_THEME.to_string(),
             themes: Themes::default(),
+            art: HashMap::new(),
+            art_pending: None,
+            art_size: None,
             config_file: None,
             theme_overridden: false,
             format: crate::config::DEFAULT_FORMAT.to_string(),
@@ -964,6 +981,11 @@ impl App {
                 // the clock behind the estimate starts.
                 self.run_started = Some(Instant::now());
                 self.tracks = t;
+                /* A new list is a new folder's worth of covers. Cleared here
+                   rather than trimmed to a size, because one folder is the
+                   natural bound and keeping every folder opened this session
+                   is how a cache nobody thought about grows without limit. */
+                self.art.clear();
             }
             Msg::Progress { index, percent } => {
                 if let Some(t) = self.track_mut(index) {
@@ -1447,6 +1469,53 @@ impl App {
                remembering did not, which is a different thing to tell
                somebody and a different thing to do about it. */
             Err(e) => self.say(format!("theme {name}  ·  not saved: {e}")),
+        }
+    }
+
+    /* The file whose cover the pane wants and does not have. Gated on
+       `can_command` for the same reason `e` is: during a run the tags and the
+       art are both still being written, so a picture read now is a picture of
+       a half-finished track, and the reads would land on files ffmpeg is
+       already busy with. */
+    pub fn art_wanted(&self) -> Option<PathBuf> {
+        self.art_size?;
+        if !self.can_command() {
+            return None;
+        }
+        let path = self
+            .tracks
+            .get(self.cursor)
+            .filter(|track| self.shows(track))?
+            .path
+            .clone()?;
+        let known = self.art.contains_key(&path) || self.art_pending.as_ref() == Some(&path);
+        (!known).then_some(path)
+    }
+
+    /// Said before the read starts, so a settle a frame later does not ask
+    /// for the same picture again while the first one is still running.
+    pub fn art_asked(&mut self, path: PathBuf) {
+        self.art_pending = Some(path);
+    }
+
+    /// One answer, however it turned out. `None` is cached like any other, or
+    /// a track with no art is read again every time the cursor rests on it.
+    pub fn art_read(&mut self, path: PathBuf, art: Option<Art>) {
+        if self.art_pending.as_ref() == Some(&path) {
+            self.art_pending = None;
+        }
+        self.art.insert(path, art);
+    }
+
+    /* `c` is the only thing that changes a cover while the list is up:
+       `cap_cover` runs during a pass, and nothing is cached then. Dropped on
+       dispatch rather than on the reply, so the stale picture goes at the
+       moment the question is asked rather than being shown alongside the new
+       one until the worker gets back. */
+    pub fn art_forget(&mut self, path: &std::path::Path) {
+        self.art.remove(path);
+        if self.art_pending.as_deref() == Some(path) {
+            self.art_pending = None;
         }
     }
 
@@ -2070,6 +2139,101 @@ mod tests {
         let path = scratch_path(tag).with_extension("toml");
         std::fs::write(&path, "format = \"opus\"\n").unwrap();
         path
+    }
+
+    fn with_a_track(path: &str) -> (App, PathBuf) {
+        let mut app = bare();
+        let path = PathBuf::from(path);
+        app.tracks = vec![Track::new(1, "v1".into(), "01 - A.opus".into(), path.clone())];
+        app.done = Some(Ok(String::new()));
+        app.art_size = Some((20, 10));
+        (app, path)
+    }
+
+    /* Gated the way `e` is, and for the same reason: during a run the tags
+       and the art are both still being written, so a picture read then is a
+       picture of a half-finished track. The pane also has to have said how
+       much room it has, or there is no size to ask for. */
+    #[test]
+    fn a_cover_is_only_wanted_once_the_run_is_over_and_the_pane_has_room() {
+        let (mut app, path) = with_a_track("/music/Focus/01 - A.opus");
+        assert_eq!(app.art_wanted(), Some(path.clone()));
+
+        app.done = None;
+        assert_eq!(app.art_wanted(), None, "it asked during a run");
+        app.done = Some(Ok(String::new()));
+
+        app.busy = true;
+        assert_eq!(app.art_wanted(), None, "it asked while a command was in flight");
+        app.busy = false;
+
+        app.art_size = None;
+        assert_eq!(app.art_wanted(), None, "it asked for a picture with nowhere to go");
+        app.art_size = Some((20, 10));
+
+        // A cursor the filter has hidden is not a row anything is looking at.
+        app.filter = "nothing matches this".into();
+        assert_eq!(app.art_wanted(), None, "it asked for a filtered-out row");
+    }
+
+    /* Asked once. Without the pending mark every frame between the request
+       and the answer asks again, which for a settle of 180ms and a poll of
+       120ms is a second ffmpeg before the first has finished. */
+    #[test]
+    fn a_cover_is_asked_for_once_and_remembered_either_way() {
+        let (mut app, path) = with_a_track("/music/Focus/01 - A.opus");
+
+        app.art_asked(path.clone());
+        assert_eq!(app.art_wanted(), None, "it asked again while one was in flight");
+
+        let art = Art { cols: 2, rows: 2, pixels: vec![(1, 2, 3); 4] };
+        app.art_read(path.clone(), Some(art.clone()));
+        assert_eq!(app.art_wanted(), None, "it asked again for one it had");
+        assert_eq!(app.art.get(&path), Some(&Some(art)));
+
+        /* "There is none" is an answer too. Cached, or a folder of untagged
+           files pays for the read every time the cursor rests on a row. */
+        let (mut bare_art, other) = with_a_track("/music/Focus/02 - B.opus");
+        bare_art.art_read(other.clone(), None);
+        assert_eq!(bare_art.art_wanted(), None, "it asked again for one with no art");
+        assert_eq!(bare_art.art.get(&other), Some(&None));
+    }
+
+    /* `c` is the only thing that changes a cover while the list is up, and it
+       has to drop the old one at the moment the question is asked: showing
+       last week's art beside the picker choosing this week's is worse than
+       showing none. */
+    #[test]
+    fn choosing_new_art_drops_the_picture_that_is_on_screen() {
+        let (mut app, path) = with_a_track("/music/Focus/01 - A.opus");
+        app.art_read(path.clone(), Some(Art { cols: 2, rows: 2, pixels: vec![(1, 2, 3); 4] }));
+
+        app.art_forget(&path);
+        assert!(!app.art.contains_key(&path), "the old picture stayed");
+        assert_eq!(app.art_wanted(), Some(path.clone()), "it will not read the new one");
+
+        // And a read still in flight for the old art is abandoned with it.
+        app.art_asked(path.clone());
+        app.art_forget(&path);
+        assert_eq!(app.art_wanted(), Some(path), "the stale request still blocks it");
+    }
+
+    /* One folder's worth. Cleared rather than trimmed, because a folder is
+       the natural bound and a cache that keeps every folder opened in a
+       session is one nobody has put a limit on. */
+    #[test]
+    fn a_new_track_list_drops_the_covers_of_the_last_one() {
+        let (mut app, path) = with_a_track("/music/Focus/01 - A.opus");
+        app.art_read(path, Some(Art { cols: 2, rows: 2, pixels: vec![(1, 2, 3); 4] }));
+        assert_eq!(app.art.len(), 1);
+
+        app.apply(Msg::Tracks(vec![Track::new(
+            1,
+            "v2".into(),
+            "01 - C.opus".into(),
+            PathBuf::from("/music/Other/01 - C.opus"),
+        )]));
+        assert!(app.art.is_empty(), "the last folder's covers were kept");
     }
 
     /* `^t` is only usable as a walk if it goes round the houses and comes

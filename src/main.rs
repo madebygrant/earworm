@@ -206,6 +206,40 @@ fn update_thread(on: bool) -> Option<mpsc::Receiver<String>> {
     Some(rx)
 }
 
+/// What the art reader is asked for, and what it answers with.
+type ArtAsk = (std::path::PathBuf, u16, u16);
+type ArtSaid = (std::path::PathBuf, Option<tag::Art>);
+
+/* Its own thread and its own pair of channels, like the update probe and for
+   the same reason: nothing on screen is blocked on a cover, and a read is
+   about 40ms of ffmpeg that must not reach the render loop. Not the worker's
+   command channel, which `serve` is not reading during a pipeline — an art
+   request queued there would arrive when the run ended, which for the pane is
+   never.
+
+   One long-lived thread rather than one per request, so a held `j` cannot
+   spawn fifty ffmpegs: the reads queue on the channel and the ones for tracks
+   the cursor has already left are answered into a cache nobody reads. */
+fn art_thread() -> (mpsc::Sender<ArtAsk>, mpsc::Receiver<ArtSaid>) {
+    let (ask_tx, ask_rx) = mpsc::channel::<ArtAsk>();
+    let (said_tx, said_rx) = mpsc::channel::<ArtSaid>();
+    std::thread::spawn(move || {
+        while let Ok((path, cols, rows)) = ask_rx.recv() {
+            let art = tag::cover_art(&path, cols, rows * 2);
+            // The UI is gone, so there is nobody left to tell.
+            if said_tx.send((path, art)).is_err() {
+                return;
+            }
+        }
+    });
+    (ask_tx, said_rx)
+}
+
+/* How long the cursor has to rest before its cover is worth reading. Long
+   enough that holding `j` down the length of a playlist asks for nothing, and
+   short enough that stopping on a track does not feel like waiting. */
+const ART_SETTLE: Duration = Duration::from_millis(180);
+
 /* One flash however many colours measure badly. The queue is three deep, so
    eight repainted slots would show four and silently drop the rest, and eight
    flashes in a row is nagging even when they all fit. One is the whole of what
@@ -230,6 +264,11 @@ fn run(
     notify: bool,
     theme_warnings: &[String],
 ) -> Result<()> {
+    let (art_ask, art_said) = art_thread();
+    /* What the cursor has been sitting on, and since when. Held here rather
+       than on `App` because it is about the loop's own pacing, the way
+       `update_taken` and `rang` are. */
+    let mut resting: Option<(std::path::PathBuf, Instant)> = None;
     let mut title = String::new();
     let mut rang = false;
     /* Like the update notice: the flash is drawn in the header, and the intro
@@ -257,6 +296,33 @@ fn run(
                     }
                     break;
                 }
+            }
+        }
+        // Whatever the reader has finished, however long ago the cursor left it.
+        while let Ok((path, art)) = art_said.try_recv() {
+            app.art_read(path, art);
+        }
+        /* Asked only once the cursor has stopped somewhere, or every row
+           passed over on the way down a playlist costs an ffmpeg. `art_wanted`
+           is the whole of the decision about *whether*; this is the decision
+           about *when*. */
+        if let Some((cols, rows)) = app.art_size {
+            match app.art_wanted() {
+                Some(path) => {
+                    let settled = match &resting {
+                        Some((at, since)) if *at == path => since.elapsed() >= ART_SETTLE,
+                        _ => {
+                            resting = Some((path.clone(), Instant::now()));
+                            false
+                        }
+                    };
+                    if settled && art_ask.send((path.clone(), cols, rows)).is_ok() {
+                        app.art_asked(path);
+                        resting = None;
+                    }
+                }
+                // Nothing wanted, so the next thing the cursor lands on is new.
+                None => resting = None,
             }
         }
         /* Once, on the first frame with a header to put it on. A colour that
@@ -477,6 +543,13 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         }
         KeyCode::Char('c') if app.can_command() => {
             if let Some(index) = app.selected() {
+                /* The picture on screen is about to stop being this track's.
+                   Dropped now rather than when the worker answers, or the old
+                   art sits beside the new one for as long as the picker is
+                   open. */
+                if let Some(path) = app.tracks.get(app.cursor).and_then(|t| t.path.clone()) {
+                    app.art_forget(&path);
+                }
                 app.send(Cmd::Cover(index));
             }
         }

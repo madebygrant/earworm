@@ -47,6 +47,9 @@ download from a music library:
   Every shipped colour clears WCAG 4.5:1 on its own background, including the
   light theme for terminals the other three are unreadable on, and a
   [palette of your own](docs/themes.md) gets the same numbers run over it.
+- **Cover art in the terminal.** The detail pane draws the embedded artwork in
+  half-blocks, so it survives a 256-colour terminal, `NO_COLOR` and anything
+  drawn over it, with no image protocol and no extra dependency.
 - **Retries and undos.** `r` re-downloads whatever failed. `u` puts back the
   last tag edit.
 

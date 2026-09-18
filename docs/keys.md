@@ -71,6 +71,13 @@ touch, and failures](images/keys.png)
 
 ## The details
 
+The pane beside the track list carries the cover art, above the tags, whenever
+the terminal is wide enough for the pane and tall enough for both. It is drawn
+in half-blocks rather than through a terminal image protocol, so it behaves
+like everything else on screen: it quantises on a 256-colour terminal, it
+disappears under `NO_COLOR`, and a popup covers it properly. The read happens
+once the cursor has rested on a row, so running down a playlist costs nothing.
+
 `Esc` never ends the session, and does nothing at all while a run or a command
 is going. `q` and `ctrl+c` are the way out. `q` asks before it kills a
 download, since that's the last thing in the tool one keypress can lose. A
