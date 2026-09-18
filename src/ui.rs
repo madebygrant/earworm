@@ -11,7 +11,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::app::{self, App, Confirm, Player, Prompt, Shelf, Status, View};
 use crate::manifest;
 
-use crate::theme::{self, AMBER, CREAM, DIM, GOLD, INK, RED, RULE, SAND, SURFACE, TEAL};
+use crate::theme::{self, Palette};
 use crate::update;
 
 const SPINNER: [&str; 8] = ["⣷", "⣯", "⣟", "⡿", "⢿", "⣻", "⣽", "⣾"];
@@ -33,23 +33,24 @@ fn cols(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
-fn dim(text: impl Into<String>) -> Span<'static> {
-    Span::styled(text.into(), Style::new().fg(DIM))
+fn dim(text: impl Into<String>, p: Palette) -> Span<'static> {
+    Span::styled(text.into(), Style::new().fg(p.muted))
 }
 
 /// The row under the cursor is what the next key acts on, so its name is bold
 /// as well as marked. Bold is safe here because every colour is RGB: a
 /// terminal cannot swap it for a bright ANSI variant.
-fn row_style(selected: bool) -> Style {
-    let style = Style::new().fg(CREAM);
+fn row_style(selected: bool, p: Palette) -> Style {
+    let style = Style::new().fg(p.text);
     if selected { style.add_modifier(Modifier::BOLD) } else { style }
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    let p = app.theme;
     // Takes the whole frame: a header above it would be the thing you read.
     if app.intro() {
-        draw_background(frame);
-        draw_intro(frame, app.started.elapsed().as_millis() as u64, app.update.as_deref());
+        draw_background(frame, p);
+        draw_intro(frame, app.started.elapsed().as_millis() as u64, app.update.as_deref(), p);
         return;
     }
 
@@ -62,7 +63,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     ])
     .areas(frame.area());
 
-    draw_background(frame);
+    draw_background(frame, p);
     draw_header(frame, app, header);
     // The pick wins: it says what the keys do, and it carries the filter.
     if app.picking.is_some() {
@@ -70,7 +71,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else if app.filtering() {
         draw_filter_bar(frame, app, rule);
     } else {
-        draw_rule(frame, rule);
+        draw_rule(frame, rule, p);
     }
     if app.show_logs && !app.logs.is_empty() {
         let rows = app.log_rows(body.height as usize) as u16;
@@ -81,7 +82,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else {
         draw_body(frame, app, body);
     }
-    draw_rule(frame, footrule);
+    draw_rule(frame, footrule, p);
     draw_status(frame, app, status);
 
     if app.show_help {
@@ -119,26 +120,27 @@ fn recolour(frame: &mut Frame) {
    so it carries no reply channel and no cursor. The keys are spelled out
    instead of driven, which is one row and no state. */
 fn draw_confirm(frame: &mut Frame, app: &App, what: Confirm) {
+    let p = app.theme;
     let Confirm::Quit = what;
     let (done, total) = app.progress();
     let mut lines = vec![Line::from(Span::styled(
         format!(" {done} of {total} finished so far"),
-        Style::new().fg(CREAM),
+        Style::new().fg(p.text),
     ))];
     // What it costs, not what it does: "quit?" is already in the title.
-    lines.push(Line::from(dim(" leaving now stops the download")));
+    lines.push(Line::from(dim(" leaving now stops the download", p)));
     lines.push(Line::default());
     lines.push(Line::from(vec![
-        Span::styled(" q  quit", Style::new().fg(AMBER)),
-        dim("     esc  keep going"),
+        Span::styled(" q  quit", Style::new().fg(p.warn)),
+        dim("     esc  keep going", p),
     ]));
     let width = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 3;
-    popup(frame, "quit?", lines, width);
+    popup(frame, "quit?", lines, width, p);
 }
 
 /* Painted before anything else: every other widget styles only its foreground,
    so the gradient survives underneath them. */
-fn draw_background(frame: &mut Frame) {
+fn draw_background(frame: &mut Frame, p: Palette) {
     if theme::plain() {
         return;
     }
@@ -146,7 +148,7 @@ fn draw_background(frame: &mut Frame) {
     let buffer = frame.buffer_mut();
     for y in area.top()..area.bottom() {
         for x in area.left()..area.right() {
-            let bg = theme::background(x - area.left(), y - area.top(), area.width, area.height);
+            let bg = p.background(x - area.left(), y - area.top(), area.width, area.height);
             buffer[(x, y)].set_bg(bg);
         }
     }
@@ -179,7 +181,7 @@ const WAVE: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█']
    rather than a literal, since the tests assert on it in three places. */
 pub const TAGLINE: &str = "playlist in, library out";
 
-fn draw_intro(frame: &mut Frame, ms: u64, update: Option<&str>) {
+fn draw_intro(frame: &mut Frame, ms: u64, update: Option<&str>, p: Palette) {
     let area = frame.area();
     // Below this the wordmark would wrap into nonsense, so only the wave runs.
     let big = area.width >= MARK_WIDTH + 2 && area.height >= MARK_HEIGHT + 6;
@@ -205,7 +207,7 @@ fn draw_intro(frame: &mut Frame, ms: u64, update: Option<&str>) {
                 if n > 0 {
                     spans.push(Span::raw(" "));
                 }
-                let lit = theme::glow((ms - due) as f32 / FADE);
+                let lit = p.glow((ms - due) as f32 / FADE);
                 spans.push(Span::styled(glyph[row as usize], Style::new().fg(lit)));
             }
             frame.render_widget(
@@ -217,7 +219,7 @@ fn draw_intro(frame: &mut Frame, ms: u64, update: Option<&str>) {
         frame.render_widget(
             Paragraph::new(Line::from(Span::styled(
                 "earworm",
-                Style::new().fg(theme::glow(ms as f32 / FADE)),
+                Style::new().fg(p.glow(ms as f32 / FADE)),
             ))),
             Rect::new(left, top, width, 1),
         );
@@ -237,7 +239,7 @@ fn draw_intro(frame: &mut Frame, ms: u64, update: Option<&str>) {
             })
             .collect();
         frame.render_widget(
-            Paragraph::new(Line::from(Span::styled(wave, Style::new().fg(AMBER)))),
+            Paragraph::new(Line::from(Span::styled(wave, Style::new().fg(p.warn)))),
             Rect::new(left, top + mark_rows + 1, width, 1),
         );
     }
@@ -253,17 +255,17 @@ fn draw_intro(frame: &mut Frame, ms: u64, update: Option<&str>) {
         let sign = truncate(&sign, area.width as usize);
         let at = area.x + (area.width - cols(&sign) as u16) / 2;
         frame.render_widget(
-            Paragraph::new(Line::from(dim(sign))),
+            Paragraph::new(Line::from(dim(sign, p))),
             Rect::new(at, top + mark_rows + 3, area.right() - at, 1),
         );
     }
 }
 
-fn draw_rule(frame: &mut Frame, area: Rect) {
+fn draw_rule(frame: &mut Frame, area: Rect, p: Palette) {
     frame.render_widget(
         Paragraph::new(Span::styled(
             "─".repeat(area.width as usize),
-            Style::new().fg(RULE),
+            Style::new().fg(p.rule),
         )),
         area,
     );
@@ -273,7 +275,7 @@ fn draw_rule(frame: &mut Frame, area: Rect) {
    what they usually mean, takes the rule's row as a filled band rather than a
    hint among hints. It deliberately covers the gradient, which is what makes
    it impossible to miss. */
-fn draw_band(frame: &mut Frame, area: Rect, left: String, mut right: String) {
+fn draw_band(frame: &mut Frame, area: Rect, left: String, mut right: String, p: Palette) {
     let width = area.width as usize;
     /* Reversed rather than filled when there is no colour: the band is the
        one thing on screen that must not be missable, and a mode nobody can
@@ -281,7 +283,7 @@ fn draw_band(frame: &mut Frame, area: Rect, left: String, mut right: String) {
     let band = if theme::plain() {
         Style::new().add_modifier(Modifier::REVERSED)
     } else {
-        Style::new().fg(INK).bg(GOLD)
+        Style::new().fg(p.ink).bg(p.accent)
     };
     let used = cols(&left);
     let mut spans = vec![Span::styled(left, band.add_modifier(Modifier::BOLD))];
@@ -303,6 +305,7 @@ fn draw_band(frame: &mut Frame, area: Rect, left: String, mut right: String) {
 /* One band for both narrowings and both screens: what it has to say is that
    the list is not all of it, which is the same news whichever narrowed it. */
 fn draw_filter_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let p = app.theme;
     let (shown, total) = match app.view {
         View::Library => (app.shelf_rows().len(), app.library.len()),
         // Every track in the library is what a search was asked of, not the
@@ -332,12 +335,13 @@ fn draw_filter_bar(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         format!("{shown} of {total} shown  ·  esc clears ")
     };
-    draw_band(frame, area, left, right);
+    draw_band(frame, area, left, right, p);
 }
 
 /* Carries the filter too, since the pick band replaces it: a narrowed list
    with nothing saying so is what `a` would then mark the wrong amount of. */
 fn draw_pick_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let p = app.theme;
     let mut left = format!(" PICK  {} of {} selected", app.marked.len(), app.tracks.len());
     if !app.filter.is_empty() || app.typing_filter {
         let caret = if app.typing_filter { "\u{2588}" } else { "" };
@@ -348,24 +352,26 @@ fn draw_pick_bar(frame: &mut Frame, app: &App, area: Rect) {
         area,
         left,
         "space  ·  a all  ·  i invert  ·  enter downloads  ·  esc none ".to_string(),
+        p,
     );
 }
 
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
-    let mut spans = vec![Span::styled(" earworm", Style::new().fg(GOLD))];
+    let p = app.theme;
+    let mut spans = vec![Span::styled(" earworm", Style::new().fg(p.accent))];
     // The open playlist is not what is on screen while the library is.
     if !app.playlist.is_empty() && app.view == View::Tracks {
-        spans.push(dim("  ·  "));
-        spans.push(Span::styled(app.playlist.clone(), Style::new().fg(CREAM)));
+        spans.push(dim("  ·  ", p));
+        spans.push(Span::styled(app.playlist.clone(), Style::new().fg(p.text)));
     }
-    spans.push(dim("  ·  "));
+    spans.push(dim("  ·  ", p));
     // The stage belongs to the last run, which the library screen is not.
     let stage = match app.view {
         View::Library if !app.busy => "library".to_string(),
         View::Found if !app.busy => "search".to_string(),
         _ => app.stage.clone(),
     };
-    spans.push(Span::styled(stage, Style::new().fg(CREAM)));
+    spans.push(Span::styled(stage, Style::new().fg(p.text)));
 
     if app.view == View::Found {
         /* How many folders the matches are spread over, which is the thing
@@ -375,25 +381,25 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
             rows.iter().map(|(shelf, _)| *shelf).collect();
         let tracks = if rows.len() == 1 { "track" } else { "tracks" };
         let plural = if folders.len() == 1 { "playlist" } else { "playlists" };
-        spans.push(dim("  ·  "));
+        spans.push(dim("  ·  ", p));
         spans.push(Span::styled(
             format!("{} {tracks} in {} {plural}", rows.len(), folders.len()),
-            Style::new().fg(CREAM),
+            Style::new().fg(p.text),
         ));
     } else if app.view == View::Library {
         let count = app.library.len();
         let plural = if count == 1 { "playlist" } else { "playlists" };
-        spans.push(dim("  ·  "));
+        spans.push(dim("  ·  ", p));
         spans.push(Span::styled(
             format!("{count} {plural}"),
-            Style::new().fg(CREAM),
+            Style::new().fg(p.text),
         ));
     } else if !app.tracks.is_empty() {
-        spans.push(dim("  ·  "));
+        spans.push(dim("  ·  ", p));
         // How much of the run is showing is the filter band's to say.
         spans.push(Span::styled(
             format!("{}/{}", app.settled(), app.tracks.len()),
-            Style::new().fg(CREAM),
+            Style::new().fg(p.text),
         ));
     }
     /* Movement the track rows cannot show: a slow lookup still looks alive,
@@ -403,7 +409,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     if app.picking.is_none() && ((app.done.is_none() && app.view == View::Tracks) || app.busy) {
         spans.push(Span::styled(
             format!("  {}", SPINNER[(app.tick / 2) % SPINNER.len()]),
-            Style::new().fg(GOLD),
+            Style::new().fg(p.accent),
         ));
     }
     /* The right half was empty on every screen, which is the widest unused
@@ -415,13 +421,13 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let (done, total) = app.progress();
     if app.view == View::Tracks && total > 0 && app.done.is_none() {
         let (filled, rest) = bar(((done * 100) / total) as u16, 10);
-        right.push(Span::styled(filled, Style::new().fg(GOLD)));
-        right.push(dim(rest));
+        right.push(Span::styled(filled, Style::new().fg(p.accent)));
+        right.push(dim(rest, p));
         if let Some(left) = app.eta() {
-            right.push(dim(format!(" {} left", brief(left))));
+            right.push(dim(format!(" {} left", brief(left)), p));
         }
     } else if app.view == View::Library || app.done.is_some() {
-        right.push(dim(app.settings.clone()));
+        right.push(dim(app.settings.clone(), p));
     }
 
     let used: usize = spans.iter().map(|s| cols(&s.content)).sum();
@@ -474,13 +480,14 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
    "which tracks" one folder at a time; this is the same question asked of the
    whole library at once, which is what a fifty-folder library needs. */
 fn draw_found(frame: &mut Frame, app: &mut App, area: Rect) {
+    let p = app.theme;
     let rows = app.found_rows();
     if rows.is_empty() {
         let said = match app.filter.is_empty() {
             true => " type to search every folder   esc goes back".to_string(),
             false => format!(" no track matches {}   esc goes back", app.filter),
         };
-        frame.render_widget(Paragraph::new(Line::from(dim(said))), area);
+        frame.render_widget(Paragraph::new(Line::from(dim(said, p))), area);
         return;
     }
     let width = area.width as usize;
@@ -509,16 +516,16 @@ fn draw_found(frame: &mut Frame, app: &mut App, area: Rect) {
             let title = name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem);
             let selected = app.found == Some(*row);
             ListItem::new(Line::from(vec![
-                Span::styled(if selected { "▌" } else { " " }, Style::new().fg(TEAL)),
+                Span::styled(if selected { "▌" } else { " " }, Style::new().fg(p.cursor)),
                 // Same mark the library preview uses, for the same reason.
                 Span::styled(
                     if *here { "  " } else { " !" },
-                    Style::new().fg(if *here { DIM } else { AMBER }),
+                    Style::new().fg(if *here { p.muted } else { p.warn }),
                 ),
-                dim(format!("{folder}{:pad$}", "")),
+                dim(format!("{folder}{:pad$}", ""), p),
                 Span::styled(
                     format!("  {}", truncate(title, width.saturating_sub(name_width + 5))),
-                    row_style(selected),
+                    row_style(selected, p),
                 ),
             ]))
         })
@@ -540,7 +547,7 @@ fn draw_found(frame: &mut Frame, app: &mut App, area: Rect) {
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
                 .end_symbol(None)
-                .thumb_style(Style::new().fg(RULE)),
+                .thumb_style(Style::new().fg(p.rule)),
             area,
             &mut bar_state,
         );
@@ -551,11 +558,12 @@ fn draw_found(frame: &mut Frame, app: &mut App, area: Rect) {
    what is on disk, and the sync time is the only thing that says whether that
    still matches the playlist upstream. */
 fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
+    let p = app.theme;
     /* Only reachable by emptying --dir while the screen is open: a bare start
        with no playlists asks for a URL instead of showing this. */
     if app.library.is_empty() {
         frame.render_widget(
-            Paragraph::new(Line::from(dim(" no playlists here now   n syncs one"))),
+            Paragraph::new(Line::from(dim(" no playlists here now   n syncs one", p))),
             area,
         );
         return;
@@ -567,7 +575,7 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
             Paragraph::new(Line::from(dim(format!(
                 " nothing matches {}   esc clears it",
                 app.filter
-            )))),
+            ), p))),
             area,
         );
         return;
@@ -585,7 +593,7 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
         let pane = (u32::from(area.width) * 2 / 5).min(60) as u16;
         let [list, preview] =
             Layout::horizontal([Constraint::Min(1), Constraint::Length(pane)]).areas(area);
-        draw_preview(frame, &app.library[selected], &app.filter, &app.format, preview);
+        draw_preview(frame, &app.library[selected], &app.filter, &app.format, preview, p);
         list
     } else {
         area
@@ -609,25 +617,25 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
             let mut spans = vec![
                 Span::styled(
                     if row == selected { "▌" } else { " " },
-                    Style::new().fg(TEAL),
+                    Style::new().fg(p.cursor),
                 ),
                 // Bold as well as the marker: the bar alone is a thin signal
                 // for "this is the folder Enter opens".
-                Span::styled(format!(" {name}{:pad$}", ""), row_style(row == selected)),
+                Span::styled(format!(" {name}{:pad$}", ""), row_style(row == selected, p)),
                 /* Two cells whether or not anything is playing, so the columns
                    after it do not step sideways as cliamp starts and stops. */
                 match (app.playback.on(&shelf.path), app.playback.playing) {
-                    (true, true) => Span::styled(" ▶", Style::new().fg(TEAL)),
-                    (true, false) => dim(" ⏸"),
+                    (true, true) => Span::styled(" ▶", Style::new().fg(p.cursor)),
+                    (true, false) => dim(" ⏸", p),
                     (false, _) => Span::raw("  "),
                 },
-                dim(format!("  {:>4} tracks", shelf.tracks)),
+                dim(format!("  {:>4} tracks", shelf.tracks), p),
                 /* Files the manifest lists that are no longer there, which a
                    sync would download again. Worth colour: it is the one thing
                    on this screen that is a problem. A fixed slot either way,
                    or the sync column steps sideways between rows. */
                 if shelf.missing > 0 {
-                    Span::styled(format!("  {:>3} missing", shelf.missing), Style::new().fg(AMBER))
+                    Span::styled(format!("  {:>3} missing", shelf.missing), Style::new().fg(p.warn))
                 } else {
                     Span::raw(" ".repeat(MISSING_WIDTH))
                 },
@@ -635,7 +643,7 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
             spans.push(dim(match shelf.synced {
                 Some(at) => format!("  synced {}", manifest::ago(at)),
                 None => "  never synced".into(),
-            }));
+            }, p));
             ListItem::new(Line::from(spans))
         })
         .collect();
@@ -651,7 +659,7 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
                 .end_symbol(None)
-                .thumb_style(Style::new().fg(DIM))
+                .thumb_style(Style::new().fg(p.muted))
                 .track_symbol(None),
             area,
             &mut bar_state,
@@ -663,10 +671,10 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
    third view mode and a second set of keys, and Enter already opens the folder
    properly. What it is for is the `n missing` count on the shelf row, which
    says a sync would re-download something but never which one. */
-fn draw_preview(frame: &mut Frame, shelf: &Shelf, filter: &str, format: &str, area: Rect) {
+fn draw_preview(frame: &mut Frame, shelf: &Shelf, filter: &str, format: &str, area: Rect, p: Palette) {
     let block = Block::new()
         .borders(Borders::LEFT)
-        .border_style(Style::new().fg(RULE));
+        .border_style(Style::new().fg(p.rule));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -674,7 +682,7 @@ fn draw_preview(frame: &mut Frame, shelf: &Shelf, filter: &str, format: &str, ar
     }
 
     if shelf.files.is_empty() {
-        frame.render_widget(Paragraph::new(Line::from(dim(" nothing recorded"))), inner);
+        frame.render_widget(Paragraph::new(Line::from(dim(" nothing recorded", p))), inner);
         return;
     }
 
@@ -707,7 +715,7 @@ fn draw_preview(frame: &mut Frame, shelf: &Shelf, filter: &str, format: &str, ar
     };
     let mut lines = vec![Line::from(Span::styled(
         truncate(&head, width),
-        Style::new().fg(if shelf.missing > 0 { AMBER } else { DIM }),
+        Style::new().fg(if shelf.missing > 0 { p.warn } else { p.muted }),
     ))];
     /* Here rather than on the shelf row, which reserves fixed columns for
        everything it prints: a count that is zero for anyone not converting
@@ -718,7 +726,7 @@ fn draw_preview(frame: &mut Frame, shelf: &Shelf, filter: &str, format: &str, ar
         lines.push(Line::from(dim(truncate(
             &format!(" {off} not {format}"),
             width,
-        ))));
+        ), p)));
     }
     // Every line above the list, or the tail count runs off the bottom.
     let height = (inner.height as usize).saturating_sub(lines.len());
@@ -738,11 +746,11 @@ fn draw_preview(frame: &mut Frame, shelf: &Shelf, filter: &str, format: &str, ar
             let mark = if *here { ' ' } else { '!' };
             Line::from(Span::styled(
                 format!("{mark}{}", truncate(title, width.saturating_sub(1))),
-                Style::new().fg(if *here { CREAM } else { AMBER }),
+                Style::new().fg(if *here { p.text } else { p.warn }),
             ))
         }));
     if room < files.len() {
-        lines.push(Line::from(dim(format!(" … {} more", files.len() - room))));
+        lines.push(Line::from(dim(format!(" … {} more", files.len() - room), p)));
     }
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -755,7 +763,7 @@ fn clock(seconds: u64) -> String {
 
 /// One labelled field, wrapped, with the continuation lines under the value
 /// rather than under the label.
-fn detail_rows(label: &str, value: &str, style: Style, width: usize) -> Vec<Line<'static>> {
+fn detail_rows(label: &str, value: &str, style: Style, width: usize, p: Palette) -> Vec<Line<'static>> {
     const LABEL: usize = 8;
     let room = width.saturating_sub(LABEL + 1).max(1);
     wrap(value, room)
@@ -763,7 +771,7 @@ fn detail_rows(label: &str, value: &str, style: Style, width: usize) -> Vec<Line
         .enumerate()
         .map(|(n, piece)| {
             Line::from(vec![
-                dim(format!(" {:pad$}", if n == 0 { label } else { "" }, pad = LABEL)),
+                dim(format!(" {:pad$}", if n == 0 { label } else { "" }, pad = LABEL), p),
                 Span::styled(piece, style),
             ])
         })
@@ -774,10 +782,10 @@ fn detail_rows(label: &str, value: &str, style: Style, width: usize) -> Vec<Line
    truncates first is `was` at 32 characters: the video title, which is the
    half of a wrong identification that says how it went wrong. The path is
    never on the row at all. A wide terminal has the columns, so it says it. */
-fn draw_detail(frame: &mut Frame, track: &crate::app::Track, area: Rect) {
+fn draw_detail(frame: &mut Frame, track: &crate::app::Track, area: Rect, p: Palette) {
     let block = Block::new()
         .borders(Borders::LEFT)
-        .border_style(Style::new().fg(RULE));
+        .border_style(Style::new().fg(p.rule));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
@@ -787,49 +795,51 @@ fn draw_detail(frame: &mut Frame, track: &crate::app::Track, area: Rect) {
 
     let mut lines: Vec<Line> = wrap(&format!(" {}", track.name), width)
         .into_iter()
-        .map(|piece| Line::from(Span::styled(piece, row_style(true))))
+        .map(|piece| Line::from(Span::styled(piece, row_style(true, p))))
         .collect();
     lines.push(Line::default());
     lines.extend(detail_rows(
         "status",
         track.status.label(),
-        Style::new().fg(track.status.color()),
+        Style::new().fg(track.status.color(p)),
         width,
+        p,
     ));
-    let cream = Style::new().fg(CREAM);
-    let faint = Style::new().fg(DIM);
+    let cream = Style::new().fg(p.text);
+    let faint = Style::new().fg(p.muted);
     for (label, value) in [
         ("artist", &track.artist),
         ("title", &track.title),
         ("album", &track.album),
     ] {
         if !value.is_empty() {
-            lines.extend(detail_rows(label, value, cream, width));
+            lines.extend(detail_rows(label, value, cream, width, p));
         }
     }
     if let Some(year) = track.year {
-        lines.extend(detail_rows("year", &year.to_string(), faint, width));
+        lines.extend(detail_rows("year", &year.to_string(), faint, width, p));
     }
     if track.duration > 0 {
-        lines.extend(detail_rows("length", &clock(track.duration), faint, width));
+        lines.extend(detail_rows("length", &clock(track.duration), faint, width, p));
     }
     for (label, value) in [("source", &track.source), ("note", &track.note)] {
         if !value.is_empty() {
-            lines.extend(detail_rows(label, value, faint, width));
+            lines.extend(detail_rows(label, value, faint, width, p));
         }
     }
     // The whole of it: truncating this is what the pane exists to undo.
     if track.was != track.name {
-        lines.extend(detail_rows("was", &track.was, faint, width));
+        lines.extend(detail_rows("was", &track.was, faint, width, p));
     }
     if let Some(path) = &track.path {
-        lines.extend(detail_rows("file", &path.display().to_string(), faint, width));
+        lines.extend(detail_rows("file", &path.display().to_string(), faint, width, p));
     }
     lines.truncate(inner.height as usize);
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
+    let p = app.theme;
     let rows = app.rows();
     if rows.is_empty() && !app.tracks.is_empty() {
         frame.render_widget(
@@ -837,7 +847,7 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
                 " nothing here needs a look   esc clears it".to_string()
             } else {
                 format!(" nothing matches {}   esc clears it", app.filter)
-            }))),
+            }, p))),
             area,
         );
         return;
@@ -850,7 +860,7 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
         let [list, detail] =
             Layout::horizontal([Constraint::Min(1), Constraint::Length(pane)]).areas(area);
         if let Some(track) = app.tracks.get(app.cursor) {
-            draw_detail(frame, track, detail);
+            draw_detail(frame, track, detail, p);
         }
         list
     } else {
@@ -878,7 +888,7 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
             let mut spans = vec![
                 Span::styled(
                     if selected { "▌" } else { " " },
-                    Style::new().fg(TEAL),
+                    Style::new().fg(p.cursor),
                 ),
                 // Its own column, so a marked track under the cursor shows both.
                 Span::styled(
@@ -887,19 +897,19 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
                     } else {
                         " "
                     },
-                    Style::new().fg(GOLD),
+                    Style::new().fg(p.accent),
                 ),
-                dim(format!("{:>3} ", track.index)),
+                dim(format!("{:>3} ", track.index), p),
             ];
 
             if track.status == Status::Downloading {
                 let (done, rest) = bar(track.percent, STATUS_WIDTH);
-                spans.push(Span::styled(done, Style::new().fg(GOLD)));
-                spans.push(dim(rest));
+                spans.push(Span::styled(done, Style::new().fg(p.accent)));
+                spans.push(dim(rest, p));
             } else {
                 spans.push(Span::styled(
                     format!("{:<STATUS_WIDTH$}", track.status.label()),
-                    Style::new().fg(track.status.color()),
+                    Style::new().fg(track.status.color(p)),
                 ));
             }
 
@@ -918,9 +928,9 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
             let tail = bits.join("  ");
             let name = truncate(&track.name, name_width);
             let pad = name_width.saturating_sub(cols(&name));
-            spans.push(Span::styled(format!("  {name}"), row_style(selected)));
+            spans.push(Span::styled(format!("  {name}"), row_style(selected, p)));
             if !tail.is_empty() {
-                spans.push(dim(format!("{:pad$}  {tail}", "")));
+                spans.push(dim(format!("{:pad$}  {tail}", ""), p));
             }
             ListItem::new(Line::from(spans))
         })
@@ -947,7 +957,7 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
                 .end_symbol(None)
-                .thumb_style(Style::new().fg(DIM))
+                .thumb_style(Style::new().fg(p.muted))
                 .track_symbol(None),
             area,
             &mut bar_state,
@@ -959,6 +969,7 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
    the resting position. The line worth reading is often well above it, which
    is what `K` is for, and the head then says how far back it has gone. */
 fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
+    let p = app.theme;
     let height = area.height.saturating_sub(1) as usize;
     let end = app.logs.len().saturating_sub(app.log_scroll);
     let start = end.saturating_sub(height);
@@ -966,16 +977,17 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
     let mut lines = vec![Line::from(dim(match below {
         0 => " yt-dlp output".to_string(),
         n => format!(" yt-dlp output   {n} newer below   J K scroll"),
-    }))];
+    }, p))];
     lines.extend(
         app.logs[start..end]
             .iter()
-            .map(|l| Line::styled(format!(" {l}"), Style::new().fg(app::log_color(l)))),
+            .map(|l| Line::styled(format!(" {l}"), Style::new().fg(app::log_color(l, p)))),
     );
     frame.render_widget(Paragraph::new(lines), area);
 }
 
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
+    let p = app.theme;
     let width = area.width as usize;
 
     /* yt-dlp's stderr is otherwise invisible until you happen to press l, so
@@ -995,19 +1007,19 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         let mark = if urgent { "! " } else { "" };
         hints.push((
             format!("   {mark}l  {count} yt-dlp {plural}"),
-            Style::new().fg(if urgent { AMBER } else { DIM }),
+            Style::new().fg(if urgent { p.warn } else { p.muted }),
         ));
     }
     /* `f` toggles silently, and the cursor being dragged to whatever is
        downloading reads as a bug until you know a mode is doing it. A word
        rather than a colour, so it survives a terminal without one. */
     if app.following() {
-        hints.push(("   ⟳ following".to_string(), Style::new().fg(TEAL)));
+        hints.push(("   ⟳ following".to_string(), Style::new().fg(p.cursor)));
     }
     if !app.marked.is_empty() && app.view == View::Tracks && app.picking.is_none() {
         hints.push((
             format!("   {} marked", app.marked.len()),
-            Style::new().fg(GOLD),
+            Style::new().fg(p.accent),
         ));
     }
     /* The library is the first screen a bare run shows, and a list of folders
@@ -1023,39 +1035,39 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     if let Some(track) = app.playback.track.as_ref().filter(|_| app.can_play()) {
         extra.push((
             format!("   {}", truncate(track, NOW_PLAYING)),
-            Style::new().fg(TEAL),
+            Style::new().fg(p.cursor),
         ));
     }
     if app.view == View::Found {
-        hints.push(("   enter open".to_string(), Style::new().fg(GOLD)));
-        hints.push(("   / search".to_string(), Style::new().fg(DIM)));
-        hints.push(("   esc library".to_string(), Style::new().fg(DIM)));
+        hints.push(("   enter open".to_string(), Style::new().fg(p.accent)));
+        hints.push(("   / search".to_string(), Style::new().fg(p.muted)));
+        hints.push(("   esc library".to_string(), Style::new().fg(p.muted)));
     } else if app.view == View::Library {
-        hints.push(("   enter open".to_string(), Style::new().fg(GOLD)));
-        hints.push(("   t find a track".to_string(), Style::new().fg(DIM)));
-        hints.push(("   R resync all".to_string(), Style::new().fg(DIM)));
-        hints.push(("   n new URL".to_string(), Style::new().fg(DIM)));
+        hints.push(("   enter open".to_string(), Style::new().fg(p.accent)));
+        hints.push(("   t find a track".to_string(), Style::new().fg(p.muted)));
+        hints.push(("   R resync all".to_string(), Style::new().fg(p.muted)));
+        hints.push(("   n new URL".to_string(), Style::new().fg(p.muted)));
     } else if !app.tracks.is_empty() && app.picking.is_none() {
         if app.can_command() {
-            extra.push(("   e edit".to_string(), Style::new().fg(GOLD)));
+            extra.push(("   e edit".to_string(), Style::new().fg(p.accent)));
             /* Named rather than a bare `u undo`: one level of undo is only
                usable if you can see which level it is holding. */
             if let Some(what) = &app.undoable {
-                extra.push((format!("   u undo {what}"), Style::new().fg(DIM)));
+                extra.push((format!("   u undo {what}"), Style::new().fg(p.muted)));
             }
             // Only when there is something to retry, so it reads as an
             // answer to the failures beside it rather than as decoration.
             if app.tracks.iter().any(|t| t.status == Status::Failed) {
-                extra.push(("   r retry".to_string(), Style::new().fg(AMBER)));
+                extra.push(("   r retry".to_string(), Style::new().fg(p.warn)));
             }
             /* Counted, because the key deletes files and the number is the
                first thing anyone would ask. Dim like the `gone` rows it
                answers: a departure is a fact about the playlist, not a fault. */
             if app.can_purge() {
-                extra.push((format!("   D delete {} departed", app.purgeable()), Style::new().fg(DIM)));
+                extra.push((format!("   D delete {} departed", app.purgeable()), Style::new().fg(p.muted)));
             }
         } else {
-            extra.push(("   / filter".to_string(), Style::new().fg(DIM)));
+            extra.push(("   / filter".to_string(), Style::new().fg(p.muted)));
         }
     }
     /* Absent entirely when cliamp is not installed, since a player nobody has
@@ -1067,12 +1079,12 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
            cliamp at all. A glyph, so it is not teal doing the work. */
         Player::Running => hints.push((
             format!("   ♪ cliamp {}", if app.playback.playing { "▶" } else { "⏸" }),
-            Style::new().fg(TEAL),
+            Style::new().fg(p.cursor),
         )),
-        Player::Stopped => hints.push(("   ♪ cliamp off".to_string(), Style::new().fg(DIM))),
+        Player::Stopped => hints.push(("   ♪ cliamp off".to_string(), Style::new().fg(p.muted))),
         Player::Missing => {}
     }
-    hints.push(("   h keys".to_string(), Style::new().fg(DIM)));
+    hints.push(("   h keys".to_string(), Style::new().fg(p.muted)));
 
     /* Room for the widest two statuses plus their counts, or the tally goes
        and the hint that displaced it is one `h` away anyway. */
@@ -1113,20 +1125,20 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             break;
         }
         used += cols(&text);
-        spans.push(Span::styled(text, Style::new().fg(status.color())));
+        spans.push(Span::styled(text, Style::new().fg(status.color(p))));
     }
     if dropped && used < budget {
-        spans.push(dim("…"));
+        spans.push(dim("…", p));
         used += 1;
     }
 
     let room = width.saturating_sub(used + reserved);
     // Also the last run's, and it names a folder that is one row of many here.
     let (middle, style) = match app.done.as_ref().filter(|_| app.view == View::Tracks) {
-        Some(Ok(summary)) => (truncate(summary, room), Style::new().fg(DIM)),
+        Some(Ok(summary)) => (truncate(summary, room), Style::new().fg(p.muted)),
         Some(Err(err)) => (
             truncate(&format!("failed: {err}"), room),
-            Style::new().fg(RED),
+            Style::new().fg(p.error),
         ),
         /* The header counts the folders; this is what is inside them. The
            whole library's health in one line, where the track view puts the
@@ -1142,7 +1154,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             }
             (
                 truncate(&text, room),
-                Style::new().fg(if missing > 0 { AMBER } else { DIM }),
+                Style::new().fg(if missing > 0 { p.warn } else { p.muted }),
             )
         }
         None => (String::new(), Style::new()),
@@ -1160,6 +1172,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
    content: the old single-string-per-group layout could not line anything up,
    and a six-character group label ate its own separator. */
 fn draw_help(frame: &mut Frame, app: &App) {
+    let p = app.theme;
     let mut rows: Vec<(&str, &str, &str)> = vec![
         ("move", "j k  ↑ ↓", ""),
         ("", "^d ^u  PgDn PgUp", "by a screenful"),
@@ -1254,6 +1267,25 @@ fn draw_help(frame: &mut Frame, app: &App) {
         rows.push(("quit", "q  ^c", ""));
     }
 
+    /* Two rows of margin and the two borders, so the popup never reaches the
+       status bar: one that covers the tally is one that hides the very thing
+       it is explaining. */
+    let fits = |rows: usize| rows + 4 <= frame.area().height as usize;
+
+    /* Every branch above ends with its own quit row, and `^t` is live on
+       every screen, so it goes in once here rather than four times, above
+       quit because quit is the last word on this table.
+
+       First to give way, ahead of the legend and the settings tail: the key
+       table on the track list is already 21 rows and a 24-row terminal has
+       no room for a 22nd. Of everything here this is the one that only
+       changes colour, and `--check` and the settings tail both still name
+       the theme, so nothing about it goes unsaid — where a key that acts on
+       the music has nowhere else to be found. */
+    if fits(rows.len() + 1) {
+        rows.insert(rows.len().saturating_sub(1), ("look", "^t", "next colour theme"));
+    }
+
     let widest = |pick: fn(&(&str, &str, &str)) -> usize| {
         rows.iter().map(pick).max().unwrap_or(0)
     };
@@ -1264,23 +1296,30 @@ fn draw_help(frame: &mut Frame, app: &App) {
         .iter()
         .map(|(label, keys, what)| {
             Line::from(vec![
-                Span::styled(format!(" {label:group$}"), Style::new().fg(DIM)),
-                Span::styled(format!("{keys:key$}"), Style::new().fg(GOLD)),
-                Span::styled((*what).to_string(), Style::new().fg(CREAM)),
+                Span::styled(format!(" {label:group$}"), Style::new().fg(p.muted)),
+                Span::styled(format!("{keys:key$}"), Style::new().fg(p.accent)),
+                Span::styled((*what).to_string(), Style::new().fg(p.text)),
             ])
         })
         .collect();
 
+    /* Read off the palette being drawn in rather than out of `app.settings`,
+       which is built once at startup: `^t` changes the theme from inside the
+       tool and nothing re-sends that string, so a copy of the name in it is
+       stale from the first press. Everything else on the row is fixed for the
+       run, which is why the rest can be a string. */
+    let described = format!("{} · theme {}", app.settings, p.name());
+
     // Wrapped to the table it sits under, or one long line sets the width.
     let settings = widest(|r| r.2.chars().count()) + key;
     let mut tail: Vec<Line> = vec![Line::default()];
-    for (n, piece) in wrap(&app.settings, settings.max(20)).into_iter().enumerate() {
+    for (n, piece) in wrap(&described, settings.max(20)).into_iter().enumerate() {
         tail.push(Line::from(vec![
             Span::styled(
                 format!(" {:group$}", if n == 0 { "run" } else { "" }),
-                Style::new().fg(DIM),
+                Style::new().fg(p.muted),
             ),
-            Span::styled(piece, Style::new().fg(CREAM)),
+            Span::styled(piece, Style::new().fg(p.text)),
         ]));
     }
 
@@ -1298,21 +1337,17 @@ fn draw_help(frame: &mut Frame, app: &App) {
         ("", vec![Status::Have, Status::Skipped, Status::Gone], "not touched this run"),
         ("", vec![Status::Failed], "l has the reason"),
     ];
-    /* Two rows of margin and the two borders, so the popup never reaches the
-       status bar: one that covers the tally is one that hides the very thing
-       it is explaining. */
-    let fits = |rows: usize| rows + 4 <= frame.area().height as usize;
     let room = lines.len() + tail.len() + legend.len() + 1;
     if app.view == View::Tracks && fits(room) {
         lines.push(Line::default());
         // Three slots whether or not a row fills them, so the glosses line up.
         let slots = 3;
         for (label, statuses, gloss) in legend {
-            let mut spans = vec![Span::styled(format!(" {label:group$}"), Style::new().fg(DIM))];
+            let mut spans = vec![Span::styled(format!(" {label:group$}"), Style::new().fg(p.muted))];
             for status in &statuses {
                 spans.push(Span::styled(
                     format!("{:<9}", status.label()),
-                    Style::new().fg(status.color()),
+                    Style::new().fg(status.color(p)),
                 ));
             }
             /* Two columns of air whatever the row holds: `no match` is
@@ -1322,7 +1357,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
                 "{:pad$}{gloss}",
                 "",
                 pad = (slots - statuses.len()) * 9 + 2
-            )));
+            ), p));
             lines.push(Line::from(spans));
         }
     }
@@ -1338,10 +1373,11 @@ fn draw_help(frame: &mut Frame, app: &App) {
         .map(|l| l.width() as u16)
         .max()
         .unwrap_or(0);
-    popup(frame, "keys", lines, content + 3);
+    popup(frame, "keys", lines, content + 3, p);
 }
 
 fn draw_prompt(frame: &mut Frame, app: &App) {
+    let p = app.theme;
     let Some((prompt, _)) = &app.prompt else {
         return;
     };
@@ -1357,7 +1393,7 @@ fn draw_prompt(frame: &mut Frame, app: &App) {
         } => {
             let mut rows = Vec::new();
             if !note.is_empty() {
-                rows.push((note.clone(), Style::new().fg(DIM)));
+                rows.push((note.clone(), Style::new().fg(p.muted)));
                 rows.push((String::new(), Style::new()));
             }
             /* Numbered so the answer is one key rather than a walk with
@@ -1366,7 +1402,7 @@ fn draw_prompt(frame: &mut Frame, app: &App) {
             rows.extend(options.iter().enumerate().map(|(i, opt)| {
                 let selected = i == app.choice;
                 let style = if selected {
-                    Style::new().fg(TEAL)
+                    Style::new().fg(p.cursor)
                 } else {
                     Style::new()
                 };
@@ -1384,13 +1420,13 @@ fn draw_prompt(frame: &mut Frame, app: &App) {
         Prompt::Input { header, note, .. } => {
             let mut rows = Vec::new();
             if !note.is_empty() {
-                rows.push((note.clone(), Style::new().fg(DIM)));
+                rows.push((note.clone(), Style::new().fg(p.muted)));
                 rows.push((String::new(), Style::new()));
             }
             // Drawn between the halves, so the block is where the next
             // character lands rather than always at the end of the line.
             let (before, after) = app.input_parts();
-            rows.push((format!("{before}\u{2588}{after}"), Style::new().fg(CREAM)));
+            rows.push((format!("{before}\u{2588}{after}"), Style::new().fg(p.text)));
             (header, rows)
         }
         Prompt::Form {
@@ -1405,7 +1441,7 @@ fn draw_prompt(frame: &mut Frame, app: &App) {
                what the answer is being corrected against, so it belongs
                inside the frame with the boxes. */
             if !note.is_empty() {
-                rows.push((format!("was  {note}"), Style::new().fg(SAND)));
+                rows.push((format!("was  {note}"), Style::new().fg(p.unsure)));
                 rows.push((String::new(), Style::new()));
             }
             let label = fields
@@ -1424,9 +1460,9 @@ fn draw_prompt(frame: &mut Frame, app: &App) {
                     format!("{name:label$}  {value}")
                 };
                 let style = if n == app.field {
-                    Style::new().fg(CREAM)
+                    Style::new().fg(p.text)
                 } else {
-                    Style::new().fg(DIM)
+                    Style::new().fg(p.muted)
                 };
                 rows.push((text, style));
             }
@@ -1456,7 +1492,7 @@ fn draw_prompt(frame: &mut Frame, app: &App) {
                 format!("tab field   {swap}enter save   {}", escape.hint())
             }
         },
-        Style::new().fg(DIM),
+        Style::new().fg(p.muted),
     ));
 
     /* Wrapped here rather than by Paragraph's own Wrap so the popup is sized
@@ -1470,7 +1506,7 @@ fn draw_prompt(frame: &mut Frame, app: &App) {
                 .map(move |piece| Line::styled(format!(" {piece}"), *style))
         })
         .collect();
-    popup(frame, header, lines, width);
+    popup(frame, header, lines, width, p);
 }
 
 fn popup_width(area: Rect) -> u16 {
@@ -1479,7 +1515,7 @@ fn popup_width(area: Rect) -> u16 {
     seventy.clamp(20.min(area.width), area.width)
 }
 
-fn popup(frame: &mut Frame, title: &str, lines: Vec<Line>, width: u16) {
+fn popup(frame: &mut Frame, title: &str, lines: Vec<Line>, width: u16, p: Palette) {
     let screen = frame.area();
     let height = (lines.len() as u16 + 2).min(screen.height);
     // Never narrower than the title it has to fit, never wider than the screen.
@@ -1491,7 +1527,7 @@ fn popup(frame: &mut Frame, title: &str, lines: Vec<Line>, width: u16) {
     let (fill, edge) = if theme::plain() {
         (Style::new(), Style::new())
     } else {
-        (Style::new().bg(SURFACE), Style::new().fg(RULE).bg(SURFACE))
+        (Style::new().bg(p.surface), Style::new().fg(p.rule).bg(p.surface))
     };
     frame.render_widget(
         Paragraph::new(lines).block(
@@ -1499,7 +1535,7 @@ fn popup(frame: &mut Frame, title: &str, lines: Vec<Line>, width: u16) {
                 .borders(Borders::ALL)
                 .style(fill)
                 .border_style(edge)
-                .title(Span::styled(format!(" {title} "), Style::new().fg(CREAM))),
+                .title(Span::styled(format!(" {title} "), Style::new().fg(p.text))),
         ),
         area,
     );
@@ -1631,6 +1667,98 @@ mod tests {
             .map(|x| buffer[(x, 23)].symbol().to_string())
             .collect();
         row.trim_end().to_string()
+    }
+
+    /* The name on screen has to be the palette on screen. `App.settings` is
+       built once at startup and nothing re-sends it, so the theme cannot live
+       in there: it is the one setting the UI changes by itself, and a copy in
+       that string reads `warm` on a cool screen from the first `^t` onwards.
+       Driven through `cycle_theme` rather than by setting the field, because
+       the key is the thing that used to leave the two disagreeing. */
+    #[test]
+    fn the_overlay_names_the_theme_it_is_drawn_in() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "format opus · convert off".into());
+        app.intro_done = true;
+        app.show_help = true;
+
+        let overlay = |app: &mut App| {
+            let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+            terminal.draw(|f| super::draw(f, app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..40)
+                .map(|y| {
+                    (0..100)
+                        .map(|x| buffer[(x, y)].symbol().to_string())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+
+        for name in ["warm", "light", "cool", "neon"] {
+            let screen = overlay(&mut app);
+            assert_eq!(app.theme.name(), name, "the walk went somewhere else");
+            /* The run row alone, not the whole screen: the header carries the
+               flash `^t` raised, and with no event loop here to expire it
+               that is a message about the last press rather than a claim
+               about what is being drawn. */
+            let row = screen
+                .lines()
+                .find(|l| l.contains("format opus"))
+                .unwrap_or_else(|| panic!("no run row: {screen}"));
+            assert!(row.contains(&format!("theme {name}")), "{name} unnamed: {row}");
+            for other in ["warm", "light", "cool", "neon"] {
+                assert!(
+                    other == name || !row.contains(&format!("theme {other}")),
+                    "it also claimed {other} while drawing {name}: {row}"
+                );
+            }
+            app.cycle_theme();
+        }
+    }
+
+    /* A theme changes colour and nothing else. Every glyph in every cell is
+       compared across all four, because the palette is threaded through a
+       hundred call sites by hand and the way that goes wrong is a slot whose
+       colour also decides a width — a status word styled from one palette and
+       padded from another, say. Colour is asserted to actually differ in the
+       same pass, or a bug that painted every theme warm would pass this. */
+    #[test]
+    fn a_theme_changes_the_colours_and_never_the_layout() {
+        let glyphs = |palette| {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(tx, "settings".into());
+            app.theme = palette;
+            app.intro_done = true;
+            app.tracks = spread();
+            app.playlist = "Focus".into();
+            app.done = Some(Ok("finished".into()));
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let cells: Vec<(String, ratatui::style::Color)> = (0..30)
+                .flat_map(|y| (0..100).map(move |x| (x, y)))
+                .map(|(x, y)| (buffer[(x, y)].symbol().to_string(), buffer[(x, y)].fg))
+                .collect();
+            cells
+        };
+
+        let warm = glyphs(crate::theme::WARM);
+        for (name, palette) in crate::theme::BUILT_INS {
+            let other = glyphs(palette);
+            let shifted = warm
+                .iter()
+                .zip(&other)
+                .position(|((a, _), (b, _))| a != b);
+            assert!(shifted.is_none(), "{name} moved a glyph at cell {shifted:?}");
+            if name != "warm" {
+                assert!(
+                    warm.iter().zip(&other).any(|((_, a), (_, b))| a != b),
+                    "{name} drew in warm's colours"
+                );
+            }
+        }
     }
 
     fn spread() -> Vec<Track> {
@@ -2575,9 +2703,9 @@ mod tests {
                 })
                 .unwrap_or_else(|| panic!("{needle} never drew"))
         };
-        assert_eq!(colour_of("ERROR"), crate::theme::RED);
-        assert_eq!(colour_of("WARNING"), crate::theme::AMBER);
-        assert_eq!(colour_of("[info]"), crate::theme::DIM);
+        assert_eq!(colour_of("ERROR"), crate::theme::WARM.error);
+        assert_eq!(colour_of("WARNING"), crate::theme::WARM.warn);
+        assert_eq!(colour_of("[info]"), crate::theme::WARM.muted);
     }
 
     /* The block used to sit at the end of the line whatever the caret was
@@ -2948,7 +3076,7 @@ mod tests {
             "{band:?}"
         );
         for x in 0..60u16 {
-            assert_eq!(buffer[(x, 1)].bg, crate::theme::GOLD, "the band breaks at {x}");
+            assert_eq!(buffer[(x, 1)].bg, crate::theme::WARM.accent, "the band breaks at {x}");
         }
 
         /* Narrow enough that the hint cannot fit beside the query, which is
@@ -2958,7 +3086,7 @@ mod tests {
         for x in 0..30u16 {
             assert_eq!(
                 narrow.backend().buffer()[(x, 1)].bg,
-                crate::theme::GOLD,
+                crate::theme::WARM.accent,
                 "the band breaks at {x} once the hint no longer fits"
             );
         }
@@ -2968,7 +3096,7 @@ mod tests {
             let mut t = Terminal::new(TestBackend::new(w, 10)).unwrap();
             t.draw(|f| super::draw(f, &mut app)).unwrap();
             for x in 0..w {
-                assert_eq!(t.backend().buffer()[(x, 1)].bg, crate::theme::GOLD, "at width {w}, column {x}");
+                assert_eq!(t.backend().buffer()[(x, 1)].bg, crate::theme::WARM.accent, "at width {w}, column {x}");
             }
         }
 
@@ -3051,7 +3179,7 @@ mod tests {
         assert!(band.contains("enter downloads"), "{band:?}");
         assert!(band.contains("esc none"), "{band:?}");
         for x in 0..90u16 {
-            assert_eq!(buffer[(x, 1)].bg, crate::theme::GOLD, "the band breaks at {x}");
+            assert_eq!(buffer[(x, 1)].bg, crate::theme::WARM.accent, "the band breaks at {x}");
         }
 
         // Nothing is running behind a question, so the spinner must not claim so.
@@ -3172,14 +3300,14 @@ mod tests {
 
         for y in 0..24u16 {
             for x in 0..60u16 {
-                let want = crate::theme::background(x, y, 60, 24);
+                let want = crate::theme::WARM.background(x, y, 60, 24);
                 assert_eq!(buffer[(x, y)].bg, want, "at {x},{y}");
             }
         }
         // Bottom-left and top-right are the two ends of the diagonal.
         assert_ne!(
-            crate::theme::background(0, 23, 60, 24),
-            crate::theme::background(59, 0, 60, 24),
+            crate::theme::WARM.background(0, 23, 60, 24),
+            crate::theme::WARM.background(59, 0, 60, 24),
             "the gradient has to actually fade"
         );
     }
@@ -3271,7 +3399,7 @@ mod tests {
 
         let area = super::centred(Rect::new(0, 0, 60, 24), super::popup_width(Rect::new(0, 0, 60, 24)), 8);
         let middle = (area.x + area.width / 2, area.y + 1);
-        assert_eq!(buffer[middle].bg, crate::theme::SURFACE);
+        assert_eq!(buffer[middle].bg, crate::theme::WARM.surface);
     }
 
     #[test]
@@ -3319,12 +3447,14 @@ mod tests {
         intro_rows_with(ms, width, height, None)
     }
 
+
     fn intro_rows_with(ms: u64, width: u16, height: u16, update: Option<&str>) -> Vec<String> {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let p = crate::theme::WARM;
         terminal
             .draw(|f| {
-                super::draw_background(f);
-                super::draw_intro(f, ms, update);
+                super::draw_background(f, p);
+                super::draw_intro(f, ms, update, p);
             })
             .unwrap();
         let buffer = terminal.backend().buffer().clone();

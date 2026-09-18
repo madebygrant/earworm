@@ -46,6 +46,12 @@ fn main() -> Result<()> {
     let format = cfg.format.clone();
     // Read off before the worker takes the config: both belong to the UI.
     let (intro, notify) = (cfg.intro, cfg.notify);
+    /* So does the whole of the theme. The palette is only ever read by a
+       draw, and `^t` is the one setting the UI writes back by itself, which
+       is why the path it writes to comes across here too. */
+    let (theme, overridden) = (cfg.theme, cfg.theme_overridden);
+    let theme_warnings = cfg.theme_warnings.clone();
+    let config_file = cfg.config_file.clone();
     /* The update probe runs beside the worker, not through it: it answers to
        nobody on screen and the result is a one-line hint. A stale cache makes
        it a file read; a fresh one costs at most the probe timeout, which the
@@ -61,11 +67,14 @@ fn main() -> Result<()> {
     let mut app = App::new(cmd_tx, settings);
     // The worker owns the config by now, so this is read across before it goes.
     app.format = format;
+    app.theme = theme;
+    app.theme_overridden = overridden;
+    app.config_file = config_file;
     /* Switched off by saying it is already over, which is what every other
        thing that ends it does. A separate flag would be a second answer to
        the same question. */
     app.intro_done = !intro;
-    let result = run(&mut terminal, &mut app, rx, update_rx, notify);
+    let result = run(&mut terminal, &mut app, rx, update_rx, notify, &theme_warnings);
 
     cancel.store(true, Ordering::SeqCst);
     ytdlp::stop();
@@ -116,6 +125,8 @@ fn check(cfg: &Config) -> Result<()> {
         key: cfg.acoustid_key.is_some(),
         format: &cfg.format,
         extension: config::extension(&cfg.format),
+        theme: cfg.theme.name(),
+        theme_warnings: &cfg.theme_warnings,
         dir: &dir,
         playlists: dir.is_dir().then_some(shelves.len()),
         convert: cfg.convert,
@@ -184,15 +195,37 @@ fn update_thread(on: bool) -> Option<mpsc::Receiver<String>> {
     Some(rx)
 }
 
+/* One flash however many colours measure badly. The queue is three deep, so
+   eight repainted slots would show four and silently drop the rest, and eight
+   flashes in a row is nagging even when they all fit. One is the whole of what
+   the screen has to say; `--check` is where the list belongs, and the message
+   says so rather than leaving the reader to find it. */
+fn theme_notice(warnings: &[String]) -> Option<String> {
+    match warnings {
+        [] => None,
+        [one] => Some(format!("theme · {one}")),
+        many => Some(format!(
+            "theme · {} colours are hard to read on this one  ·  earworm --check lists them",
+            many.len()
+        )),
+    }
+}
+
 fn run(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
     rx: mpsc::Receiver<app::Msg>,
     update_rx: Option<mpsc::Receiver<String>>,
     notify: bool,
+    theme_warnings: &[String],
 ) -> Result<()> {
     let mut title = String::new();
     let mut rang = false;
+    /* Like the update notice: the flash is drawn in the header, and the intro
+       does not draw one. Said before the loop it would spend most of its life
+       behind the animation and the rest of it on a frame nobody was reading
+       the header of yet. */
+    let mut theme_said = theme_notice(theme_warnings).is_none();
     /* `None` is a real answer (nothing newer, or the check found nothing),
        not "not yet": without the flag a probe that found nothing is polled
        every frame for the rest of the session. */
@@ -214,6 +247,15 @@ fn run(
                     break;
                 }
             }
+        }
+        /* Once, on the first frame with a header to put it on. A colour that
+           measures badly is the user's choice about their own screen, so this
+           is a remark and not a warning that follows them around. */
+        if !theme_said && !app.intro() {
+            if let Some(note) = theme_notice(theme_warnings) {
+                app.say(note);
+            }
+            theme_said = true;
         }
         /* One answer per session: after it is taken, the disconnected
            channel is not a dead worker, so the poll stops happening. */
@@ -321,6 +363,15 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
        must not double as a command the user never saw the screen for. */
     if app.intro() {
         app.intro_done = true;
+        return;
+    }
+    /* Ahead of every screen, including the prompts and the help overlay: the
+       point of walking the palettes is to see them on whatever is in front of
+       you, and a theme key that works on some screens and not others reads as
+       a broken key. `^t` because `t` and `T` are both taken, and because a
+       bare letter here would type into the filter box. */
+    if matches!(code, KeyCode::Char('t')) && mods.contains(KeyModifiers::CONTROL) {
+        app.cycle_theme();
         return;
     }
     if app.prompt.is_some() {
@@ -806,6 +857,77 @@ mod tests {
         assert_eq!(window_title(&app), "earworm · Focus · finished");
         app.done = Some(Err("yt-dlp died".into()));
         assert_eq!(window_title(&app), "earworm · Focus · failed");
+    }
+
+    /* Eight repainted slots that all measure badly is eight flashes into a
+       queue three deep: four shown, four dropped, and nothing saying any were.
+       One remark and a pointer at the place that has the list is both shorter
+       and complete. */
+    #[test]
+    fn badly_measured_colours_are_one_remark_however_many_there_are() {
+        assert_eq!(theme_notice(&[]), None, "a clean palette said something");
+
+        // One is worth naming outright: it is the whole of the news.
+        let one = theme_notice(&["text on the gradient is 1.1:1, wants 4.5:1".into()]).unwrap();
+        assert!(one.contains("text on the gradient"), "{one}");
+
+        let many: Vec<String> = (0..8).map(|n| format!("slot{n} is 1.1:1")).collect();
+        let note = theme_notice(&many).unwrap();
+        assert!(note.contains('8'), "it did not say how many: {note}");
+        // Every error a key can reach ends with the next step.
+        assert!(note.contains("--check"), "nowhere to go for the list: {note}");
+        assert!(!note.contains("slot0"), "it listed them after all: {note}");
+    }
+
+    /* Ahead of every screen on purpose. The point of walking the palettes is
+       seeing them on whatever is in front of you, and each screen has its own
+       key handler, so a theme key wired into one of them would be dead on the
+       other four with nothing saying why. The help overlay and a prompt are
+       the two that swallow or claim every other key. */
+    #[test]
+    fn the_theme_key_is_live_on_every_screen() {
+        type Screen = (&'static str, fn(&mut App));
+        let screens: [Screen; 6] = [
+            ("tracks", |_| {}),
+            ("library", |app| app.view = View::Library),
+            ("search", |app| app.view = View::Found),
+            ("filter box", |app| app.typing_filter = true),
+            ("help", |app| app.show_help = true),
+            ("quit guard", |app| app.confirm = Some(Confirm::Quit)),
+        ];
+        for (screen, set_up) in screens {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(tx, String::new());
+            app.intro_done = true;
+            set_up(&mut app);
+            handle_key(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
+            assert_eq!(app.theme.name(), "light", "^t was dead on {screen}");
+            /* And it did not also reach the screen behind it: the overlay
+               swallows the next key, so a `^t` that dismissed it would be one
+               press doing two things. */
+            assert!(!app.quit, "^t quit on {screen}");
+        }
+
+        /* The intro is the one exception, and the existing rule: skipping an
+           animation must not double as a command aimed at a screen nobody
+           saw. */
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        handle_key(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
+        assert_eq!(app.theme.name(), "warm", "the intro let the key through");
+        assert!(app.intro_done, "the key did not skip the intro either");
+    }
+
+    /* A bare `t` is the library's track search, so the ctrl arm must not take
+       it: the two are a modifier apart and mean entirely different things. */
+    #[test]
+    fn a_bare_t_is_still_the_track_search() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        app.view = View::Library;
+        handle_key(&mut app, KeyCode::Char('t'), KeyModifiers::NONE);
+        assert_eq!(app.theme.name(), "warm", "a bare t changed the theme");
     }
 
     /* `o` already cycles the order, so the reveal is `O`. Both are library

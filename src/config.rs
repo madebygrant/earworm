@@ -1,6 +1,9 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+
+use crate::theme::Palette;
 use clap::{ArgMatches, Parser, parser::ValueSource};
 use unicode_normalization::UnicodeNormalization;
 use serde::Deserialize;
@@ -24,6 +27,10 @@ pub struct Cli {
     /// Audio format: opus, m4a, mp3, flac, vorbis or alac
     #[arg(short, long, value_name = "NAME")]
     pub format: Option<String>,
+
+    /// Colour theme: warm, light, cool or neon
+    #[arg(long, value_name = "NAME")]
+    pub theme: Option<String>,
 
     /// Leave tracks already on disk in the format they were downloaded in,
     /// whatever `convert` says in the config
@@ -126,6 +133,11 @@ pub struct FileConfig {
     pub update_check: Option<bool>,
     pub extra: Option<Vec<String>>,
     pub acoustid_key: Option<String>,
+    pub theme: Option<String>,
+    /// Slot name to `#rrggbb`, painted on top of whichever theme is named. A
+    /// map rather than a struct so the error can name the slot that was
+    /// wrong, which a serde field error cannot.
+    pub colors: Option<BTreeMap<String, String>>,
 }
 
 impl FileConfig {
@@ -207,6 +219,59 @@ pub fn encoders(format: &str) -> &'static [&'static str] {
 
 pub fn save_format(path: &std::path::Path, format: &str) -> Result<()> {
     save_key(path, "format", &format!("\"{format}\""))
+}
+
+/* A name nobody ships is a startup error naming the ones that exist, not a
+   silent fallback: a theme that quietly does not apply reads as a theme that
+   does not work. */
+fn theme(
+    name: Option<&str>,
+    colors: Option<&BTreeMap<String, String>>,
+) -> Result<(Palette, Vec<String>)> {
+    let mut palette = match name {
+        Some(name) => Palette::named(name)
+            .ok_or_else(|| anyhow::anyhow!("unknown theme \"{name}\", expected one of {}", Palette::names()))?,
+        None => Palette::default(),
+    };
+    let Some(colors) = colors else {
+        return Ok((palette, Vec::new()));
+    };
+    /* Applied on top of a named base, so an override is a diff rather than a
+       whole palette: nobody should have to restate ten colours to change one.
+       A key or a value that cannot work stops the start, for the same reason
+       an unknown format does — a colour that silently does not apply reads as
+       a theme that does not work. */
+    for (slot, value) in colors {
+        let color = hex(value).with_context(|| format!("theme colour {slot} = \"{value}\""))?;
+        let field = palette.slot_mut(slot).ok_or_else(|| {
+            anyhow::anyhow!("unknown theme colour \"{slot}\", expected one of {}", Palette::slot_names())
+        })?;
+        *field = color;
+    }
+    Ok((palette, palette.unreadable()))
+}
+
+/// `#rrggbb`, the only spelling worth supporting: it is what every palette,
+/// picker and stylesheet in the world hands you.
+fn hex(value: &str) -> Result<ratatui::style::Color> {
+    /* The `#` is required rather than merely tolerated: the error says
+       `#rrggbb` and so does the README, and a second accepted spelling
+       nobody documents is one more thing that works on one machine and not
+       on the next. */
+    let Some(digits) = value.strip_prefix('#') else {
+        anyhow::bail!("not a #rrggbb colour");
+    };
+    if digits.len() != 6 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+        anyhow::bail!("not a #rrggbb colour");
+    }
+    let byte = |at: usize| u8::from_str_radix(&digits[at..at + 2], 16);
+    Ok(ratatui::style::Color::Rgb(byte(0)?, byte(2)?, byte(4)?))
+}
+
+/// The palette `^t` landed on. The base theme only: a `[colors]` table stays
+/// in the file and goes on repainting whatever the walk lands on.
+pub fn save_theme(path: &std::path::Path, theme: &str) -> Result<()> {
+    save_key(path, "theme", &format!("\"{theme}\""))
 }
 
 pub fn save_convert(path: &std::path::Path, on: bool) -> Result<()> {
@@ -371,6 +436,21 @@ pub struct Config {
     pub update_check: bool,
     pub extra: Vec<String>,
     pub acoustid_key: Option<String>,
+    /// The palette every draw reads. Resolved here so a bad name or a bad
+    /// colour stops the start rather than reaching a frame.
+    /* Deliberately absent from `describe()`, unlike every other setting on
+       this struct. `^t` changes the theme from inside the tool and nothing
+       re-sends the settings string, so a copy of the name in there is one
+       that goes stale the first time the key is pressed. The help overlay
+       reads it off the palette it is drawing in. */
+    pub theme: Palette,
+    /// Colours the config repainted that measure badly on their own ground.
+    /// Said once and never again: it is the user's screen.
+    pub theme_warnings: Vec<String>,
+    /// Whether a `[colors]` table is in the file, which `^t` has to mention:
+    /// the walk moves the base palette and the table repaints whatever it
+    /// lands on, so the name in the flash is not the whole story.
+    pub theme_overridden: bool,
 }
 
 impl Config {
@@ -426,6 +506,12 @@ impl Config {
             anyhow::bail!("unknown format \"{format}\", expected one of {}", known.join(", "));
         }
 
+        let (palette, theme_warnings) = theme(
+            cli.theme.as_deref().or(file.theme.as_deref()),
+            file.colors.as_ref(),
+        )?;
+        let theme_overridden = file.colors.as_ref().is_some_and(|c| !c.is_empty());
+
         Ok(Config {
             url: cli.url.unwrap_or_default(),
             dir: expand(&dir),
@@ -450,6 +536,9 @@ impl Config {
             notify: off("no_notify", file.notify),
             update_check: off("no_update_check", file.update_check),
             extra,
+            theme: palette,
+            theme_warnings,
+            theme_overridden,
             // The environment wins, so a key can be swapped for one run.
             acoustid_key: std::env::var("ACOUSTID_API_KEY")
                 .ok()
@@ -587,6 +676,124 @@ mod tests {
             handle: std::fs::File::create(&path).unwrap(),
             path: path.display().to_string(),
         }
+    }
+
+    /// The same throwaway file, but for the cases that must not build at all.
+    fn refuse(toml: &str, args: &[&str]) -> String {
+        let mut file = temp("refuse");
+        write!(file.handle, "{toml}").unwrap();
+        let mut argv = vec!["earworm".to_string(), "--config".into(), file.path.clone()];
+        argv.extend(args.iter().map(|a| a.to_string()));
+        let matches = Cli::command().get_matches_from(argv);
+        match Config::build(Cli::from_arg_matches(&matches).unwrap(), &matches) {
+            Ok(_) => panic!("it was accepted"),
+            Err(err) => format!("{err:#}"),
+        }
+    }
+
+    /* A theme nobody ships is a startup error naming the ones that exist,
+       exactly like an unknown format: a theme that quietly does not apply
+       reads as a theme that does not work. */
+    #[test]
+    fn an_unknown_theme_stops_the_start_and_names_the_ones_that_exist() {
+        let err = refuse("theme = \"midnight\"\n", &[]);
+        assert!(err.contains("unknown theme \"midnight\""), "{err}");
+        for shipped in ["warm", "light", "cool", "neon"] {
+            assert!(err.contains(shipped), "{shipped} went unlisted: {err}");
+        }
+        // And the same name off the command line, which is the other route in.
+        let flag = refuse("", &["--theme", "midnight"]);
+        assert!(flag.contains("unknown theme"), "{flag}");
+    }
+
+    #[test]
+    fn the_command_line_theme_beats_the_file() {
+        let cfg = build("theme = \"neon\"\n", &["--theme", "cool"]);
+        assert_eq!(cfg.theme, crate::theme::COOL);
+        // And with nothing said anywhere, the palette earworm has always had.
+        assert_eq!(build("", &[]).theme, crate::theme::WARM);
+    }
+
+    /* An override is a diff on top of a named base, not a whole palette:
+       changing one colour must not mean restating ten. */
+    #[test]
+    fn colors_repaint_one_slot_of_the_named_theme() {
+        let cfg = build("theme = \"neon\"\n[colors]\ncursor = \"#00ff88\"\n", &[]);
+        assert_eq!(cfg.theme.cursor, ratatui::style::Color::Rgb(0, 255, 136));
+        // Everything it did not name is still neon's.
+        assert_eq!(cfg.theme.text, crate::theme::NEON.text);
+        assert_eq!(cfg.theme.accent, crate::theme::NEON.accent);
+        // And a repainted palette is in no walk, which is what `^t` reads.
+        assert_eq!(cfg.theme.name(), "custom");
+        assert!(cfg.theme_overridden, "the flash would not mention the table");
+    }
+
+    /* A key or a value that cannot work stops the start, for the same reason
+       an unknown theme does. Both messages name what it should have been:
+       a colour that silently does not apply is indistinguishable from a
+       theme system that does not work. */
+    #[test]
+    fn a_colour_that_cannot_work_stops_the_start_and_says_what_it_wanted() {
+        for bad in ["00ff88", "#00ff8", "#00ff8g", "red", ""] {
+            let err = refuse(&format!("[colors]\ncursor = \"{bad}\"\n"), &[]);
+            assert!(err.contains("#rrggbb"), "{bad:?} gave {err}");
+            assert!(err.contains("cursor"), "{bad:?} did not name the slot: {err}");
+        }
+        let slot = refuse("[colors]\ngradient = \"#00ff88\"\n", &[]);
+        assert!(slot.contains("unknown theme colour \"gradient\""), "{slot}");
+        // Every slot that does work is offered in its place.
+        for name in ["text", "accent", "cursor", "unsure", "ink"] {
+            assert!(slot.contains(name), "{name} went unlisted: {slot}");
+        }
+    }
+
+    /* A colour that merely measures badly starts anyway and says so: it is
+       the user's screen and their eyes, and a warning that blocks is one
+       people learn to route around. */
+    #[test]
+    fn an_unreadable_override_warns_rather_than_refusing() {
+        // Near-black text on the warm theme's near-black ground.
+        let cfg = build("[colors]\ntext = \"#1a1a1a\"\n", &[]);
+        assert_eq!(cfg.theme.text, ratatui::style::Color::Rgb(26, 26, 26));
+        assert!(
+            cfg.theme_warnings.iter().any(|w| w.contains("text")),
+            "it started without a word: {:?}",
+            cfg.theme_warnings
+        );
+        // And a palette nobody touched warns about nothing.
+        assert!(build("theme = \"cool\"\n", &[]).theme_warnings.is_empty());
+    }
+
+    /* `^t` writes one key back into a file somebody wrote by hand, which is
+       the same promise `format` makes: the comments and every other key come
+       through, and the file still parses afterwards. */
+    #[test]
+    fn saving_a_theme_keeps_the_rest_of_the_file() {
+        let file = temp("savetheme");
+        std::fs::write(
+            &file.path,
+            "# mine\nformat = \"flac\"\ntheme = \"warm\"\ndir = \"/tmp/m\"\n",
+        )
+        .unwrap();
+        save_theme(std::path::Path::new(&file.path), "neon").unwrap();
+
+        let text = std::fs::read_to_string(&file.path).unwrap();
+        assert!(text.contains("# mine"), "the comment went: {text}");
+        assert!(text.contains("theme = \"neon\""), "{text}");
+        assert_eq!(text.matches("theme =").count(), 1, "a second key: {text}");
+        // Read back through the real parser, which is what proves it survives.
+        let cfg = build_at(&file.path);
+        assert_eq!(cfg.theme, crate::theme::NEON);
+        assert_eq!(cfg.format, "flac", "another setting was lost");
+    }
+
+    /// A file with no `theme` line at all gains one rather than being ignored.
+    #[test]
+    fn saving_a_theme_into_a_file_that_never_had_one_adds_it() {
+        let file = temp("addtheme");
+        std::fs::write(&file.path, "format = \"opus\"\n").unwrap();
+        save_theme(std::path::Path::new(&file.path), "light").unwrap();
+        assert_eq!(build_at(&file.path).theme, crate::theme::LIGHT);
     }
 
     #[test]

@@ -3,6 +3,10 @@
 `h` or `?` lists every key that works on the screen you're on, with the status
 words grouped by what to do about them.
 
+`^t` is the one key that works everywhere, the help overlay and prompts
+included: it walks the four [colour themes](themes.md) and remembers the one
+you stop on.
+
 ![The keys overlay: keys grouped by what they do, then the status words
 grouped into confirmed tags, guesses worth a look, tracks this run did not
 touch, and failures](images/keys.png)
@@ -20,6 +24,7 @@ touch, and failures](images/keys.png)
 | `L` `J` `K` | grow the log pane to half the screen, scroll it |
 | `/` | filter the list by name or status |
 | `v` | show only the tracks nothing has confirmed |
+| `^t` | next colour theme, and remember it |
 | `space` | mark or unmark the track under the cursor |
 | `m` | mark every track sharing that track's status |
 | `M` | mark every track by the artist under the cursor |
@@ -59,6 +64,7 @@ touch, and failures](images/keys.png)
 | `R` | sync every playlist |
 | `n` | sync a new URL |
 | `f` | choose the format new downloads arrive in |
+| `^t` | next colour theme, and remember it |
 | `l` | toggle the yt-dlp output pane |
 | `h` `?` | keys and current settings |
 | `q` `Esc` `ctrl+c` | quit |

@@ -5,7 +5,7 @@ use std::sync::mpsc::Sender;
 
 use ratatui::style::Color;
 
-use crate::theme;
+use crate::theme::Palette;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Status {
@@ -86,20 +86,20 @@ impl Status {
        share one: both are tags somebody or something confirmed, and which of
        the two is the label's job. Anything unverified is sand or amber, so a
        guess never wears the colour of a settled track. */
-    pub fn color(self) -> Color {
+    pub fn color(self, p: Palette) -> Color {
         match self {
-            Status::Ok | Status::Manual => theme::TEAL,
-            Status::Weak => theme::AMBER,
+            Status::Ok | Status::Manual => p.cursor,
+            Status::Weak => p.warn,
             // Unverified, where `kept` used to be dim beside four states with
             // nothing to check at all.
-            Status::Kept | Status::NoMatch => theme::SAND,
-            Status::Failed => theme::RED,
+            Status::Kept | Status::NoMatch => p.unsure,
+            Status::Failed => p.error,
             Status::Downloading
             | Status::Tagging
             | Status::Downloaded
-            | Status::Converting => theme::GOLD,
+            | Status::Converting => p.accent,
             // Nothing to act on: not downloaded, or deliberately left alone.
-            Status::Pending | Status::Have | Status::Gone | Status::Skipped => theme::DIM,
+            Status::Pending | Status::Have | Status::Gone | Status::Skipped => p.muted,
         }
     }
 
@@ -639,13 +639,13 @@ impl Asker {
 /* yt-dlp labels its own lines, and a clean run still prints warnings about
    individual videos. Painting all of it red made every run look broken and
    left a real ERROR indistinguishable from the noise around it. */
-pub fn log_color(line: &str) -> Color {
+pub fn log_color(line: &str, p: Palette) -> Color {
     if line.contains("ERROR") {
-        theme::RED
+        p.error
     } else if line.contains("WARNING") {
-        theme::AMBER
+        p.warn
     } else {
-        theme::DIM
+        p.muted
     }
 }
 
@@ -753,6 +753,17 @@ impl Sort {
 pub struct App {
     pub cmds: Option<Sender<Cmd>>,
     pub settings: String,
+    /// What every draw reads its colours from. Lives here rather than in a
+    /// global because `^t` changes it between frames, and a `OnceLock` is the
+    /// one shape that cannot.
+    pub theme: Palette,
+    /// Where `^t` writes the theme it lands on. Read off the config in `main`
+    /// before the worker takes it, like `format`; `None` under --no-config,
+    /// which asked for the file to stay out of the run.
+    pub config_file: Option<PathBuf>,
+    /// Whether a `[colors]` table is repainting whatever `^t` lands on, so
+    /// the flash can say the name is not the whole story.
+    pub theme_overridden: bool,
     /// What new downloads are written as, for the preview's count of files
     /// that are something else. Set at startup and by `Msg::Settings`.
     pub format: String,
@@ -855,6 +866,9 @@ impl App {
         App {
             cmds: Some(cmds),
             settings,
+            theme: Palette::default(),
+            config_file: None,
+            theme_overridden: false,
             format: crate::config::DEFAULT_FORMAT.to_string(),
             tick: 0,
             show_help: false,
@@ -1384,6 +1398,45 @@ impl App {
         let reading = PER_CHAR * text.chars().count() as u32;
         self.flash_until = Some(Instant::now() + (FLASH + reading).min(FLASH_MAX));
         self.stage = text;
+    }
+
+    /* `^t`: walk the shipped palettes with the screen in front of you, which
+       is the only way anyone picks a theme. Written back the way a format
+       pick is, so the next launch keeps it.
+
+       The write happens here rather than in the worker, which owns every
+       other file earworm touches. Routing it through the command channel
+       would mean the save waited for the run to end — `serve` is not reading
+       that channel during a pipeline — and never happened at all for anyone
+       who quit first, which is the one outcome a remembered setting exists
+       to avoid. `write_atomically` is what makes a write off this thread
+       safe; nothing else on it touches a file. */
+    pub fn cycle_theme(&mut self) {
+        self.theme = self.theme.next();
+        let name = self.theme.name();
+        /* The walk moves the base palette only, so what is on screen now is a
+           clean built-in. The `[colors]` table stays in the file and is
+           applied on top of whatever is named at the next start, which makes
+           this screen and that one different colours. Future tense on purpose:
+           "still repaints it" reads as a claim about the colours in front of
+           you, and those are the ones it is not repainting. */
+        let kept = if self.theme_overridden {
+            "  ·  [colors] repaints it again next start"
+        } else {
+            ""
+        };
+        let Some(file) = self.config_file.clone() else {
+            // --no-config asked for the file to stay out of the run.
+            self.say(format!("theme {name}  ·  this session{kept}"));
+            return;
+        };
+        match crate::config::save_theme(&file, name) {
+            Ok(()) => self.say(format!("theme {name}{kept}")),
+            /* Not a failure of the key: the theme applied and only the
+               remembering did not, which is a different thing to tell
+               somebody and a different thing to do about it. */
+            Err(e) => self.say(format!("theme {name}  ·  not saved: {e}")),
+        }
     }
 
     pub fn send(&mut self, cmd: Cmd) {
@@ -1985,6 +2038,124 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An `App` with nothing in it, for the keys that answer by themselves.
+    fn bare() -> App {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        App::new(tx, String::new())
+    }
+
+    /* A path of its own per call: the harness runs these in parallel, and two
+       sharing a name is one test deleting another's fixture. */
+    fn scratch_path(tag: &str) -> PathBuf {
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::env::temp_dir().join(format!("earworm-theme-{tag}-{}-{n}", std::process::id()))
+    }
+
+    /// The same, with a config already in it for a save to edit rather than
+    /// create: the file `^t` writes to is one somebody wrote by hand.
+    fn scratch_config(tag: &str) -> PathBuf {
+        let path = scratch_path(tag).with_extension("toml");
+        std::fs::write(&path, "format = \"opus\"\n").unwrap();
+        path
+    }
+
+    /* `^t` is only usable as a walk if it goes round the houses and comes
+       back: a key that stops at the last palette is one that cannot return to
+       the one somebody started on. */
+    #[test]
+    fn cycling_the_theme_walks_every_shipped_palette_and_returns() {
+        let mut app = bare();
+        assert_eq!(app.theme, crate::theme::WARM);
+
+        let mut seen = vec![app.theme.name()];
+        for _ in 1..crate::theme::BUILT_INS.len() {
+            app.cycle_theme();
+            seen.push(app.theme.name());
+        }
+        assert_eq!(seen, ["warm", "light", "cool", "neon"]);
+
+        app.cycle_theme();
+        assert_eq!(app.theme, crate::theme::WARM, "the walk did not come back");
+    }
+
+    /* The whole point of walking with the screen in front of you is stopping
+       on one, so the one you stop on has to still be there next launch. */
+    #[test]
+    fn the_theme_a_walk_lands_on_is_written_back() {
+        let path = scratch_config("saves");
+        let mut app = bare();
+        app.config_file = Some(path.clone());
+
+        app.cycle_theme();
+        assert_eq!(app.theme.name(), "light");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("theme = \"light\""), "{text}");
+        assert!(text.contains("format = \"opus\""), "another key went: {text}");
+        assert!(app.stage.contains("theme light"), "the flash said nothing: {}", app.stage);
+
+        // A second press replaces the line rather than adding another.
+        app.cycle_theme();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(text.matches("theme =").count(), 1, "a second key: {text}");
+        assert!(text.contains("theme = \"cool\""), "{text}");
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    /* --no-config asked for the file to stay out of the run, so there is
+       nowhere to write. The theme still applies, and the flash has to say the
+       part that is different, or the next launch is a surprise. */
+    #[test]
+    fn with_no_config_the_walk_says_it_lasts_one_session() {
+        let mut app = bare();
+        app.cycle_theme();
+        assert_eq!(app.theme.name(), "light");
+        assert!(app.stage.contains("this session"), "{}", app.stage);
+    }
+
+    /* A `[colors]` table outlives the walk: it is applied on top of whatever
+       is named at the next launch, so the screen now and the screen then are
+       different colours. Saying only the name would be the wrong half. */
+    #[test]
+    fn a_walk_over_a_repainted_palette_says_the_table_is_still_there() {
+        let path = scratch_config("repainted");
+        let mut app = bare();
+        app.config_file = Some(path.clone());
+        app.theme_overridden = true;
+        // What a `[colors]` table leaves behind: in no walk, so `next` starts over.
+        app.theme.cursor = ratatui::style::Color::Rgb(0, 255, 136);
+        assert_eq!(app.theme.name(), "custom");
+
+        app.cycle_theme();
+        assert_eq!(app.theme, crate::theme::WARM, "a custom palette skipped warm");
+        assert!(app.stage.contains("[colors]"), "the table went unmentioned: {}", app.stage);
+        /* And says it about the next start, not this screen: the walk landed
+           on a clean built-in, so the table is the one thing here that is not
+           repainting what is in front of you. */
+        assert!(app.stage.contains("next start"), "read as the present: {}", app.stage);
+        std::fs::remove_file(&path).unwrap();
+    }
+
+    /* The theme applied and only the remembering failed, which is a different
+       thing to tell somebody: saying nothing would leave the next launch
+       quietly disagreeing with the screen. */
+    #[test]
+    fn a_theme_that_cannot_be_saved_still_applies_and_says_so() {
+        let mut app = bare();
+        /* A directory where the config should be, so the read fails. Through
+           the same counter as every other scratch path here: the harness runs
+           these in parallel and a shared name is a test deleting another
+           test's fixture. */
+        let dir = scratch_path("unwritable");
+        std::fs::create_dir_all(&dir).unwrap();
+        app.config_file = Some(dir.clone());
+
+        app.cycle_theme();
+        assert_eq!(app.theme.name(), "light", "the theme did not apply");
+        assert!(app.stage.contains("not saved"), "{}", app.stage);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     fn stocked(name: &str, files: &[&str]) -> Shelf {
         Shelf {

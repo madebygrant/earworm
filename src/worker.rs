@@ -4787,6 +4787,9 @@ pub mod tests {
         Config {
             url: String::new(),
             dir: PathBuf::new(),
+            theme: crate::theme::Palette::default(),
+            theme_warnings: Vec::new(),
+            theme_overridden: false,
             parse: true,
             m3u8: true,
             cover: true,

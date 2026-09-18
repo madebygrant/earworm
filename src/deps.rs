@@ -117,6 +117,10 @@ pub struct Facts<'a> {
     pub apple: bool,
     pub format: &'a str,
     pub extension: &'a str,
+    /// The palette that would be drawn, and anything about it that measures
+    /// badly. A `[colors]` table makes the name "custom".
+    pub theme: &'a str,
+    pub theme_warnings: &'a [String],
     /// Whether tracks already on disk follow `format` at the next sync.
     pub convert: bool,
     /* Files under --dir that are in some other format, and the folders they
@@ -191,6 +195,20 @@ pub fn report(facts: &Facts) -> (String, bool) {
         "format",
         &format!("{} · writes .{}", facts.format, facts.extension),
     ));
+    /* Named here because `^t` writes it back to the config, so "which theme
+       am I on" is a question with an answer that changes. A colour that
+       measures badly is said here too: the TUI says it once at startup and
+       then never again, which is the right amount there and no use at all to
+       somebody working out why a theme looks wrong. */
+    out.push_str(&row(
+        facts.theme_warnings.is_empty(),
+        "theme",
+        &if facts.theme_warnings.is_empty() {
+            facts.theme.to_string()
+        } else {
+            format!("{} · {}", facts.theme, facts.theme_warnings.join(" · "))
+        },
+    ));
     /* The answer to "did my format change take", which is otherwise one
        folder at a time. Silent at zero: a row saying nothing is wrong is a
        row the reader has to check every time. */
@@ -262,6 +280,8 @@ mod tests {
             convert: false,
             off_format: Some((0, 0)),
             extension: "opus",
+            theme: "warm",
+            theme_warnings: &[],
             dir,
             playlists: Some(7),
             apple: true,
