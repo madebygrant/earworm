@@ -50,6 +50,7 @@ fn main() -> Result<()> {
        draw, and `^t` is the one setting the UI writes back by itself, which
        is why the path it writes to comes across here too. */
     let (theme, overridden) = (cfg.theme, cfg.theme_overridden);
+    let (theme_name, themes) = (cfg.theme_name.clone(), cfg.themes.clone());
     let theme_warnings = cfg.theme_warnings.clone();
     let config_file = cfg.config_file.clone();
     /* The update probe runs beside the worker, not through it: it answers to
@@ -68,6 +69,8 @@ fn main() -> Result<()> {
     // The worker owns the config by now, so this is read across before it goes.
     app.format = format;
     app.theme = theme;
+    app.theme_name = theme_name;
+    app.themes = themes;
     app.theme_overridden = overridden;
     app.config_file = config_file;
     /* Switched off by saying it is already over, which is what every other
@@ -116,6 +119,14 @@ fn check(cfg: &Config) -> Result<()> {
     let tools = deps::probe_all();
     let config = cfg.config_file.clone();
     let dir = cfg.dir.clone();
+    /* The base and, when there is one, the table painted over it: the name
+       alone would call a repainted neon "neon", which is the thing somebody
+       reading this row is most likely trying to confirm or rule out. */
+    let theme_row = if cfg.theme_overridden {
+        format!("{} + [colors]", cfg.theme_name)
+    } else {
+        cfg.theme_name.clone()
+    };
     // Walked once and read twice: the playlist count and the format tally.
     let shelves = if dir.is_dir() { worker::library(&dir) } else { Vec::new() };
     let (text, ready) = deps::report(&deps::Facts {
@@ -125,7 +136,7 @@ fn check(cfg: &Config) -> Result<()> {
         key: cfg.acoustid_key.is_some(),
         format: &cfg.format,
         extension: config::extension(&cfg.format),
-        theme: cfg.theme.name(),
+        theme: &theme_row,
         theme_warnings: &cfg.theme_warnings,
         dir: &dir,
         playlists: dir.is_dir().then_some(shelves.len()),
@@ -901,7 +912,7 @@ mod tests {
             app.intro_done = true;
             set_up(&mut app);
             handle_key(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
-            assert_eq!(app.theme.name(), "light", "^t was dead on {screen}");
+            assert_eq!(app.theme_name, "light", "^t was dead on {screen}");
             /* And it did not also reach the screen behind it: the overlay
                swallows the next key, so a `^t` that dismissed it would be one
                press doing two things. */
@@ -914,7 +925,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(tx, String::new());
         handle_key(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
-        assert_eq!(app.theme.name(), "warm", "the intro let the key through");
+        assert_eq!(app.theme_name, "warm", "the intro let the key through");
         assert!(app.intro_done, "the key did not skip the intro either");
     }
 
@@ -927,7 +938,7 @@ mod tests {
         app.intro_done = true;
         app.view = View::Library;
         handle_key(&mut app, KeyCode::Char('t'), KeyModifiers::NONE);
-        assert_eq!(app.theme.name(), "warm", "a bare t changed the theme");
+        assert_eq!(app.theme_name, "warm", "a bare t changed the theme");
     }
 
     /* `o` already cycles the order, so the reveal is `O`. Both are library

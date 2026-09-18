@@ -783,6 +783,70 @@ in **Themes and colour depth**.
 
 ### Themes and colour depth
 
+- **The theme registry is runtime state; `BUILT_INS` is only its seed.**
+  `Themes` holds the four that ship plus every `[themes.<name>]`, and the four
+  functions that used to scan the const — `named`, `name`, `next`, `names` —
+  are methods on it. The reason is that a user theme's name is a runtime
+  `String` where `Palette::name()` returned `&'static str`. Keeping the
+  registry out of `Palette` is what lets a palette stay a plain `Copy` value a
+  draw can hold: the name belongs to the list a theme was found in, not to the
+  colours.
+- **The theme is tracked by name beside the palette, not derived from it.**
+  `App.theme_name` and `Config.theme_name` exist because a `[colors]` table
+  makes the palette match no entry in the registry, and the walk still has to
+  know where it is. The name is the base the overrides were painted on, which
+  is both what `^t` goes on from and what gets written back. This is what
+  retired the old "custom" palette: the walk used to match by colour value, so
+  a repainted palette matched nothing and dropped back to `warm` rather than
+  carrying on from where it was.
+- **A key earworm saves goes above the first table, never at the end.** TOML
+  puts top-level keys before any table, so `save_key` appending
+  `format = "flac"` to a file holding a `[colors]` or `[themes.*]` table wrote
+  it *into* that table. It parsed: a string in a `BTreeMap<String, String>` is
+  a valid colour as far as serde is concerned, so the re-parse guard waved it
+  through, the save reported success, nothing was recorded and the next start
+  refused the file naming a colour called "format". Shipped with `[colors]`
+  and found by a round-trip test for something else. The scan counts brackets
+  rather than reading the first character, because a multi-line string can
+  hold a line that reads exactly like a header and inserting a key into the
+  middle of somebody's value loses their data rather than just misplacing
+  earworm's.
+- **A theme name has to survive being written back.** `^t` puts it in the file
+  as `theme = "<name>"`, and TOML has no escape in what `save_key` produces,
+  so a quote or a backslash makes a theme that can be selected and then never
+  remembered. Refused at the definition, where the message can name the
+  problem, rather than at the save, where `save_key`'s re-parse catches it and
+  reports "the edited config no longer parses" about a config that is fine.
+  Spaces are allowed, because the rule is the real constraint and not a tidier
+  one. This is the first caller to pass user text to `save_key`: `format`
+  comes out of `FORMATS`.
+- **A defined theme may not take a shipped name, and its `base` may only be a
+  shipped one.** Shadowing `warm` would make the built-in unreachable with
+  nothing saying so, and a config that redefines it is far likelier to be a
+  mistake than an intent. A `base` that could name a peer could name a cycle,
+  and resolving that is more machinery than starting from `cool` is worth.
+  Both are refused at startup, naming the alternatives.
+- **Defined themes walk in `BTreeMap` order, which is by character code.** The
+  docs say alphabetical because that is what it is for the lowercase names
+  anyone writes, but `Zulu` precedes `aurora`. File order would need `toml`'s
+  `preserve_order` feature and would move the walk whenever the file was
+  tidied.
+- **A theme with no `base` must give every field, and the list is asked of the
+  palette.** `define` filters `slots()` plus `GROUNDS` against the table rather
+  than naming the twelve again, so a field added to `Palette` is one a baseless
+  theme is immediately told to supply rather than one it quietly inherits from
+  warm.
+- **Every palette is measured, not only the repainted ones.** The first version
+  of `theme()` ran `unreadable()` only on the `[colors]` path, so a
+  `[themes.*]` palette — just as unmeasurable by the suite — could be illegible
+  with nothing said. It runs on whatever comes out. The four that ship cost
+  nothing there, because their ratios are a test.
+- **`set_field` takes twelve names, `slots()` lists ten.** The gradient's two
+  ends are colours a theme names like any other, but nothing is ever read *in*
+  them, so they are grounds for the legibility checks rather than slots. One
+  setter for both `[colors]` and `[themes.*]`, so the two take the same names
+  and refuse the same way, and `field_names()` is asked of `set_field` so the
+  error cannot offer a name that paints nothing.
 - **A palette is a set of roles, not a set of pigments.** The slots were the
   colours themselves — `CREAM`, `GOLD`, `TEAL` — which reads fine on one warm
   dark theme and lies on every other: a light theme's "cream" is near-black
@@ -830,8 +894,8 @@ in **Themes and colour depth**.
   `a_theme_changes_the_colours_and_never_the_layout` compares every cell's
   glyph across all four and asserts the colours differ in the same pass, or a
   bug that painted every theme warm would pass it.
-- **An unknown theme or colour stops the start; one that merely measures badly
-  does not.** Both errors name what it should have been, because a theme that
+- **An unknown theme, base, colour or field stops the start; one that merely
+  measures badly does not.** Both errors name what it should have been, because a theme that
   quietly does not apply is indistinguishable from a theme system that does
   not work. A bad ratio is the user's screen and their eyes, so it is a remark
   said once and printed by `--check`, where somebody working out why a theme
@@ -842,16 +906,15 @@ in **Themes and colour depth**.
   `!app.intro()` for the same reason the update notice does — the flash is
   drawn in the header and the intro does not draw one — and is kept apart from
   the loop so it is testable as the text it is.
-- **`[colors]` is a diff on a named base, and it outlives `^t`.** Changing one
-  colour must not mean restating ten. A repainted palette matches no built-in,
-  so `name()` is "custom" and `next()` steps to the *first* built-in rather
-  than the second — otherwise `warm` becomes the one theme the walk can never
-  reach. The table stays in the file and goes on repainting whatever the walk
-  lands on, so the screen now and the screen next launch are different
-  colours, and `cycle_theme` says so rather than naming the base alone. In the
-  future tense: after the walk the live palette *is* a clean built-in, so
-  "still repaints it" would be a claim about the colours in front of you and
-  those are the ones it is not repainting.
+- **`[colors]` is a diff on whatever `theme` names, and it outlives `^t`.**
+  Changing one colour must not mean restating twelve, and it composes with a
+  defined theme rather than competing with it. The table stays in the file and
+  is applied again on top of whatever the walk lands on, so the screen now and
+  the screen next launch are different colours, and `cycle_theme` says so
+  rather than naming the base alone. In the future tense: after the walk the
+  live palette *is* a clean theme, so "still repaints it" would be a claim
+  about the colours in front of you and those are the ones it is not
+  repainting.
 - **`^t` writes the config itself, and it is the only thing on the UI thread
   that writes a file.** The worker owns every other one. Routing this through
   the command channel would mean the save waited for the run to end — `serve`

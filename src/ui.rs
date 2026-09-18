@@ -1308,7 +1308,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
        tool and nothing re-sends that string, so a copy of the name in it is
        stale from the first press. Everything else on the row is fixed for the
        run, which is why the rest can be a string. */
-    let described = format!("{} · theme {}", app.settings, p.name());
+    let described = format!("{} · theme {}", app.settings, app.theme_name);
 
     // Wrapped to the table it sits under, or one long line sets the width.
     let settings = widest(|r| r.2.chars().count()) + key;
@@ -1698,7 +1698,7 @@ mod tests {
 
         for name in ["warm", "light", "cool", "neon"] {
             let screen = overlay(&mut app);
-            assert_eq!(app.theme.name(), name, "the walk went somewhere else");
+            assert_eq!(app.theme_name, name, "the walk went somewhere else");
             /* The run row alone, not the whole screen: the header carries the
                flash `^t` raised, and with no event loop here to expire it
                that is a message about the last press rather than a claim

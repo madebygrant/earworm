@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::theme::Palette;
+use crate::theme::{Palette, Themes};
 use clap::{ArgMatches, Parser, parser::ValueSource};
 use unicode_normalization::UnicodeNormalization;
 use serde::Deserialize;
@@ -134,10 +134,29 @@ pub struct FileConfig {
     pub extra: Option<Vec<String>>,
     pub acoustid_key: Option<String>,
     pub theme: Option<String>,
-    /// Slot name to `#rrggbb`, painted on top of whichever theme is named. A
-    /// map rather than a struct so the error can name the slot that was
+    /// Field name to `#rrggbb`, painted on top of whichever theme is named. A
+    /// map rather than a struct so the error can name the field that was
     /// wrong, which a serde field error cannot.
     pub colors: Option<BTreeMap<String, String>>,
+    /// Palettes of the user's own, joining the built-ins under their own
+    /// names. Ordered by the map, so the `^t` walk is alphabetical after the
+    /// four that ship and does not move when the file is reordered.
+    pub themes: Option<BTreeMap<String, FileTheme>>,
+}
+
+/// One `[themes.<name>]` table.
+#[derive(Deserialize, Default, Debug)]
+pub struct FileTheme {
+    /* The built-in to start from, so a theme that changes three colours says
+       three. Built-ins only, and not another `[themes.*]`: a base that could
+       name a peer is a base that can name a cycle, and resolving that is more
+       machinery than starting from `cool` is worth. */
+    pub base: Option<String>,
+    /* Everything else, validated by name rather than by serde so the error
+       can say which field was wrong and what the alternatives are. Flattened,
+       so the table reads as a palette rather than as a palette in a box. */
+    #[serde(flatten)]
+    pub fields: BTreeMap<String, String>,
 }
 
 impl FileConfig {
@@ -182,6 +201,11 @@ pub const FORMATS: [(&str, &str, &[&str]); 6] = [
 
 pub const DEFAULT_FORMAT: &str = "opus";
 
+/// The palette earworm has always drawn in, and the first stop on the `^t`
+/// walk. A name rather than `Palette::default()` because the theme is now
+/// tracked by name: the walk goes on from wherever the config started it.
+pub const DEFAULT_THEME: &str = "warm";
+
 /// The extension a format lands on disk with, which is not always its name.
 /* Never guesses. `Config::build` refuses a format that is not in `FORMATS`
    and `set_format` picks out of the same table, so an unknown one here is a
@@ -221,39 +245,141 @@ pub fn save_format(path: &std::path::Path, format: &str) -> Result<()> {
     save_key(path, "format", &format!("\"{format}\""))
 }
 
-/* A name nobody ships is a startup error naming the ones that exist, not a
-   silent fallback: a theme that quietly does not apply reads as a theme that
-   does not work. */
-fn theme(
-    name: Option<&str>,
-    colors: Option<&BTreeMap<String, String>>,
-) -> Result<(Palette, Vec<String>)> {
-    let mut palette = match name {
-        Some(name) => Palette::named(name)
-            .ok_or_else(|| anyhow::anyhow!("unknown theme \"{name}\", expected one of {}", Palette::names()))?,
+/* The four that ship plus every `[themes.<name>]`, resolved once. A name that
+   is already taken is refused rather than shadowing: a `[themes.warm]` that
+   silently won would make the built-in unreachable with nothing saying so,
+   and a config that redefines `warm` is far more likely to be a mistake than
+   an intent. */
+fn registry(defined: Option<&BTreeMap<String, FileTheme>>) -> Result<Themes> {
+    let mut themes = Themes::default();
+    let Some(defined) = defined else {
+        return Ok(themes);
+    };
+    for (name, spec) in defined {
+        writable(name)?;
+        if themes.has(name) {
+            anyhow::bail!("theme \"{name}\" is already one earworm ships · give yours another name");
+        }
+        let palette = define(name, spec)
+            .with_context(|| format!("in theme \"{name}\""))?;
+        themes.add(name.clone(), palette);
+    }
+    Ok(themes)
+}
+
+/* A name has to survive being written back: `^t` puts it in the config as
+   `theme = "<name>"`, and TOML has no escape inside that which `save_key`
+   would produce. Refused here rather than at the save, because a theme that
+   can be selected and then never remembered is a worse thing to discover than
+   a config that would not start. Caught either way — `save_key` re-parses
+   before it writes, so the file was never at risk — but the message there is
+   "the edited config no longer parses", which sends the reader to inspect a
+   config that is perfectly fine.
+
+   Spaces are allowed: they round-trip, and the rule is the real constraint
+   rather than a tidier one. */
+fn writable(name: &str) -> Result<()> {
+    if name.is_empty() {
+        anyhow::bail!("a theme needs a name · [themes.\"\"] has none");
+    }
+    if name.contains(['"', '\\']) || name.chars().any(char::is_control) {
+        anyhow::bail!(
+            "theme name {name:?} cannot be written back · no quotes, backslashes or control characters"
+        );
+    }
+    Ok(())
+}
+
+/* One `[themes.<name>]` table. With a `base` it is a diff on a built-in; with
+   none it has to say everything, because a half-written palette silently
+   finishing itself from `warm` is the "quietly does not apply" problem with
+   more places to hide. */
+fn define(name: &str, spec: &FileTheme) -> Result<Palette> {
+    let mut palette = match &spec.base {
+        Some(base) => Palette::built_in(base).ok_or_else(|| {
+            anyhow::anyhow!("unknown base \"{base}\", expected one of {}", built_in_names())
+        })?,
         None => Palette::default(),
     };
-    let Some(colors) = colors else {
-        return Ok((palette, Vec::new()));
-    };
-    /* Applied on top of a named base, so an override is a diff rather than a
-       whole palette: nobody should have to restate ten colours to change one.
-       A key or a value that cannot work stops the start, for the same reason
-       an unknown format does — a colour that silently does not apply reads as
-       a theme that does not work. */
-    for (slot, value) in colors {
-        let color = hex(value).with_context(|| format!("theme colour {slot} = \"{value}\""))?;
-        let field = palette.slot_mut(slot).ok_or_else(|| {
-            anyhow::anyhow!("unknown theme colour \"{slot}\", expected one of {}", Palette::slot_names())
-        })?;
-        *field = color;
+    paint(&mut palette, &spec.fields)?;
+    if spec.base.is_none() {
+        /* Asked of the palette rather than of the table, so a field added to
+           `Palette` is one a baseless theme is immediately told to supply
+           rather than one it quietly inherits from warm. */
+        let missing: Vec<&str> = palette
+            .slots()
+            .iter()
+            .map(|(field, _)| *field)
+            .chain(crate::theme::GROUNDS)
+            .filter(|field| !spec.fields.contains_key(*field))
+            .collect();
+        if !missing.is_empty() {
+            anyhow::bail!(
+                "no base, so every colour is needed · {name} is missing {}",
+                missing.join(", ")
+            );
+        }
     }
-    Ok((palette, palette.unreadable()))
+    Ok(palette)
+}
+
+/// `#rrggbb` values onto a palette, by field name. Shared by a theme
+/// definition and the `[colors]` table, so both take the same names and
+/// refuse the same way.
+fn paint(palette: &mut Palette, fields: &BTreeMap<String, String>) -> Result<()> {
+    for (field, value) in fields {
+        let rgb = hex(value).with_context(|| format!("colour {field} = \"{value}\""))?;
+        if !palette.set_field(field, rgb) {
+            anyhow::bail!(
+                "unknown colour \"{field}\", expected one of {}",
+                Palette::field_names()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn built_in_names() -> String {
+    crate::theme::BUILT_INS
+        .iter()
+        .map(|(name, _)| *name)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/* A name nobody defined is a startup error naming the ones that exist, not a
+   silent fallback: a theme that quietly does not apply reads as a theme that
+   does not work. Returns the base's name as well as the palette, because a
+   `[colors]` table makes the two different things and `^t` walks by name. */
+fn theme(
+    themes: &Themes,
+    name: Option<&str>,
+    colors: Option<&BTreeMap<String, String>>,
+) -> Result<(String, Palette, Vec<String>)> {
+    let name = name.unwrap_or(DEFAULT_THEME).to_string();
+    let mut palette = themes.named(&name).ok_or_else(|| {
+        anyhow::anyhow!("unknown theme \"{name}\", expected one of {}", themes.names())
+    })?;
+    /* Applied on top of whatever was named, so an override is a diff rather
+       than a whole palette: nobody should have to restate twelve colours to
+       change one. A key or a value that cannot work stops the start, for the
+       same reason an unknown format does. */
+    if let Some(colors) = colors {
+        paint(&mut palette, colors).context("in [colors]")?;
+    }
+    /* Measured whatever it is, not only when a `[colors]` table repainted it:
+       a `[themes.*]` palette is just as unmeasurable by the suite, and the
+       first version of this only looked at the override path, so a theme
+       somebody defined could be illegible with nothing said. The four that
+       ship cost nothing here — their ratios are a test, so they come back
+       with nothing to report. */
+    let warnings = palette.unreadable();
+    Ok((name, palette, warnings))
 }
 
 /// `#rrggbb`, the only spelling worth supporting: it is what every palette,
 /// picker and stylesheet in the world hands you.
-fn hex(value: &str) -> Result<ratatui::style::Color> {
+fn hex(value: &str) -> Result<(u8, u8, u8)> {
     /* The `#` is required rather than merely tolerated: the error says
        `#rrggbb` and so does the README, and a second accepted spelling
        nobody documents is one more thing that works on one machine and not
@@ -265,7 +391,7 @@ fn hex(value: &str) -> Result<ratatui::style::Color> {
         anyhow::bail!("not a #rrggbb colour");
     }
     let byte = |at: usize| u8::from_str_radix(&digits[at..at + 2], 16);
-    Ok(ratatui::style::Color::Rgb(byte(0)?, byte(2)?, byte(4)?))
+    Ok((byte(0)?, byte(2)?, byte(4)?))
 }
 
 /// The palette `^t` landed on. The base theme only: a `[colors]` table stays
@@ -306,13 +432,33 @@ fn save_key(path: &std::path::Path, key: &str, value: &str) -> Result<()> {
     let line = format!("{key} = {value}");
     let mut out = String::new();
     let mut replaced = false;
+    /* A key earworm writes is a top-level one, and in TOML those have to come
+       before the first table or they belong to it. Appended at the end,
+       `format = "flac"` landed inside `[colors]` and parsed as a colour named
+       "format": the save reported success, recorded nothing, and the next
+       start refused the file. The re-parse below does not catch it, because a
+       string in a `BTreeMap<String, String>` is a perfectly valid colour
+       table as far as serde is concerned. */
+    let mut depth = 0usize;
     for existing in old.lines() {
-        out.push_str(if names_key(existing, key) && !replaced {
+        if names_key(existing, key) && !replaced {
             replaced = true;
-            &line
-        } else {
-            existing
-        });
+            out.push_str(&line);
+            out.push('\n');
+            continue;
+        }
+        if !replaced && depth == 0 && opens_a_table(existing) {
+            replaced = true;
+            out.push_str(&line);
+            out.push('\n');
+        }
+        /* Brackets outside a table header, so a multi-line `extra = [` is not
+           mistaken for one on its `]`. A table header is balanced and leaves
+           this where it was. */
+        depth = depth
+            .saturating_add(existing.matches('[').count())
+            .saturating_sub(existing.matches(']').count());
+        out.push_str(existing);
         out.push('\n');
     }
     if !replaced {
@@ -329,6 +475,15 @@ fn save_key(path: &std::path::Path, key: &str, value: &str) -> Result<()> {
    appended a second one. That is a duplicate key, so the re-parse refused it,
    and every save after that failed the same way: the setting could never be
    written again. */
+/* A `[table]` header, which is where the top-level keys have to stop. Judged
+   on the whole trimmed line rather than the first character, so a value that
+   happens to begin with a bracket is not one. The caller only asks while no
+   multi-line value is open. */
+fn opens_a_table(line: &str) -> bool {
+    let line = line.trim();
+    line.starts_with('[') && line.ends_with(']')
+}
+
 fn names_key(line: &str, key: &str) -> bool {
     let rest = line.trim_start();
     rest.strip_prefix(key)
@@ -442,8 +597,14 @@ pub struct Config {
        this struct. `^t` changes the theme from inside the tool and nothing
        re-sends the settings string, so a copy of the name in there is one
        that goes stale the first time the key is pressed. The help overlay
-       reads it off the palette it is drawing in. */
+       reads it off the UI's own state. */
     pub theme: Palette,
+    /* What it is called, tracked beside the colours rather than derived from
+       them: a `[colors]` table makes the palette match no entry in the
+       registry, and the walk still has to know where it is. */
+    pub theme_name: String,
+    /// Every palette this run can reach, the built-ins plus `[themes.*]`.
+    pub themes: Themes,
     /// Colours the config repainted that measure badly on their own ground.
     /// Said once and never again: it is the user's screen.
     pub theme_warnings: Vec<String>,
@@ -506,7 +667,9 @@ impl Config {
             anyhow::bail!("unknown format \"{format}\", expected one of {}", known.join(", "));
         }
 
-        let (palette, theme_warnings) = theme(
+        let themes = registry(file.themes.as_ref())?;
+        let (theme_name, palette, theme_warnings) = theme(
+            &themes,
             cli.theme.as_deref().or(file.theme.as_deref()),
             file.colors.as_ref(),
         )?;
@@ -537,6 +700,8 @@ impl Config {
             update_check: off("no_update_check", file.update_check),
             extra,
             theme: palette,
+            theme_name,
+            themes,
             theme_warnings,
             theme_overridden,
             // The environment wins, so a key can be swapped for one run.
@@ -723,8 +888,9 @@ mod tests {
         // Everything it did not name is still neon's.
         assert_eq!(cfg.theme.text, crate::theme::NEON.text);
         assert_eq!(cfg.theme.accent, crate::theme::NEON.accent);
-        // And a repainted palette is in no walk, which is what `^t` reads.
-        assert_eq!(cfg.theme.name(), "custom");
+        /* The name is the base the overrides were painted on, not "custom":
+           that is what `^t` walks on from and what gets written back. */
+        assert_eq!(cfg.theme_name, "neon");
         assert!(cfg.theme_overridden, "the flash would not mention the table");
     }
 
@@ -739,12 +905,268 @@ mod tests {
             assert!(err.contains("#rrggbb"), "{bad:?} gave {err}");
             assert!(err.contains("cursor"), "{bad:?} did not name the slot: {err}");
         }
-        let slot = refuse("[colors]\ngradient = \"#00ff88\"\n", &[]);
-        assert!(slot.contains("unknown theme colour \"gradient\""), "{slot}");
-        // Every slot that does work is offered in its place.
-        for name in ["text", "accent", "cursor", "unsure", "ink"] {
+        let slot = refuse("[colors]\nbackdrop = \"#00ff88\"\n", &[]);
+        assert!(slot.contains("unknown colour \"backdrop\""), "{slot}");
+        assert!(slot.contains("[colors]"), "it did not say which table: {slot}");
+        // Every field that does work is offered in its place, gradient included.
+        for name in ["text", "accent", "cursor", "unsure", "ink", "near", "far"] {
             assert!(slot.contains(name), "{name} went unlisted: {slot}");
         }
+    }
+
+    /// Twelve fields is a lot to type in a test that is about something else.
+    fn whole_palette(name: &str) -> String {
+        let mut out = format!("[themes.{name}]\n");
+        for field in ["text", "accent", "cursor", "warn", "error", "muted", "rule",
+                      "surface", "unsure", "ink", "near", "far"] {
+            out.push_str(&format!("{field} = \"#101010\"\n"));
+        }
+        out
+    }
+
+    /* The point of the feature: a palette of your own, under its own name, in
+       the same list as the four that ship. With a base it is a diff, so
+       changing two colours means writing two. */
+    #[test]
+    fn a_defined_theme_can_be_named_and_is_a_diff_on_its_base() {
+        let cfg = build(
+            "theme = \"midnight\"\n[themes.midnight]\nbase = \"cool\"\naccent = \"#ff5cd5\"\nnear = \"#1a0a2c\"\n",
+            &[],
+        );
+        assert_eq!(cfg.theme_name, "midnight");
+        assert_eq!(cfg.theme.accent, ratatui::style::Color::Rgb(255, 92, 213));
+        // The gradient is nameable like any other colour.
+        assert_eq!(cfg.theme.near, (26, 10, 44));
+        // Everything it did not name is still cool's, including the far end.
+        assert_eq!(cfg.theme.cursor, crate::theme::COOL.cursor);
+        assert_eq!(cfg.theme.far, crate::theme::COOL.far);
+        // And it is reachable by name from the command line too.
+        assert_eq!(
+            build("[themes.midnight]\nbase = \"cool\"\n", &["--theme", "midnight"]).theme_name,
+            "midnight"
+        );
+    }
+
+    /* A defined theme joins the walk after the four that ship, so `^t` can
+       reach it: a theme only `--theme` could select would be half a feature. */
+    #[test]
+    fn a_defined_theme_joins_the_walk_after_the_shipped_ones() {
+        let cfg = build(
+            "[themes.midnight]\nbase = \"cool\"\n[themes.aurora]\nbase = \"neon\"\n",
+            &[],
+        );
+        // Alphabetical after the built-ins, which is what a BTreeMap yields.
+        assert_eq!(cfg.themes.after("neon").0, "aurora");
+        assert_eq!(cfg.themes.after("aurora").0, "midnight");
+        assert_eq!(cfg.themes.after("midnight").0, "warm", "the walk did not wrap");
+    }
+
+    /* No base means the table has to say everything. A half-written palette
+       quietly finishing itself from warm is the "quietly does not apply"
+       problem with more places for it to hide. */
+    #[test]
+    fn a_theme_with_no_base_must_give_every_colour() {
+        let whole = build(&format!("theme = \"flat\"\n{}", whole_palette("flat")), &[]);
+        assert_eq!(whole.theme.text, ratatui::style::Color::Rgb(16, 16, 16));
+        assert_eq!(whole.theme.near, (16, 16, 16));
+
+        let err = refuse("[themes.flat]\ntext = \"#101010\"\n", &[]);
+        assert!(err.contains("no base"), "{err}");
+        // Named, so the fix is the message rather than a hunt through docs.
+        for missing in ["accent", "cursor", "surface", "ink", "near", "far"] {
+            assert!(err.contains(missing), "{missing} went unnamed: {err}");
+        }
+        assert!(!err.contains("text,"), "it asked again for the one given: {err}");
+    }
+
+    /* Shadowing a built-in would make it unreachable with nothing saying so,
+       and a config that redefines `warm` is far likelier to be a mistake. */
+    #[test]
+    fn a_defined_theme_may_not_take_a_shipped_name() {
+        let err = refuse("[themes.warm]\nbase = \"cool\"\n", &[]);
+        assert!(err.contains("already one earworm ships"), "{err}");
+        assert!(err.contains("warm"), "{err}");
+    }
+
+    /* The base is a built-in and only a built-in: one that could name a peer
+       could name a cycle. The error says which names do work. */
+    #[test]
+    fn an_unknown_base_is_refused_and_names_the_ones_that_work() {
+        let err = refuse("[themes.mine]\nbase = \"midnight\"\n", &[]);
+        assert!(err.contains("unknown base \"midnight\""), "{err}");
+        assert!(err.contains("mine"), "it did not say whose base: {err}");
+        for shipped in ["warm", "light", "cool", "neon"] {
+            assert!(err.contains(shipped), "{shipped} went unlisted: {err}");
+        }
+        // And a peer is not a base, however real its name is.
+        let peer = refuse(
+            "[themes.one]\nbase = \"cool\"\n[themes.two]\nbase = \"one\"\n",
+            &[],
+        );
+        assert!(peer.contains("unknown base \"one\""), "{peer}");
+    }
+
+    /* `[colors]` sits on top of whatever `theme` names, a defined one
+       included: the two features compose rather than competing. */
+    #[test]
+    fn colors_repaint_a_defined_theme_too() {
+        let cfg = build(
+            "theme = \"midnight\"\n[themes.midnight]\nbase = \"cool\"\naccent = \"#ff5cd5\"\n[colors]\naccent = \"#00ff88\"\n",
+            &[],
+        );
+        assert_eq!(cfg.theme.accent, ratatui::style::Color::Rgb(0, 255, 136));
+        // The name is still the theme's: that is what `^t` walks on from.
+        assert_eq!(cfg.theme_name, "midnight");
+        assert!(cfg.theme_overridden);
+    }
+
+    /* A defined theme cannot be measured by the suite, so it is measured at
+       startup instead and the reader is told. Never refused: it is their
+       screen, and the four that ship are the ones earworm vouches for. */
+    #[test]
+    fn a_defined_theme_that_measures_badly_starts_and_says_so() {
+        let cfg = build(
+            "theme = \"murk\"\n[themes.murk]\nbase = \"cool\"\ntext = \"#1b2028\"\n",
+            &[],
+        );
+        assert_eq!(cfg.theme_name, "murk");
+        assert!(
+            cfg.theme_warnings.iter().any(|w| w.contains("text")),
+            "it started without a word: {:?}",
+            cfg.theme_warnings
+        );
+    }
+
+    /* A key earworm writes is a top-level one, and TOML puts those before the
+       first table. Appended at the end it landed inside `[colors]`, parsed as
+       a colour named "format", and the re-parse waved it through because a
+       string in a colour table is a valid colour table. The save said it
+       worked, recorded nothing, and the next start refused the file. */
+    #[test]
+    fn a_saved_key_lands_above_the_tables_and_not_inside_one() {
+        let file = temp("abovetables");
+        std::fs::write(
+            &file.path,
+            "# mine\ndir = \"/tmp/m\"\n\n[colors]\ncursor = \"#00ff88\"\n",
+        )
+        .unwrap();
+        save_format(std::path::Path::new(&file.path), "flac").unwrap();
+
+        let text = std::fs::read_to_string(&file.path).unwrap();
+        let at = |needle: &str| text.find(needle).unwrap_or_else(|| panic!("no {needle}: {text}"));
+        assert!(at("format =") < at("[colors]"), "it went into the table: {text}");
+        assert!(at("# mine") < at("format ="), "it went above the comment: {text}");
+
+        // The only thing that proves it: read it back through the real parser.
+        let cfg = build_at(&file.path);
+        assert_eq!(cfg.format, "flac");
+        assert_eq!(cfg.theme.cursor, ratatui::style::Color::Rgb(0, 255, 136));
+        assert_eq!(cfg.dir, PathBuf::from("/tmp/m"), "another setting was lost");
+    }
+
+    /* The same for a file whose first table is a theme, which is the shape
+       that made this findable: the old behaviour wrote `theme = "midnight"`
+       into `[themes.midnight]` as a colour called "theme". */
+    #[test]
+    fn a_saved_theme_lands_above_the_theme_tables() {
+        let file = temp("abovethemes");
+        std::fs::write(
+            &file.path,
+            "format = \"flac\"\n[themes.midnight]\nbase = \"cool\"\n",
+        )
+        .unwrap();
+        save_theme(std::path::Path::new(&file.path), "midnight").unwrap();
+        assert_eq!(build_at(&file.path).theme_name, "midnight");
+    }
+
+    /* A line inside a value is not a table header however much it looks like
+       one, which is the whole reason the scan counts brackets rather than
+       reading the first character. The plain case first: a multi-line array
+       must come through untouched and the key must still land above the real
+       table. */
+    #[test]
+    fn a_multi_line_value_is_not_mistaken_for_a_table() {
+        let file = temp("multiline");
+        std::fs::write(
+            &file.path,
+            "extra = [\n  \"--sleep-requests\",\n  \"1\",\n]\n\n[colors]\ncursor = \"#00ff88\"\n",
+        )
+        .unwrap();
+        save_format(std::path::Path::new(&file.path), "flac").unwrap();
+        let cfg = build_at(&file.path);
+        assert_eq!(cfg.format, "flac");
+        assert_eq!(cfg.extra, vec!["--sleep-requests".to_string(), "1".to_string()]);
+
+        /* And the case the counting is actually for: a multi-line string
+           holding a line that reads exactly like a header. Contrived, but it
+           is valid TOML, and inserting a key into the middle of somebody's
+           string value is the one outcome here that loses their data rather
+           than just misplacing earworm's. */
+        let tricky = temp("multilinestr");
+        std::fs::write(
+            &tricky.path,
+            "extra = [\"\"\"\n[colors]\n\"\"\"]\n\n[colors]\ncursor = \"#00ff88\"\n",
+        )
+        .unwrap();
+        save_format(std::path::Path::new(&tricky.path), "flac").unwrap();
+        let cfg = build_at(&tricky.path);
+        assert_eq!(cfg.format, "flac");
+        assert_eq!(cfg.extra, vec!["[colors]\n".to_string()], "the string was written into");
+        assert_eq!(cfg.theme.cursor, ratatui::style::Color::Rgb(0, 255, 136));
+    }
+
+    /// A file with no tables at all still appends, which is what it always did.
+    #[test]
+    fn a_file_without_tables_gains_the_key_at_the_end() {
+        let file = temp("notables");
+        std::fs::write(&file.path, "dir = \"/tmp/m\"\n").unwrap();
+        save_format(std::path::Path::new(&file.path), "flac").unwrap();
+        let text = std::fs::read_to_string(&file.path).unwrap();
+        assert!(text.trim_end().ends_with("format = \"flac\""), "{text}");
+        assert_eq!(build_at(&file.path).format, "flac");
+    }
+
+    /* `^t` writes the name into the config as `theme = "<name>"`, so a name
+       that cannot be spelled there is one that can be selected and then never
+       remembered. Caught at the definition, where the message can say what is
+       wrong with the name, rather than at the save, where `save_key`'s
+       re-parse catches it and blames a config that is perfectly fine. */
+    #[test]
+    fn a_theme_name_that_cannot_be_written_back_is_refused() {
+        for bad in ["say\\\"hi", "back\\\\slash", ""] {
+            let err = refuse(&format!("[themes.'{bad}']\nbase = \"cool\"\n"), &[]);
+            assert!(
+                err.contains("cannot be written back") || err.contains("needs a name"),
+                "{bad:?} was accepted with: {err}"
+            );
+        }
+        // A space round-trips, so the rule is the real constraint and no more.
+        let cfg = build("[themes.'my theme']\nbase = \"cool\"\n", &["--theme", "my theme"]);
+        assert_eq!(cfg.theme_name, "my theme");
+    }
+
+    /* The whole point of `^t` writing a name down is the next launch opening
+       on it, and for a theme the config defined that means the written name
+       has to resolve against `[themes.*]` on the way back in. Through the real
+       parser, which is the only thing that proves it. */
+    #[test]
+    fn a_walked_to_theme_of_your_own_survives_the_round_trip() {
+        let file = temp("definedround");
+        std::fs::write(
+            &file.path,
+            "format = \"flac\"\n[themes.midnight]\nbase = \"cool\"\naccent = \"#ff5cd5\"\n",
+        )
+        .unwrap();
+        save_theme(std::path::Path::new(&file.path), "midnight").unwrap();
+
+        let cfg = build_at(&file.path);
+        assert_eq!(cfg.theme_name, "midnight");
+        assert_eq!(cfg.theme.accent, ratatui::style::Color::Rgb(255, 92, 213));
+        // Still a diff on cool, so the table came back whole and not just its name.
+        assert_eq!(cfg.theme.cursor, crate::theme::COOL.cursor);
+        assert_eq!(cfg.format, "flac", "another setting was lost");
+        // And it is still in the walk it was written out of.
+        assert_eq!(cfg.themes.after("neon").0, "midnight");
     }
 
     /* A colour that merely measures badly starts anyway and says so: it is

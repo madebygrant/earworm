@@ -5,7 +5,7 @@ use std::sync::mpsc::Sender;
 
 use ratatui::style::Color;
 
-use crate::theme::Palette;
+use crate::theme::{Palette, Themes};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Status {
@@ -757,6 +757,13 @@ pub struct App {
     /// global because `^t` changes it between frames, and a `OnceLock` is the
     /// one shape that cannot.
     pub theme: Palette,
+    /* What it is called. Tracked beside the colours rather than looked up
+       from them, because a `[colors]` table makes the palette match no entry
+       in the registry: the name is the base the overrides were painted on,
+       which is both what `^t` walks from and what gets written back. */
+    pub theme_name: String,
+    /// Every palette `^t` can reach: the built-ins plus any `[themes.*]`.
+    pub themes: Themes,
     /// Where `^t` writes the theme it lands on. Read off the config in `main`
     /// before the worker takes it, like `format`; `None` under --no-config,
     /// which asked for the file to stay out of the run.
@@ -867,6 +874,8 @@ impl App {
             cmds: Some(cmds),
             settings,
             theme: Palette::default(),
+            theme_name: crate::config::DEFAULT_THEME.to_string(),
+            themes: Themes::default(),
             config_file: None,
             theme_overridden: false,
             format: crate::config::DEFAULT_FORMAT.to_string(),
@@ -1412,8 +1421,10 @@ impl App {
        to avoid. `write_atomically` is what makes a write off this thread
        safe; nothing else on it touches a file. */
     pub fn cycle_theme(&mut self) {
-        self.theme = self.theme.next();
-        let name = self.theme.name();
+        let (name, palette) = self.themes.after(&self.theme_name);
+        let name = name.to_string();
+        self.theme = palette;
+        self.theme_name = name.clone();
         /* The walk moves the base palette only, so what is on screen now is a
            clean built-in. The `[colors]` table stays in the file and is
            applied on top of whatever is named at the next start, which makes
@@ -1430,7 +1441,7 @@ impl App {
             self.say(format!("theme {name}  ·  this session{kept}"));
             return;
         };
-        match crate::config::save_theme(&file, name) {
+        match crate::config::save_theme(&file, &name) {
             Ok(()) => self.say(format!("theme {name}{kept}")),
             /* Not a failure of the key: the theme applied and only the
                remembering did not, which is a different thing to tell
@@ -2069,10 +2080,10 @@ mod tests {
         let mut app = bare();
         assert_eq!(app.theme, crate::theme::WARM);
 
-        let mut seen = vec![app.theme.name()];
+        let mut seen = vec![app.theme_name.clone()];
         for _ in 1..crate::theme::BUILT_INS.len() {
             app.cycle_theme();
-            seen.push(app.theme.name());
+            seen.push(app.theme_name.clone());
         }
         assert_eq!(seen, ["warm", "light", "cool", "neon"]);
 
@@ -2089,7 +2100,7 @@ mod tests {
         app.config_file = Some(path.clone());
 
         app.cycle_theme();
-        assert_eq!(app.theme.name(), "light");
+        assert_eq!(app.theme_name, "light");
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(text.contains("theme = \"light\""), "{text}");
         assert!(text.contains("format = \"opus\""), "another key went: {text}");
@@ -2103,6 +2114,34 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
     }
 
+    /* The walk has to reach a theme somebody defined, or `--theme` is the
+       only way to select one and half the feature is missing. Written back by
+       its own name, so the next launch opens on it. */
+    #[test]
+    fn the_walk_reaches_a_defined_theme_and_writes_its_name_back() {
+        let path = scratch_config("defined");
+        let mut app = bare();
+        app.config_file = Some(path.clone());
+
+        let mut mine = crate::theme::COOL;
+        mine.accent = ratatui::style::Color::Rgb(255, 92, 213);
+        app.themes.add("midnight".into(), mine);
+        // Parked on the last shipped theme, so one press steps off the end.
+        app.theme_name = "neon".into();
+        app.theme = crate::theme::NEON;
+
+        app.cycle_theme();
+        assert_eq!(app.theme_name, "midnight", "the walk stopped at the built-ins");
+        assert_eq!(app.theme, mine, "it took the name without the colours");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("theme = \"midnight\""), "{text}");
+
+        // And carries on round to the start rather than stopping there.
+        app.cycle_theme();
+        assert_eq!(app.theme_name, "warm");
+        std::fs::remove_file(&path).unwrap();
+    }
+
     /* --no-config asked for the file to stay out of the run, so there is
        nowhere to write. The theme still applies, and the flash has to say the
        part that is different, or the next launch is a surprise. */
@@ -2110,25 +2149,33 @@ mod tests {
     fn with_no_config_the_walk_says_it_lasts_one_session() {
         let mut app = bare();
         app.cycle_theme();
-        assert_eq!(app.theme.name(), "light");
+        assert_eq!(app.theme_name, "light");
         assert!(app.stage.contains("this session"), "{}", app.stage);
     }
 
     /* A `[colors]` table outlives the walk: it is applied on top of whatever
        is named at the next launch, so the screen now and the screen then are
-       different colours. Saying only the name would be the wrong half. */
+       different colours. Saying only the name would be the wrong half.
+
+       The walk itself is no longer confused by one. It goes by name, and the
+       name is the base the overrides were painted on, so `^t` from a
+       repainted `neon` reaches `warm` because warm is what follows neon — not
+       because a palette matching no built-in dropped the walk back to its
+       start, which is what it used to do. */
     #[test]
     fn a_walk_over_a_repainted_palette_says_the_table_is_still_there() {
         let path = scratch_config("repainted");
         let mut app = bare();
         app.config_file = Some(path.clone());
         app.theme_overridden = true;
-        // What a `[colors]` table leaves behind: in no walk, so `next` starts over.
+        // What a `[colors]` table leaves behind: a named base, repainted.
+        app.theme_name = "cool".into();
+        app.theme = crate::theme::COOL;
         app.theme.cursor = ratatui::style::Color::Rgb(0, 255, 136);
-        assert_eq!(app.theme.name(), "custom");
 
         app.cycle_theme();
-        assert_eq!(app.theme, crate::theme::WARM, "a custom palette skipped warm");
+        assert_eq!(app.theme_name, "neon", "the walk lost its place");
+        assert_eq!(app.theme, crate::theme::NEON, "the overrides outlived the walk");
         assert!(app.stage.contains("[colors]"), "the table went unmentioned: {}", app.stage);
         /* And says it about the next start, not this screen: the walk landed
            on a clean built-in, so the table is the one thing here that is not
@@ -2152,7 +2199,7 @@ mod tests {
         app.config_file = Some(dir.clone());
 
         app.cycle_theme();
-        assert_eq!(app.theme.name(), "light", "the theme did not apply");
+        assert_eq!(app.theme_name, "light", "the theme did not apply");
         assert!(app.stage.contains("not saved"), "{}", app.stage);
         std::fs::remove_dir_all(&dir).unwrap();
     }

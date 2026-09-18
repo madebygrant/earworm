@@ -23,9 +23,13 @@ intro = true       # the opening animation
 notify = true      # ring the bell when a long run finishes
 update_check = true # ask GitHub about a newer release, at most once a day
 
-theme = "warm"     # or light, cool, neon — see docs/themes.md
+theme = "warm"     # a built-in, or one of your own below
 
-[colors]           # repaints slots on top of `theme`; every key optional
+[themes.midnight]  # palettes of your own, joining the four that ship
+base   = "cool"    # optional: a diff on a built-in rather than all twelve
+accent = "#ff5cd5"
+
+[colors]           # repaints fields on top of `theme`; every key optional
 cursor = "#00ff88"
 
 extra = ["--sleep-requests", "1"]   # always passed to yt-dlp
@@ -38,7 +42,7 @@ acoustid_key = "..."                # or use ACOUSTID_API_KEY
 | --- | --- |
 | `-d`, `--dir` | output directory (default `~/Music`) |
 | `-f`, `--format` | opus, m4a, mp3, flac, vorbis or alac (default opus) |
-| `--theme` | warm, light, cool or neon (default warm) |
+| `--theme` | warm, light, cool, neon, or one you defined (default warm) |
 | `--no-convert` | leave tracks already on disk in the format they have |
 | `-P`, `--no-parse` | keep YouTube's own artist/track, skip title parsing |
 | `-L`, `--no-lookup` | skip AcoustID/Deezer/Apple, keep parsed tags |

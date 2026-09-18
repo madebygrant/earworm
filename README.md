@@ -42,10 +42,11 @@ download from a music library:
   the answer surprised me too.
 - **Plays through [cliamp](https://docs.cliamp.stream).** `p` hands over the
   playlist in the right order, tags as track titles.
-- **Four themes, measured rather than eyeballed.** `^t` walks them with the
-  screen in front of you and remembers the one you stop on. Every colour
-  clears WCAG 4.5:1 on its own background, including the [light
-  theme](docs/themes.md) for terminals the other three are unreadable on.
+- **Four themes, measured rather than eyeballed, plus your own.** `^t` walks
+  them with the screen in front of you and remembers the one you stop on.
+  Every shipped colour clears WCAG 4.5:1 on its own background, including the
+  light theme for terminals the other three are unreadable on, and a
+  [palette of your own](docs/themes.md) gets the same numbers run over it.
 - **Retries and undos.** `r` re-downloads whatever failed. `u` puts back the
   last tag edit.
 
@@ -70,7 +71,7 @@ turns out to be 361 tracks of seminar recordings.
 | [docs/formats.md](docs/formats.md) | opus, mp3, flac, and what converts |
 | [docs/library.md](docs/library.md) | the library screen, search, `--resync` |
 | [docs/playback.md](docs/playback.md) | playing through cliamp |
-| [docs/themes.md](docs/themes.md) | the four palettes, `^t`, repainting one colour |
+| [docs/themes.md](docs/themes.md) | the four palettes, `^t`, and defining your own |
 | [docs/keys.md](docs/keys.md) | every key, both screens, the status words |
 | [docs/internals.md](docs/internals.md) | how tagging decides, what gets written |
 

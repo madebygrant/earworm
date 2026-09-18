@@ -187,56 +187,113 @@ pub fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
     (x.max(y) + 0.05) / (x.min(y) + 0.05)
 }
 
-impl Palette {
+/* Every palette this run can reach: the four built-ins, then whatever
+   `[themes.<name>]` defined, resolved once at startup.
+
+   A registry rather than four functions over `BUILT_INS`, because a user
+   theme's name is a runtime `String` and the old `name()` returned
+   `&'static str`. Keeping it out of `Palette` is what lets a palette stay a
+   plain `Copy` value that a draw can hold: the name belongs to the list a
+   theme was found in, not to the colours. */
+#[derive(Clone, Debug)]
+/* Never empty, which is what makes the index in `after` safe: `Default` seeds
+   it with the four that ship and `add` only ever appends. Nothing removes,
+   and there is no constructor that starts it bare. */
+pub struct Themes(Vec<(String, Palette)>);
+
+impl Default for Themes {
+    fn default() -> Self {
+        Themes(
+            BUILT_INS
+                .iter()
+                .map(|(name, palette)| ((*name).to_string(), *palette))
+                .collect(),
+        )
+    }
+}
+
+impl Themes {
+    /// Whether a name is already taken, which is how a `[themes.warm]` that
+    /// would shadow a built-in is refused rather than quietly winning.
+    pub fn has(&self, name: &str) -> bool {
+        self.0.iter().any(|(known, _)| known == name)
+    }
+
+    /* Appended, so the built-ins keep the order they ship in and user themes
+       follow in the order the config's map yields them. Append-only is also
+       half of why the list is never empty. The caller checks `has` first: two
+       entries under one name would make the walk visit it twice and `named`
+       pick whichever came first. */
+    pub fn add(&mut self, name: String, palette: Palette) {
+        self.0.push((name, palette));
+    }
+
     /// The palette a config or a flag names, or `None` for a name nobody
-    /// ships — which the caller turns into a startup error rather than a
+    /// defined — which the caller turns into a startup error rather than a
     /// silent fallback to the default.
-    pub fn named(name: &str) -> Option<Palette> {
-        BUILT_INS
+    pub fn named(&self, name: &str) -> Option<Palette> {
+        self.0
             .iter()
-            .find(|(known, _)| *known == name)
+            .find(|(known, _)| known == name)
             .map(|(_, palette)| *palette)
     }
 
-    /// What this palette is called, for `--check`, the help overlay and the
-    /// flash that names a switch. A palette with `[colors]` on it matches no
-    /// built-in and is "custom".
-    pub fn name(&self) -> &'static str {
-        BUILT_INS
-            .iter()
-            .find(|(_, known)| known == self)
-            .map_or("custom", |(name, _)| *name)
-    }
+    /* The name and palette after this one, wrapping. What `^t` walks.
 
-    /// The next palette in the shipped order, wrapping. What `^t` walks.
-    pub fn next(&self) -> Palette {
-        match BUILT_INS.iter().position(|(_, known)| known == self) {
-            Some(at) => BUILT_INS[(at + 1) % BUILT_INS.len()].1,
-            /* A palette with [colors] on it is in no walk, so the walk starts
-               at its own beginning. Stepping off it to the *second* built-in
-               would make `warm` the one theme `^t` could never reach. */
-            None => BUILT_INS[0].1,
-        }
+       By name rather than by matching the palette's colours, which is what
+       makes `[colors]` stop being a special case: a repainted palette used to
+       match no built-in and drop the walk back to its start. The name is the
+       base the overrides were painted on, so the walk carries on from there. */
+    pub fn after(&self, name: &str) -> (&str, Palette) {
+        let at = self.0.iter().position(|(known, _)| known == name);
+        /* A name in no list is one the config named and then had removed from
+           under it, which nothing does today. Starting over beats panicking. */
+        let next = at.map_or(0, |at| (at + 1) % self.0.len());
+        /* Indexed rather than matched, on the invariant above: an empty
+           registry is unreachable, and `get` here would need a palette to
+           return in its place, which is a second answer to "what is the
+           default" sitting a long way from the first. */
+        let (name, palette) = &self.0[next];
+        (name, *palette)
     }
 
     /// Every name earworm knows, for the message that lists them.
-    pub fn names() -> String {
-        BUILT_INS
+    pub fn names(&self) -> String {
+        self.0
             .iter()
-            .map(|(name, _)| *name)
+            .map(|(name, _)| name.as_str())
             .collect::<Vec<_>>()
             .join(", ")
     }
 }
 
+/* The gradient's two ends, which a theme names like any other colour but
+   which are not slots: nothing is ever read *in* them, so `slots()` leaves
+   them out and the legibility checks use them as grounds instead. */
+pub const GROUNDS: [&str; 2] = ["near", "far"];
+
 impl Palette {
-    /* One slot by name, for a config that repaints a colour or two on top of
-       a built-in. Returning the field to write into keeps the name list in
-       one place — `slots()` and this have to agree, and a mismatch is a key
-       that parses and paints nothing. Every slot earworm holds is drawn in
-       something, so every one of them can be set. */
-    pub fn slot_mut(&mut self, slot: &str) -> Option<&mut Color> {
-        Some(match slot {
+    /* One field by name, for a config painting on top of a built-in. Every
+       slot earworm holds is drawn in something and the two gradient ends are
+       the ground it is drawn on, so all twelve can be set and a name outside
+       them is refused rather than silently painting nothing. */
+    pub fn set_field(&mut self, field: &str, rgb: (u8, u8, u8)) -> bool {
+        if let Some(into) = self.slot_mut(field) {
+            *into = Color::Rgb(rgb.0, rgb.1, rgb.2);
+            return true;
+        }
+        match field {
+            "near" => self.near = rgb,
+            "far" => self.far = rgb,
+            _ => return false,
+        }
+        true
+    }
+
+    /// The colour slots alone. `set_field` is the whole of what a config may
+    /// name; this is the half of it that `slots()` also lists.
+    fn slot_mut(&mut self, field: &str) -> Option<&mut Color> {
+        Some(match field {
             "text" => &mut self.text,
             "accent" => &mut self.accent,
             "cursor" => &mut self.cursor,
@@ -251,15 +308,16 @@ impl Palette {
         })
     }
 
-    /// Every slot name a config may repaint, for the error that lists them.
-    /* Asked of `slot_mut` rather than listed again, so the message cannot
-       offer a slot that does nothing — or omit one that works. */
-    pub fn slot_names() -> String {
+    /// Every field name a theme may set, for the error that lists them.
+    /* Asked of `set_field` rather than listed again, so the message cannot
+       offer a name that does nothing — or omit one that works. */
+    pub fn field_names() -> String {
         let mut probe = WARM;
         WARM.slots()
             .iter()
             .map(|(name, _)| *name)
-            .filter(|name| probe.slot_mut(name).is_some())
+            .chain(GROUNDS)
+            .filter(|name| probe.set_field(name, (0, 0, 0)))
             .collect::<Vec<_>>()
             .join(", ")
     }
@@ -320,6 +378,19 @@ fn wants(slot: &str) -> Option<f64> {
 impl Default for Palette {
     fn default() -> Self {
         WARM
+    }
+}
+
+impl Palette {
+    /* One of the four that ship, by name. Kept apart from `Themes::named`
+       because a `[themes.*]` base may only be a built-in: one that could name
+       a peer could name a cycle, and resolving that is more machinery than
+       starting from `cool` is worth. */
+    pub fn built_in(name: &str) -> Option<Palette> {
+        BUILT_INS
+            .iter()
+            .find(|(known, _)| *known == name)
+            .map(|(_, palette)| *palette)
     }
 }
 
@@ -631,34 +702,76 @@ mod tests {
         assert_eq!((WARM.near, WARM.far, WARM.stop), ((55, 40, 37), (18, 1, 22), 0.76));
     }
 
-    /* A palette with [colors] on it is in no walk. Stepping off it has to
-       reach the first built-in, or `warm` becomes the one theme `^t` can
-       never get back to. */
+    /* Every slot earworm holds is drawn in something and the gradient's ends
+       are what it is drawn on, so all twelve can be repainted and all twelve
+       are offered. A field the struct gains without a `set_field` arm is a key
+       that parses and paints nothing. */
     #[test]
-    fn a_repainted_palette_steps_onto_the_first_built_in() {
-        let mut custom = NEON;
-        custom.cursor = Color::Rgb(0, 255, 136);
-        assert_eq!(custom.name(), "custom");
-        assert_eq!(custom.next(), BUILT_INS[0].1);
-        // And the walk itself still goes round the houses and back.
-        let mut at = WARM;
-        for _ in 0..BUILT_INS.len() {
-            at = at.next();
+    fn every_field_the_palette_holds_can_be_repainted() {
+        let mut palette = WARM;
+        for field in WARM.slots().iter().map(|(name, _)| *name).chain(GROUNDS) {
+            assert!(palette.set_field(field, (1, 2, 3)), "{field} cannot be set");
+            assert!(Palette::field_names().contains(field), "{field} is not offered");
         }
-        assert_eq!(at, WARM);
+        // And it actually wrote, rather than reporting that it had.
+        assert_eq!(palette.text, Color::Rgb(1, 2, 3));
+        assert_eq!(palette.near, (1, 2, 3));
+        assert!(!palette.set_field("gradient", (1, 2, 3)), "an unknown field took a colour");
     }
 
-    /* Every slot earworm holds is drawn in something, so every one of them
-       can be repainted and every one is offered. A slot the struct gains
-       without a `slot_mut` arm is a key that parses and paints nothing. */
+    /* The walk is over names now, so a repainted palette is no longer a
+       special case: it carries the name of the base its colours were painted
+       on, and `^t` goes on from there rather than dropping to the start. */
     #[test]
-    fn every_slot_the_palette_holds_can_be_repainted() {
-        let mut palette = WARM;
-        for (slot, _) in WARM.slots() {
-            assert!(palette.slot_mut(slot).is_some(), "{slot} cannot be set");
-            assert!(Palette::slot_names().contains(slot), "{slot} is not offered");
+    fn the_walk_goes_round_the_houses_and_back() {
+        let themes = Themes::default();
+        let mut at = "warm".to_string();
+        let mut seen = vec![at.clone()];
+        for _ in 1..BUILT_INS.len() {
+            at = themes.after(&at).0.to_string();
+            seen.push(at.clone());
         }
-        assert!(palette.slot_mut("gradient").is_none(), "an unknown slot took a colour");
+        assert_eq!(seen, ["warm", "light", "cool", "neon"]);
+        assert_eq!(themes.after(&at).0, "warm", "the walk did not come back");
+
+        // A name nothing holds starts over rather than panicking on an index.
+        assert_eq!(themes.after("midnight").0, "warm");
+    }
+
+    /* The index in `after` rests on the list never being empty, and nothing
+       in the type says so. This is what says it: the only way to build one
+       starts with the four that ship, and the only way to change one adds. */
+    #[test]
+    fn a_registry_always_holds_the_shipped_themes() {
+        let themes = Themes::default();
+        for (name, palette) in BUILT_INS {
+            assert_eq!(themes.named(name), Some(palette), "{name} is not in a fresh registry");
+        }
+        // Adding cannot take anything away, which is the other half of it.
+        let mut grown = Themes::default();
+        grown.add("midnight".into(), COOL);
+        for (name, _) in BUILT_INS {
+            assert!(grown.has(name), "{name} went missing when one was added");
+        }
+    }
+
+    /* A user theme joins the walk at the end and answers to `named`, and a
+       name already taken is refused by the caller rather than shadowing. */
+    #[test]
+    fn a_defined_theme_joins_the_list_it_was_added_to() {
+        let mut themes = Themes::default();
+        assert!(themes.has("warm"));
+        assert!(!themes.has("midnight"));
+
+        let mut mine = COOL;
+        mine.accent = Color::Rgb(255, 92, 213);
+        themes.add("midnight".into(), mine);
+
+        assert!(themes.has("midnight"));
+        assert_eq!(themes.named("midnight"), Some(mine));
+        assert_eq!(themes.after("neon").0, "midnight", "it was left out of the walk");
+        assert_eq!(themes.after("midnight").0, "warm", "the walk did not wrap past it");
+        assert!(themes.names().contains("midnight"), "{}", themes.names());
     }
 
     /* A ground nobody can measure drops out of the check on its own — it used
