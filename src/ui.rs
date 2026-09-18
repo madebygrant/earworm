@@ -1,6 +1,6 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
@@ -782,96 +782,21 @@ fn detail_rows(label: &str, value: &str, style: Style, width: usize, p: Palette)
    truncates first is `was` at 32 characters: the video title, which is the
    half of a wrong identification that says how it went wrong. The path is
    never on the row at all. A wide terminal has the columns, so it says it. */
-/* Wide enough for a cover to be a picture rather than a smear, and narrow
-   enough to leave the pane's own columns readable beside it. */
-const ART_MAX: u16 = 24;
-/* What the metadata needs under it: the wrapped name, a blank, and the four
-   rows that are always there. Below this the picture is what gives way, the
-   same way the help overlay's legend does — the pane exists to say which
-   track this is, and the words are what say it. */
-const ART_FLOOR: u16 = 8;
-
-/* Two pixel rows per cell with a half-block, so a square picture is half as
-   many rows as columns. Returns the cells and the pixels to ask for, or
-   `None` where a picture would cost the pane the words. */
-/* `plain` is passed rather than asked for, because the depth is a
-   process-wide `OnceLock` and a test of it is a test of how the machine
-   running the suite is configured. Without colour every pixel collapses to
-   the terminal's own two, so a cover becomes a solid rectangle: there is
-   nothing to draw, and answering `None` here means the read is never even
-   asked for. */
-fn art_room(inner: Rect, plain: bool) -> Option<(u16, u16)> {
-    if plain {
-        return None;
-    }
-    let cols = inner.width.min(ART_MAX);
-    let rows = cols / 2;
-    (rows > 0 && inner.height >= rows + ART_FLOOR).then_some((cols, rows))
-}
-
-/* Foreground is the upper pixel and background the lower, which doubles the
-   vertical resolution a cell can carry. Spans in the buffer like anything
-   else, so the quantiser, `NO_COLOR` and a popup's `Clear` all handle a
-   picture without knowing it is one. */
-fn art_rows(art: &crate::tag::Art) -> Vec<Line<'static>> {
-    (0..art.cell_rows())
-        .map(|row| {
-            let cells = (0..art.cols)
-                .map(|col| {
-                    let (tr, tg, tb) = art.at(col, row * 2);
-                    let (br, bg, bb) = art.at(col, row * 2 + 1);
-                    Span::styled(
-                        "▀",
-                        Style::new()
-                            .fg(Color::Rgb(tr, tg, tb))
-                            .bg(Color::Rgb(br, bg, bb)),
-                    )
-                })
-                .collect::<Vec<_>>();
-            Line::from(cells)
-        })
-        .collect()
-}
-
-/* Returns the room a picture would have here, for the loop that fetches one:
-   only the layout knows, which is the same bargain `viewport` makes with
-   `page`. Reported whether or not there is art to draw yet, or the first
-   settle would have nothing to size its request by. */
-fn draw_detail(
-    frame: &mut Frame,
-    track: &crate::app::Track,
-    art: Option<&crate::tag::Art>,
-    area: Rect,
-    p: Palette,
-) -> Option<(u16, u16)> {
+fn draw_detail(frame: &mut Frame, track: &crate::app::Track, area: Rect, p: Palette) {
     let block = Block::new()
         .borders(Borders::LEFT)
         .border_style(Style::new().fg(p.rule));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
-        return None;
+        return;
     }
     let width = inner.width as usize;
-    let room = art_room(inner, theme::plain());
 
-    let mut lines: Vec<Line> = Vec::new();
-    /* Above the words rather than below them: it is the fastest thing on the
-       pane to recognise, and a picture under a variable number of metadata
-       rows would move every time the cursor changed track. */
-    /* Only at exactly the size this pane asked for, which today is a
-       tautology: `ART_MAX` is 24 and the pane only exists above
-       `PREVIEW_FROM`, where it is never narrower than that, so every cover is
-       24 by 12. The check is what makes `ART_MAX` safe to change and what
-       would stop a cover read for one size being stretched into another, not
-       something any current path reaches. */
-    if let Some(art) = art.filter(|a| room == Some((a.cols, a.cell_rows()))) {
-        lines.extend(art_rows(art));
-        lines.push(Line::default());
-    }
-    lines.extend(wrap(&format!(" {}", track.name), width)
+    let mut lines: Vec<Line> = wrap(&format!(" {}", track.name), width)
         .into_iter()
-        .map(|piece| Line::from(Span::styled(piece, row_style(true, p)))));
+        .map(|piece| Line::from(Span::styled(piece, row_style(true, p))))
+        .collect();
     lines.push(Line::default());
     lines.extend(detail_rows(
         "status",
@@ -911,7 +836,6 @@ fn draw_detail(
     }
     lines.truncate(inner.height as usize);
     frame.render_widget(Paragraph::new(lines), inner);
-    room
 }
 
 fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
@@ -935,36 +859,11 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
         let pane = (u32::from(area.width) * 2 / 5).min(46) as u16;
         let [list, detail] =
             Layout::horizontal([Constraint::Min(1), Constraint::Length(pane)]).areas(area);
-        /* Looked up before the borrow, because the pane takes `&Track` and
-           the cache is on the same `App`. Cloned rather than held: a cover at
-           this size is a couple of kilobytes, against a borrow that would
-           make every field on `App` immovable for the rest of the draw. */
-        let found = app
-            .tracks
-            .get(app.cursor)
-            .and_then(|track| track.path.as_ref())
-            .and_then(|path| app.art.get(path))
-            .cloned()
-            .flatten();
-        let room = app
-            .tracks
-            .get(app.cursor)
-            .map(|track| draw_detail(frame, track, found.as_ref(), detail, p));
-        /* `None` here is no track at all, which is not the same as a pane with
-           no room: the first leaves the last size in place for a frame, the
-           second has to clear it or the loop asks for a picture nothing will
-           draw. */
-        if let Some(room) = room {
-            app.art_size = room;
+        if let Some(track) = app.tracks.get(app.cursor) {
+            draw_detail(frame, track, detail, p);
         }
         list
     } else {
-        /* And the third case, which is the one this missed: below
-           `PREVIEW_FROM` there is no pane at all, so nothing above runs and
-           whatever the last wide frame left in `art_size` would stand. The
-           loop reads it as room, and every settle then spends an ffmpeg on a
-           cover that has nowhere to be drawn. */
-        app.art_size = None;
         area
     };
 
@@ -1817,195 +1716,6 @@ mod tests {
             }
             app.cycle_theme();
         }
-    }
-
-    /* Two pixel rows per cell, so a square picture is half as many rows as
-       columns. The floor is the part worth pinning: the pane exists to say
-       which track this is, and on a short terminal the picture is what gives
-       way rather than the words. */
-    #[test]
-    fn a_cover_only_gets_room_that_the_words_can_spare() {
-        let pane = |w, h| Rect { x: 0, y: 0, width: w, height: h };
-        // Square: 24 columns of picture is 12 rows of half-blocks.
-        assert_eq!(super::art_room(pane(30, 30), false), Some((24, 12)));
-        /* Never wider than the pane. No real pane is this narrow — above
-           `PREVIEW_FROM` the inner width is always past `ART_MAX` — so this
-           pins the cap's other side rather than a live case. */
-        assert_eq!(super::art_room(pane(10, 30), false), Some((10, 5)));
-        // Exactly enough for the picture and the rows underneath it.
-        assert_eq!(super::art_room(pane(10, 5 + super::ART_FLOOR), false), Some((10, 5)));
-        // One row short, and the words win.
-        assert_eq!(super::art_room(pane(10, 4 + super::ART_FLOOR), false), None);
-        // A pane too narrow to make a single row of picture.
-        assert_eq!(super::art_room(pane(1, 40), false), None);
-        /* Without colour every pixel is the terminal's own, so a cover is a
-           solid rectangle. Answering `None` is also what stops the read being
-           asked for at all. */
-        assert_eq!(super::art_room(pane(30, 30), true), None);
-    }
-
-    /* The upper pixel is the foreground and the lower is the background of the
-       same cell, which is the whole trick: it doubles the vertical resolution
-       and leaves the result as ordinary spans, so the quantiser and a popup's
-       `Clear` handle a picture without knowing it is one. */
-    #[test]
-    fn a_cover_is_drawn_two_pixel_rows_to_a_cell() {
-        let art = crate::tag::Art {
-            cols: 2,
-            rows: 4,
-            pixels: vec![
-                (1, 1, 1), (2, 2, 2),
-                (3, 3, 3), (4, 4, 4),
-                (5, 5, 5), (6, 6, 6),
-                (7, 7, 7), (8, 8, 8),
-            ],
-        };
-        let lines = super::art_rows(&art);
-        assert_eq!(lines.len(), 2, "four pixel rows should be two cell rows");
-
-        let cell = |line: &ratatui::text::Line, at: usize| {
-            let span = &line.spans[at];
-            (span.content.to_string(), span.style.fg.unwrap(), span.style.bg.unwrap())
-        };
-        assert_eq!(
-            cell(&lines[0], 0),
-            ("▀".to_string(), ratatui::style::Color::Rgb(1, 1, 1), ratatui::style::Color::Rgb(3, 3, 3)),
-            "the top cell did not take rows 0 and 1"
-        );
-        assert_eq!(
-            cell(&lines[1], 1),
-            ("▀".to_string(), ratatui::style::Color::Rgb(6, 6, 6), ratatui::style::Color::Rgb(8, 8, 8)),
-            "the bottom cell did not take rows 2 and 3"
-        );
-    }
-
-    /* The picture goes above the words, not below them: a cover under a
-       variable number of metadata rows would jump every time the cursor moved
-       to a track with a different number of them. */
-    #[test]
-    fn the_detail_pane_draws_the_cover_above_the_words() {
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let mut app = App::new(tx, "settings".into());
-        app.intro_done = true;
-        app.done = Some(Ok("finished".into()));
-        let path = std::path::PathBuf::from("/music/Focus/01 - A.opus");
-        let mut track = Track::new(1, "v1".into(), "01 - A.opus".into(), path.clone());
-        track.artist = "Someone".into();
-        app.tracks = vec![track];
-
-        let screen = |app: &mut App| {
-            let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
-            terminal.draw(|f| super::draw(f, app)).unwrap();
-            terminal.backend().buffer().clone()
-        };
-
-        // Nothing cached yet: the pane is all words, and it says how much room
-        // a picture would have so the reader can be asked for one that size.
-        let before = screen(&mut app);
-        let (cols, rows) = app.art_size.expect("the pane reported no room");
-        assert!(cols > 0 && rows > 0);
-        let blocks = |buffer: &ratatui::buffer::Buffer| {
-            (0..40)
-                .flat_map(|y| (0..100).map(move |x| (x, y)))
-                .filter(|(x, y)| buffer[(*x, *y)].symbol() == "▀")
-                .count()
-        };
-        assert_eq!(blocks(&before), 0, "a picture was drawn before one was read");
-
-        /* One arrives, at exactly the size the pane asked for. `art_size` is
-           in cells and `Art::rows` is in pixels, which is the pair that has
-           to be converted between rather than assumed equal. */
-        let art = crate::tag::Art {
-            cols,
-            rows: rows * 2,
-            pixels: vec![(200, 100, 50); usize::from(cols) * usize::from(rows) * 2],
-        };
-        assert_eq!(art.cell_rows(), rows);
-        app.art_read(path, Some(art));
-        let after = screen(&mut app);
-        assert_eq!(
-            blocks(&after),
-            usize::from(cols) * usize::from(rows),
-            "the cover was not drawn whole"
-        );
-
-        // And it sits above the track's name rather than under it.
-        let row_of = |buffer: &ratatui::buffer::Buffer, needle: &str| {
-            (0..40).find(|y| {
-                (0..100)
-                    .map(|x| buffer[(x, *y)].symbol().to_string())
-                    .collect::<String>()
-                    .contains(needle)
-            })
-        };
-        let first_block = (0..40)
-            .find(|y| (0..100).any(|x| after[(x, *y)].symbol() == "▀"))
-            .expect("no picture");
-        let name = row_of(&after, "Someone").expect("no metadata");
-        assert!(first_block < name, "the picture was drawn under the words");
-    }
-
-    /* No current path produces a mismatch — `ART_MAX` is 24 and the pane is
-       never narrower, so every cover is the same size — so this defends an
-       invariant rather than a case anyone can reach today. It is what would
-       stop a cover read at one size being stretched into another the day
-       `ART_MAX` or `PREVIEW_FROM` moves, which is exactly when nobody would
-       think to check. */
-    #[test]
-    fn a_cover_of_a_size_the_pane_did_not_ask_for_is_refused() {
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let mut app = App::new(tx, "settings".into());
-        app.intro_done = true;
-        app.done = Some(Ok("finished".into()));
-        let path = std::path::PathBuf::from("/music/Focus/01 - A.opus");
-        app.tracks = vec![Track::new(1, "v1".into(), "01 - A.opus".into(), path.clone())];
-        // Deliberately not the size any pane will ask for.
-        app.art_read(
-            path,
-            Some(crate::tag::Art { cols: 3, rows: 3, pixels: vec![(9, 9, 9); 9] }),
-        );
-
-        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
-        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
-        let buffer = terminal.backend().buffer().clone();
-        let blocks = (0..40)
-            .flat_map(|y| (0..100).map(move |x| (x, y)))
-            .filter(|(x, y)| buffer[(*x, *y)].symbol() == "▀")
-            .count();
-        assert_eq!(blocks, 0, "a cover was drawn at a size the pane did not ask for");
-    }
-
-    /* Below `PREVIEW_FROM` there is no pane, so `draw_detail` never runs and
-       nothing writes the size. Left as it was, the loop reads the last wide
-       frame's value as room and spends an ffmpeg per settle on covers that
-       have nowhere to go: invisible, and for as long as the terminal stays
-       narrow. */
-    #[test]
-    fn a_terminal_too_narrow_for_the_pane_wants_no_cover() {
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let mut app = App::new(tx, "settings".into());
-        app.intro_done = true;
-        app.done = Some(Ok("finished".into()));
-        let path = std::path::PathBuf::from("/music/Focus/01 - A.opus");
-        app.tracks = vec![Track::new(1, "v1".into(), "01 - A.opus".into(), path)];
-
-        let draw_at = |app: &mut App, width: u16| {
-            let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
-            terminal.draw(|f| super::draw(f, app)).unwrap();
-        };
-
-        draw_at(&mut app, 120);
-        assert!(app.art_size.is_some(), "a wide terminal reported no room");
-        assert!(app.art_wanted().is_some(), "it would not read a cover it can draw");
-
-        // Narrower than the pane needs, so there is no pane on screen at all.
-        draw_at(&mut app, super::PREVIEW_FROM - 1);
-        assert_eq!(app.art_size, None, "the last wide frame's size was left standing");
-        assert_eq!(app.art_wanted(), None, "it asked for a cover with nowhere to draw it");
-
-        // And it comes back when the room does.
-        draw_at(&mut app, 120);
-        assert!(app.art_wanted().is_some(), "widening again did not bring it back");
     }
 
     /* A theme changes colour and nothing else. Every glyph in every cell is
