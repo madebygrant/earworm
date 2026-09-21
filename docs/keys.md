@@ -30,7 +30,7 @@ touch, and failures](images/keys.png)
 | `M` | mark every track by the artist under the cursor |
 | `e` | edit artist, title, album and year (after the run) |
 | `u` | undo the last tag change (after the run) |
-| `c` | choose cover art (after the run) |
+| `c` | choose cover art, or give every track its own back (after the run) |
 | `T` | search again for the track under the cursor (after the run) |
 | `s` | swap artist and title on the marked tracks |
 | `A` | set one artist across the marked tracks |
@@ -93,6 +93,29 @@ The status column says which route a track took.
 
 `v`, `/` and the `n`/`N` walk are described with the rest of the workflow in
 [fixing tags](workflow.md#fixing-tags).
+
+## Cover art
+
+`c` offers what the lookup found for the track under the cursor, whatever
+image the folder already holds, and a file of your own. Whichever you pick is
+written into the folder as `cover.jpg` or `cover.png` and embedded in every
+track, which is what an album wants.
+
+A playlist is the opposite case. Its tracks come from a dozen different
+records and one shared sleeve is the only thing hiding that, so the menu
+carries a row that takes the folder image away and looks each track up again
+to embed its own album art. That is the only way back, because choosing a
+cover writes over each track's own art rather than sitting beside it.
+
+It asks first, naming the folder and how many tracks it would rewrite, because
+the art it embeds is chosen automatically and nothing puts the old art back.
+Refusing leaves the folder exactly as it was, cover included. It needs the
+network; a track it can't find art for keeps what it has and is named in the
+log pane.
+
+After an ordinary run there is no folder image to remove. earworm writes one
+while it tags and deletes it again at the end, since every track already
+carries the art. One you dropped in yourself is never touched.
 
 ## On screen
 

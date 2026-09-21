@@ -782,14 +782,108 @@ fn detail_rows(label: &str, value: &str, style: Style, width: usize, p: Palette)
    truncates first is `was` at 32 characters: the video title, which is the
    half of a wrong identification that says how it went wrong. The path is
    never on the row at all. A wide terminal has the columns, so it says it. */
-fn draw_detail(frame: &mut Frame, track: &crate::app::Track, area: Rect, p: Palette) {
-    let block = Block::new()
+/* The pane's border, and with it the one derivation of what sits inside it.
+   `art_pane` and `draw_detail` both need the inner rectangle, and two hand-
+   rolled copies of "the area less the left border" is how they come to
+   disagree by a column the day the border changes. */
+fn detail_block(p: Palette) -> Block<'static> {
+    Block::new()
         .borders(Borders::LEFT)
-        .border_style(Style::new().fg(p.rule));
-    let inner = block.inner(area);
+        .border_style(Style::new().fg(p.rule))
+}
+
+/* What the metadata needs under a picture: the wrapped name, a blank, and the
+   rows that are always there. Below this the cover is what gives way, the same
+   way the help overlay's legend does — the pane exists to say which track this
+   is, and the words are what say it. */
+const ART_FLOOR: u16 = 8;
+/// Below this a cover is not worth the read, whatever protocol draws it.
+const ART_MIN: u16 = 8;
+/// The most either edge may ask for, so a wide pane cannot demand megabytes.
+const COVER_PIXELS: u32 = 1024;
+
+/* Where a cover goes, or `None` when the words need the rows. Square in cells
+   is not square on screen, so the height is half the width: `Resize::Fit`
+   corrects for the terminal's real font size and would otherwise letterbox
+   inside an area twice as tall as the picture. */
+fn art_pane(inner: Rect) -> Option<Rect> {
+    let cols = inner.width;
+    let rows = cols / 2;
+    (cols >= ART_MIN && inner.height >= rows + ART_FLOOR).then_some(Rect {
+        height: rows,
+        ..inner
+    })
+}
+
+/* ffmpeg finds, decodes and scales the picture, `image` only carries it, and
+   the crate picks the protocol. */
+fn load_art(
+    picker: Option<&ratatui_image::picker::Picker>,
+    path: &std::path::Path,
+    area: Rect,
+) -> Option<ratatui_image::protocol::Protocol> {
+    let picker = picker?;
+    let (width, height) = cover_pixels(picker.font_size(), area);
+    let raw = crate::tag::cover_rgb(path, width, height)?;
+    let image = image::RgbImage::from_raw(width, height, raw)?;
+    picker
+        .new_protocol(
+            image::DynamicImage::ImageRgb8(image),
+            area.as_size(),
+            /* Never the default, which is `Nearest`: any rescale at all then
+               turns a photograph into squares. The size asked for above means
+               there is normally none, but a terminal reporting a cell size
+               the pane does not divide into still gets one. */
+            ratatui_image::Resize::Fit(Some(ratatui_image::FilterType::Lanczos3)),
+        )
+        .ok()
+}
+
+/* Exactly the pixels the encoder will transmit, which is `cells × font_size`:
+   `Resize::resize` normalises to that number whatever it is handed, so asking
+   for precisely it means `needs_resize` finds nothing to do and ffmpeg's
+   Lanczos output goes to the wire untouched. Anything else is resampled twice.
+
+   `font` is the picker's, which `sharpen` has already doubled past the
+   point-versus-pixel gap — this function does not know about that and should
+   not, or there would be two places deciding how many pixels a cell is worth.
+
+   Both dimensions rather than a square: the pane is half as many rows as
+   columns precisely because a cell is about twice as tall as it is wide, so
+   this comes out near square without assuming that ratio anywhere.
+
+   Capped, because the cost is real: a pane on a wide terminal would otherwise
+   ask for several megabytes of raw RGB per track. Past the cap the encoder
+   resizes after all, which is why `Resize::Fit` still names a filter. */
+fn cover_pixels(font: ratatui_image::FontSize, area: Rect) -> (u32, u32) {
+    let scale = |cells: u16, cell: u16| {
+        (u32::from(cells) * u32::from(cell)).clamp(1, COVER_PIXELS)
+    };
+    (scale(area.width, font.width), scale(area.height, font.height))
+}
+
+/* `art` is how many rows a cover has taken, which the words start under.
+   `None` leaves the pane exactly as it was before any of this. */
+fn draw_detail(
+    frame: &mut Frame,
+    track: &crate::app::Track,
+    art: Option<u16>,
+    area: Rect,
+    p: Palette,
+) {
+    let block = detail_block(p);
+    let mut inner = block.inner(area);
     frame.render_widget(block, area);
     if inner.width == 0 || inner.height == 0 {
         return;
+    }
+    /* The cover's rows, plus one of air, belong to the picture. A count and
+       not a rectangle: the caller has already decided where those rows are,
+       and a second opinion about their position is one that can disagree. */
+    if let Some(rows) = art {
+        let taken = (rows + 1).min(inner.height);
+        inner.y += taken;
+        inner.height -= taken;
     }
     let width = inner.width as usize;
 
@@ -859,8 +953,39 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
         let pane = (u32::from(area.width) * 2 / 5).min(46) as u16;
         let [list, detail] =
             Layout::horizontal([Constraint::Min(1), Constraint::Length(pane)]).areas(area);
+        /* SPIKE: encoded here, on the UI thread, the first frame the cursor
+           rests on a track whose cover is not the one held. Everything about
+           that is wrong — it is a subprocess and a zlib encode inside the
+           render loop — and it is deliberate for now: the only question this
+           version answers is whether Ghostty draws the thing at all. */
+        let pane = art_pane(detail_block(p).inner(detail));
+        app.art_area = pane;
+        if let Some(area) = pane {
+            let want = app.tracks.get(app.cursor).and_then(|t| t.path.clone());
+            let held = app.art.as_ref().map(|(at, was, _)| (at.clone(), *was));
+            match want {
+                /* Keyed on the area as well as the file. A cover encoded for a
+                   45-cell pane and drawn in a 20-cell one is not the picture
+                   the protocol was handed, and the pane changes size whenever
+                   the terminal does. */
+                Some(path) if held.as_ref() != Some(&(path.clone(), area)) => {
+                    app.art = load_art(app.picker.as_ref(), &path, area)
+                        .map(|protocol| (path, area, protocol));
+                }
+                /* A row with no file has no cover, and the last row's is not
+                   it. Without this the picture simply stays, so a `pending`
+                   track wears its neighbour's sleeve. */
+                None => app.art = None,
+                _ => {}
+            }
+        }
         if let Some(track) = app.tracks.get(app.cursor) {
-            draw_detail(frame, track, detail, p);
+            draw_detail(frame, track, pane.map(|a| a.height), detail, p);
+        }
+        /* Drawn after the words, so the placeholder cells land on the rows
+           already set aside for them rather than being overwritten by text. */
+        if let (Some(area), Some((_, _, protocol))) = (pane, app.art.as_ref()) {
+            frame.render_widget(ratatui_image::Image::new(protocol), area);
         }
         list
     } else {
@@ -1716,6 +1841,263 @@ mod tests {
             }
             app.cycle_theme();
         }
+    }
+
+    /* Half as many rows as columns, because a cell is about twice as tall as
+       it is wide and a cover is square. The floor is the part worth pinning:
+       the pane exists to say which track this is, and on a short terminal the
+       picture is what gives way rather than the words. */
+    #[test]
+    fn a_cover_only_gets_room_the_words_can_spare() {
+        let inner = |w, h| Rect { x: 4, y: 2, width: w, height: h };
+        let pane = |w, h| super::art_pane(inner(w, h));
+
+        assert_eq!(pane(24, 40).map(|a| (a.width, a.height)), Some((24, 12)));
+        // Exactly its own rows plus the floor, which is the tightest fit.
+        assert_eq!(pane(20, 10 + super::ART_FLOOR).map(|a| a.height), Some(10));
+        // One row less and the words win.
+        assert_eq!(pane(20, 9 + super::ART_FLOOR), None);
+        // Too narrow to be worth the read, however tall.
+        assert_eq!(pane(super::ART_MIN - 1, 80), None);
+
+        // It sits at the top of the pane it was given, not somewhere else.
+        let at = pane(24, 40).unwrap();
+        assert_eq!((at.x, at.y), (4, 2));
+
+        // And the words always keep their rows, at every height.
+        for h in 0..60u16 {
+            if let Some(a) = pane(30, h) {
+                assert!(a.height + super::ART_FLOOR <= h, "the words lost rows at {h}");
+            }
+        }
+    }
+
+    /* Both derive the pane's inside from one border definition. Two hand-
+       rolled copies of "the area less the left border" disagree by a column
+       the day the border changes, and the failure is a cover drawn one cell
+       off with nothing pointing at the cause. */
+    #[test]
+    fn the_cover_and_the_words_measure_the_same_pane() {
+        let outer = Rect { x: 10, y: 3, width: 40, height: 40 };
+        let inner = super::detail_block(crate::theme::WARM).inner(outer);
+        let art = super::art_pane(inner).expect("no room in a pane this size");
+
+        assert_eq!(art.x, inner.x, "the cover starts in a different column");
+        assert_eq!(art.width, inner.width, "the cover is a different width");
+        assert_eq!(art.y, inner.y, "the cover starts on a different row");
+        // And it is inside the border rather than on top of it.
+        assert!(art.x > outer.x, "the cover was drawn over the border");
+    }
+
+    /* The pair above proves the two helpers agree; it says nothing about the
+       call site, which is free to hand `art_pane` a rectangle of its own. This
+       is the half that catches that, and it is the same lesson `scan_template`
+       taught: assert on what actually ran.
+
+       Halfblocks so no terminal is needed — the geometry is the protocol's
+       business either way, and what is being checked is where earworm puts
+       the widget, not what the widget draws. */
+    #[test]
+    fn the_cover_lands_where_the_words_left_room_for_it() {
+        let picker = ratatui_image::picker::Picker::halfblocks();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.intro_done = true;
+        app.done = Some(Ok("finished".into()));
+        let path = std::path::PathBuf::from("/music/Focus/01 - A.opus");
+        let mut track = Track::new(1, "v1".into(), "01 - A.opus".into(), path.clone());
+        /* Something that appears exactly once in the pane. The filename is no
+           good: it is also the track list's row and the `file` detail line, so
+           a search for it finds a row below the cover even when the words were
+           never moved out from under it. */
+        track.artist = "Unrepeatable".into();
+        app.tracks = vec![track];
+
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        // One frame to find out what the pane offered, before anything is held.
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let pane = app.art_area.expect("the pane offered no room for a cover");
+
+        /* Built at the size the pane actually offered, so the cover fills the
+           rows it reserved. A protocol encoded for some smaller area would sit
+           entirely above the words and the assertion below would pass whether
+           or not the rows were ever given up. */
+        let art = picker
+            .new_protocol(
+                image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+                    1024,
+                    1024,
+                    image::Rgb([200, 40, 40]),
+                )),
+                pane.as_size(),
+                ratatui_image::Resize::Fit(None),
+            )
+            .expect("halfblocks refused a plain square");
+        app.art = Some((path, pane, art));
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+
+        /* The red square, wherever it ended up. Halfblocks paints it as
+           foreground and background colour, so the cells it covers are the
+           ones carrying that red. */
+        let red = ratatui::style::Color::Rgb(200, 40, 40);
+        let painted: Vec<(u16, u16)> = (0..40)
+            .flat_map(|y| (0..120).map(move |x| (x, y)))
+            .filter(|(x, y)| buffer[(*x, *y)].fg == red || buffer[(*x, *y)].bg == red)
+            .collect();
+        assert!(!painted.is_empty(), "the cover was not drawn at all");
+
+        let left = painted.iter().map(|(x, _)| *x).min().unwrap();
+        let top = painted.iter().map(|(_, y)| *y).min().unwrap();
+        assert_eq!((left, top), (pane.x, pane.y), "the cover missed the rows reserved for it");
+        /* And the pane's own border is immediately to its left. This is the
+           assertion a shifted call site fails: the two helpers above can agree
+           perfectly while `draw_tracks` hands them a rectangle of its own. */
+        assert_eq!(
+            buffer[(left - 1, top)].symbol(),
+            "│",
+            "the cover is not sitting against the pane's border"
+        );
+        /* The words start below the cover. Searched inside the pane's own
+           columns: the track list to the left carries the same filename, and
+           a whole-row search finds that one every time. */
+        let name_row = (0..40).find(|y| {
+            (pane.x..120)
+                .map(|x| buffer[(x, *y)].symbol().to_string())
+                .collect::<String>()
+                .contains("Unrepeatable")
+        });
+        let lowest = painted.iter().map(|(_, y)| *y).max().unwrap();
+        assert!(
+            name_row.is_some_and(|row| row > lowest),
+            "the words were not pushed below the cover: artist on {name_row:?}, cover ends {lowest}"
+        );
+    }
+
+    /* A row with no file has no cover, and the row before it does not lend
+       one. Without the clear the picture simply stays where it is, so a
+       `pending` track wears its neighbour's sleeve — which is worse than an
+       empty pane, because the one job this pane has is saying which track you
+       are looking at. */
+    #[test]
+    fn a_track_with_no_file_shows_no_cover_at_all() {
+        let picker = ratatui_image::picker::Picker::halfblocks();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.intro_done = true;
+        app.done = Some(Ok("finished".into()));
+
+        let path = std::path::PathBuf::from("/music/Focus/01 - A.opus");
+        let downloaded = Track::new(1, "v1".into(), "01 - A.opus".into(), path.clone());
+        let mut pending = Track::new(2, "v2".into(), "02 - B.opus".into(), path.clone());
+        // What a track nothing has fetched yet looks like.
+        pending.path = None;
+        app.tracks = vec![downloaded, pending];
+
+        let red = ratatui::style::Color::Rgb(200, 40, 40);
+        let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+        let mut drawn = |app: &mut App| {
+            terminal.draw(|f| super::draw(f, app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            (0..40)
+                .flat_map(|y| (0..120).map(move |x| (x, y)))
+                .filter(|(x, y)| buffer[(*x, *y)].fg == red || buffer[(*x, *y)].bg == red)
+                .count()
+        };
+
+        drawn(&mut app);
+        let pane = app.art_area.expect("the pane offered no room for a cover");
+        let art = picker
+            .new_protocol(
+                image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+                    1024,
+                    1024,
+                    image::Rgb([200, 40, 40]),
+                )),
+                pane.as_size(),
+                ratatui_image::Resize::Fit(None),
+            )
+            .unwrap();
+        app.art = Some((path, pane, art));
+        assert!(drawn(&mut app) > 0, "the cover was not drawn on the track that has one");
+
+        // Down to the row with no file behind it.
+        app.cursor = 1;
+        assert_eq!(drawn(&mut app), 0, "the cover followed the cursor onto a track without one");
+        assert!(app.art.is_none(), "the stale cover is still held");
+    }
+
+    /* A cover is encoded for a given number of cells, and the pane changes
+       size with the terminal. Keyed on the file alone, a cover encoded for a
+       46-column pane stays on screen in a 40-column one: not the picture the
+       protocol was handed. This is the third shape this same bug has taken in
+       this feature, which is why it has a test of its own now. */
+    #[test]
+    fn a_resize_asks_for_a_cover_the_new_pane_fits() {
+        let picker = ratatui_image::picker::Picker::halfblocks();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.intro_done = true;
+        app.done = Some(Ok("finished".into()));
+        let path = std::path::PathBuf::from("/music/Focus/01 - A.opus");
+        app.tracks = vec![Track::new(1, "v1".into(), "01 - A.opus".into(), path.clone())];
+
+        let draw_at = |app: &mut App, width: u16| {
+            let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
+            terminal.draw(|f| super::draw(f, app)).unwrap();
+        };
+
+        draw_at(&mut app, 120);
+        let wide = app.art_area.expect("no room at 120 columns");
+        let art = picker
+            .new_protocol(
+                image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+                    512,
+                    512,
+                    image::Rgb([200, 40, 40]),
+                )),
+                wide.as_size(),
+                ratatui_image::Resize::Fit(None),
+            )
+            .unwrap();
+        app.art = Some((path, wide, art));
+
+        // Still held at the size it was made for.
+        draw_at(&mut app, 120);
+        assert!(app.art.is_some(), "it threw away a cover that still fits");
+
+        /* Narrower, so the pane is a different shape. There is no picker on a
+           test `App`, so the re-read finds nothing and the held cover is
+           dropped — which is the observable half of "it asked again". */
+        draw_at(&mut app, 100);
+        let narrow = app.art_area.expect("no room at 100 columns");
+        assert_ne!(narrow, wide, "the pane did not change size, so this proves nothing");
+        assert!(app.art.is_none(), "it kept a cover encoded for the old pane");
+    }
+
+    /* Exactly what the encoder transmits, so nothing is resampled twice.
+       `Resize::resize` normalises to `cells × font_size` whatever it is given:
+       ask for more and it is thrown away, ask for less and the terminal
+       upscales the difference, which is what turned a photograph into
+       squares. */
+    #[test]
+    fn a_cover_is_asked_for_at_exactly_the_size_the_encoder_sends() {
+        let font = ratatui_image::FontSize::new(16, 40);
+        let area = Rect { x: 0, y: 0, width: 40, height: 20 };
+        let (w, h) = super::cover_pixels(font, area);
+        assert_eq!((w, h), (40 * 16, 20 * 40));
+
+        /* Near square in pixels, because the pane is half as many rows as
+           columns precisely to cancel the cell's own proportions. */
+        let ratio = f64::from(w) / f64::from(h);
+        assert!((0.8..1.25).contains(&ratio), "the request is {ratio:.2}:1, not near square");
+
+        // Capped, or a wide pane asks for megabytes of raw RGB per track.
+        let huge = super::cover_pixels(font, Rect { x: 0, y: 0, width: 400, height: 200 });
+        assert_eq!(huge, (super::COVER_PIXELS, super::COVER_PIXELS));
+        // And never zero, which ffmpeg would refuse.
+        let none = super::cover_pixels(ratatui_image::FontSize::new(0, 0), area);
+        assert_eq!(none, (1, 1));
     }
 
     /* A theme changes colour and nothing else. Every glyph in every cell is
@@ -3599,5 +3981,6 @@ mod tests {
         assert!(top.contains("earworm  ·"), "{top:?}");
     }
 }
+
 
 

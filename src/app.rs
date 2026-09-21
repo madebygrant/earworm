@@ -6,6 +6,8 @@ use std::sync::mpsc::Sender;
 use ratatui::style::Color;
 
 use crate::theme::{Palette, Themes};
+use ratatui_image::picker::Picker;
+use ratatui_image::protocol::Protocol;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Status {
@@ -511,6 +513,10 @@ pub enum Msg {
     /// Following would drag it off again at the next progress message, so it
     /// goes off here rather than at the keypress that has no run behind it.
     Focus(usize),
+    /// The art inside the files has changed while their paths have not. The
+    /// detail pane keys its decoded cover on the path, so nothing else on
+    /// this list would tell it the picture it is holding is out of date.
+    Artwork,
     /// Nothing to report and nothing to look at, so close the UI outright.
     Quit,
 }
@@ -764,6 +770,21 @@ pub struct App {
     pub theme_name: String,
     /// Every palette `^t` can reach: the built-ins plus any `[themes.*]`.
     pub themes: Themes,
+    /* How this terminal draws pictures, answered once at startup by the
+       protocol's own handshake. `None` when the query found nothing worth
+       using, which is also what switches the pane's cover off entirely. */
+    pub picker: Option<Picker>,
+    /* SPIKE: one cover, encoded on the UI thread the first frame the cursor
+       rests on a new track. That is a ~60ms hitch in the render loop and the
+       architecture forbids it; it is here only so the picture can be looked at
+       before the thread and the cache that belong around it are rebuilt.
+       Keyed on the area as well as the file, because the encode is for a
+       given number of cells and the pane changes size with the terminal. */
+    pub art: Option<(PathBuf, ratatui::layout::Rect, Protocol)>,
+    /* Where a cover would go, published by the draw because only the layout
+       knows: the same bargain `viewport` makes with `page`. `None` when the
+       pane has no room for one. */
+    pub art_area: Option<ratatui::layout::Rect>,
     /// Where `^t` writes the theme it lands on. Read off the config in `main`
     /// before the worker takes it, like `format`; `None` under --no-config,
     /// which asked for the file to stay out of the run.
@@ -876,6 +897,9 @@ impl App {
             theme: Palette::default(),
             theme_name: crate::config::DEFAULT_THEME.to_string(),
             themes: Themes::default(),
+            picker: None,
+            art: None,
+            art_area: None,
             config_file: None,
             theme_overridden: false,
             format: crate::config::DEFAULT_FORMAT.to_string(),
@@ -999,6 +1023,7 @@ impl App {
                     t.year = year;
                 }
             }
+            Msg::Artwork => self.art = None,
             Msg::Path { index, path } => {
                 if let Some(t) = self.track_mut(index) {
                     t.path = Some(path);
@@ -2054,6 +2079,35 @@ mod tests {
     fn bare() -> App {
         let (tx, _rx) = std::sync::mpsc::channel();
         App::new(tx, String::new())
+    }
+
+    /* The cover is decoded once and held against the path it came from, so a
+       rewrite of that same file is invisible to the pane: it keeps drawing the
+       picture it already has. `c` and the restore row both change art behind a
+       path that does not move, and this message is the only thing that tells
+       the pane so. */
+    #[test]
+    fn changed_artwork_drops_the_cover_the_pane_is_holding() {
+        let picker = ratatui_image::picker::Picker::halfblocks();
+        let protocol = picker
+            .new_protocol(
+                image::DynamicImage::ImageRgb8(image::RgbImage::new(8, 8)),
+                ratatui::layout::Size::new(4, 2),
+                ratatui_image::Resize::Fit(None),
+            )
+            .expect("the halfblocks encoder refused a plain image");
+        let mut app = bare();
+        app.art = Some((
+            PathBuf::from("/music/Focus/01 - A.opus"),
+            ratatui::layout::Rect::new(0, 0, 4, 2),
+            protocol,
+        ));
+
+        app.apply(Msg::Artwork);
+        assert!(
+            app.art.is_none(),
+            "the pane kept a cover that had been replaced"
+        );
     }
 
     /* A path of its own per call: the harness runs these in parallel, and two

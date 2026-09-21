@@ -2329,6 +2329,10 @@ enum Pick {
     Url(String),
     Keep,
     OwnFile,
+    /// Take the folder image away and give every track back the art its own
+    /// lookup finds, which is the only way out of a `c` that has already
+    /// stamped one picture across the whole folder.
+    Restore,
 }
 
 fn cover_options(found: &[lookup::Artwork], current: Option<String>) -> Vec<(String, Pick)> {
@@ -2336,9 +2340,23 @@ fn cover_options(found: &[lookup::Artwork], current: Option<String>) -> Vec<(Str
         .iter()
         .map(|a| (a.label.clone(), Pick::Url(a.url.clone())))
         .collect();
+    let removes = current.is_some();
     if let Some(desc) = current {
         rows.push((format!("keep the current cover  {desc}"), Pick::Keep));
     }
+    /* Beside `keep` because both rows are about what the folder already has,
+       where every other row puts a new picture on it. The label names the
+       removal only when there is a file to remove: a row offering to delete
+       something that is not there reads as a row that does not know what it
+       is looking at. */
+    rows.push((
+        if removes {
+            "remove the folder cover  ·  restore each track's own art".to_string()
+        } else {
+            "restore each track's own art".to_string()
+        },
+        Pick::Restore,
+    ));
     rows.push(("use my own file...".into(), Pick::OwnFile));
     rows
 }
@@ -2582,6 +2600,7 @@ fn cover(
             lookup::fetch(url).context("could not download that cover")?
         }
         Pick::Keep => return cancelled(tx),
+        Pick::Restore => return restore_art(tx, tracks, asker, cancel, &folder, apple),
         Pick::OwnFile => {
             let Some(typed) = asker.input("Image file", "") else {
                 return cancelled(tx);
@@ -2621,8 +2640,130 @@ fn cover(
             let _ = tx.send(Msg::Log(format!("{}: {err}", path.display())));
         }
     }
+    /* Every file's art has just changed behind a path that has not, and the
+       detail pane keys its decoded cover on the path. Without this the pane
+       goes on showing the sleeve that was replaced. */
+    let _ = tx.send(Msg::Artwork);
     let _ = tx.send(Msg::Flash(format!("cover set from {label}")));
     Ok(())
+}
+
+/* Takes the one image off the folder and gives every track back the art its
+   own lookup finds.
+
+   The counterpart to the rest of that menu, which puts a single picture on
+   every file in the folder: right for an album, wrong for a playlist, where
+   the tracks come from a dozen different records and the shared sleeve is the
+   only thing hiding it. Nothing on disk can put that back, because the embed
+   overwrote each track's own art rather than sitting beside it, so the art is
+   fetched again per track.
+
+   One track's failure is logged and counted rather than stopping the rest,
+   and the flash reports both halves: a pass that gave eleven of twelve tracks
+   their sleeve back and said nothing about the twelfth is the half-report
+   this file has already paid for once. */
+fn restore_art(
+    tx: &Sender<Msg>,
+    tracks: &[Track],
+    asker: &Asker,
+    cancel: &AtomicBool,
+    folder: &Path,
+    apple: bool,
+) -> Result<()> {
+    let had = has_cover(folder);
+    /* `is_file` and not merely a recorded path. A `Gone` track keeps the path
+       of a file that is not there, and so does anything moved outside
+       earworm: without this each one costs a lookup before failing at the
+       write, and lands in the same count as a track whose art could not be
+       found. Two unrelated failures sharing one number is the reason the
+       conversion halves report separately. */
+    let targets: Vec<(&Track, &Path)> = tracks
+        .iter()
+        .filter(|t| t.listed)
+        .filter_map(|t| t.path.as_deref().filter(|p| p.is_file()).map(|p| (t, p)))
+        .collect();
+
+    /* Asked because every one of those files is rewritten with art nobody has
+       seen yet, and there is no undo for a picture: `u` holds tag values. The
+       rest of this menu at least shows you the image you are choosing. Only
+       when there are files to rewrite, since with none the row does exactly
+       what its label says and nothing is at risk. */
+    if !targets.is_empty() {
+        let count = targets.len();
+        let word = if count == 1 { "track" } else { "tracks" };
+        let name = folder.file_name().unwrap_or_default().to_string_lossy();
+        let Some(choice) = asker.choose_noted(
+            &format!("Restore art on {count} {word} in {name}?"),
+            "each track is looked up again and gets its own album art  ·  whatever art they carry now is replaced, and this cannot be undone",
+            /* "change nothing" rather than "keep their art": this row has two
+               halves and refusing it abandons both, so an option naming only
+               the art would leave the reader expecting the folder image to go
+               anyway. */
+            vec!["change nothing".into(), format!("restore {count} {word}")],
+        ) else {
+            return cancelled(tx);
+        };
+        if choice == 0 {
+            let _ = tx.send(Msg::Flash("nothing changed".into()));
+            return Ok(());
+        }
+    }
+
+    for name in COVER_NAMES {
+        let _ = std::fs::remove_file(folder.join(name));
+    }
+
+    let (mut given, mut missed) = (0usize, 0usize);
+    for (done, (track, path)) in targets.iter().enumerate() {
+        if cancel.load(Ordering::SeqCst) {
+            break;
+        }
+        let _ = tx.send(Msg::Stage(format!(
+            "restoring art  {}/{}",
+            done + 1,
+            targets.len()
+        )));
+        let Some(image) = own_art(track, apple) else {
+            missed += 1;
+            let _ = tx.send(Msg::Log(format!(
+                "cover: track {}: no artwork found for {}",
+                track.index, track.name
+            )));
+            continue;
+        };
+        match tag::set_cover(path, &image) {
+            Ok(()) => given += 1,
+            Err(err) => {
+                missed += 1;
+                let _ = tx.send(Msg::Log(format!("cover: track {}: {err}", track.index)));
+            }
+        }
+    }
+
+    let _ = tx.send(Msg::Artwork);
+    // Every arm claims the removal only when there was something to remove.
+    let gone = if had { "folder cover removed  ·  " } else { "" };
+    let _ = tx.send(Msg::Flash(match (given, missed) {
+        (0, 0) if had => "folder cover removed".to_string(),
+        (0, 0) => "nothing here to restore".to_string(),
+        (_, 0) => format!("{gone}{given} tracks back on their own art"),
+        _ => format!("{gone}{given} restored, {missed} unchanged  ·  l has why"),
+    }));
+    Ok(())
+}
+
+/// The first candidate that actually downloads, in the order the menu offers
+/// them: picking by some other rule here would be a second opinion about
+/// which art is best from the one list. `find_map` rather than the first URL,
+/// so a Cover Art Archive release group with no front image falls through to
+/// Deezer instead of costing the track its sleeve.
+///
+/// Uncapped on purpose. `COVER_MAX` is Deezer's `cover_xl`, which is the
+/// largest thing this list can return, so there is nothing here to shrink.
+fn own_art(track: &Track, apple: bool) -> Option<Vec<u8>> {
+    lookup::artwork(&track.artist, &track.title, track.mbid.as_deref(), apple)
+        .iter()
+        .find_map(|found| lookup::fetch(&found.url))
 }
 
 /// Only what earworm is confident about: a `kept` or `weak` track still
@@ -4917,27 +5058,238 @@ pub mod tests {
     fn every_row_maps_back_to_its_own_source() {
         let found = [art("Deezer  A", "http://a"), art("Deezer  B", "http://b")];
         let rows = cover_options(&found, Some("(cover.jpg  500x500)".into()));
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.len(), 5);
         assert_eq!(rows[0].1, Pick::Url("http://a".into()));
         assert_eq!(rows[1].1, Pick::Url("http://b".into()));
         assert_eq!(rows[2].1, Pick::Keep);
-        assert_eq!(rows[3].1, Pick::OwnFile);
+        assert_eq!(rows[3].1, Pick::Restore);
+        assert_eq!(rows[4].1, Pick::OwnFile);
     }
 
-    /// The empty case is the one that breaks silently: index 0 has to be the
-    /// own-file row, not a missing artwork entry.
+    /// The empty case is the one that breaks silently: with nothing found,
+    /// every row is one of the fixed ones, and an index still expecting a
+    /// leading artwork row resolves the pick to the wrong action entirely.
     #[test]
-    fn own_file_is_row_zero_when_there_is_nothing_else() {
+    fn nothing_found_leaves_only_the_rows_that_need_no_artwork() {
         let rows = cover_options(&[], None);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].1, Pick::OwnFile);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].1, Pick::Restore);
+        assert_eq!(rows[1].1, Pick::OwnFile);
     }
 
     #[test]
     fn keep_row_is_absent_without_a_current_cover() {
         let rows = cover_options(&[art("Deezer  A", "http://a")], None);
         assert!(!rows.iter().any(|(_, pick)| *pick == Pick::Keep));
-        assert_eq!(rows[1].1, Pick::OwnFile);
+        assert_eq!(rows.last().map(|(_, pick)| pick), Some(&Pick::OwnFile));
+    }
+
+    /* The row deletes a file, so its label is a claim about the folder. With
+       no image there it would be offering to remove one that is not there,
+       which reads as a menu that has not looked. */
+    #[test]
+    fn the_restore_row_names_the_folder_image_only_when_there_is_one() {
+        let label = |current| {
+            cover_options(&[], current)
+                .into_iter()
+                .find(|(_, pick)| *pick == Pick::Restore)
+                .map(|(label, _)| label)
+                .expect("no restore row was offered")
+        };
+        assert!(
+            label(Some("(cover.jpg  500x500)".into())).starts_with("remove the folder cover"),
+            "the row did not say it would remove the image that is there"
+        );
+        let bare = label(None);
+        assert!(
+            !bare.contains("remove"),
+            "the row offered to remove a folder cover that does not exist: {bare}"
+        );
+        assert!(bare.contains("own art"), "the row stopped saying what it does");
+    }
+
+    /* Both names, because `tag::apply` writes a JPEG and `c` can leave a PNG:
+       taking only one away leaves the folder still carrying a shared sleeve,
+       which is the entire thing this row exists to remove. No tracks, so
+       nothing here reaches the network. */
+    #[test]
+    fn restoring_takes_every_folder_image_away() {
+        let dir = scratch("restore");
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in COVER_NAMES {
+            std::fs::write(dir.join(name), b"not really an image").unwrap();
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let asker = Asker { tx: tx.clone(), enabled: false };
+        restore_art(&tx, &[], &asker, &AtomicBool::new(false), &dir, false).unwrap();
+
+        for name in COVER_NAMES {
+            assert!(!dir.join(name).exists(), "{name} survived the restore");
+        }
+        let said: Vec<String> = rx
+            .try_iter()
+            .filter_map(|msg| match msg {
+                Msg::Flash(text) => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            said.iter().any(|text| text.contains("folder cover removed")),
+            "nothing said the cover had gone: {said:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /* `cover_options` offering the row and `restore_art` doing the work prove
+       nothing about the line between them, which is free to call anything at
+       all: swapping it for `cancelled` leaves the folder image in place and
+       every other test still green. The same lesson `scan_template` taught,
+       so this drives the real menu and answers it.
+
+       No network: a track with no artist, title or MusicBrainz id gives
+       `lookup::artwork` nothing to search with, so it returns an empty list
+       without a request, both for the menu and for the track itself. */
+    #[test]
+    fn choosing_the_restore_row_is_wired_to_the_restore() {
+        let dir = scratch("restore-wired");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("cover.jpg"), b"a shared sleeve").unwrap();
+        let audio = dir.join("01 - A.opus");
+        std::fs::write(&audio, b"audio").unwrap();
+        let mut track = Track::new(1, "v1".into(), "01 - A.opus".into(), audio);
+        track.listed = true;
+        let mut tracks = vec![track];
+
+        /* Asked of the same function the menu is built from, so reordering
+           the rows moves the answer with them rather than silently picking
+           whichever row slid into that position. */
+        let at = cover_options(&[], current_cover(&dir))
+            .iter()
+            .position(|(_, pick)| *pick == Pick::Restore)
+            .expect("the menu offered no restore row");
+
+        let (tx, rx) = mpsc::channel();
+        let asked = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let asker = Asker { tx: tx.clone(), enabled: true };
+                cover(&tx, &mut tracks, &asker, &AtomicBool::new(false), 1, false)
+            });
+            let mut asked = 0;
+            /* Bounded, or a menu that stopped asking waits here for good, and
+               stopped at `Artwork`, which is the last thing the restore sends
+               before its flash: waiting for the channel to close instead
+               means waiting out the timeout on every green run. */
+            while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
+                match msg {
+                    Msg::Ask(_, reply) => {
+                        // The row itself, then the confirmation behind it.
+                        let answer = if asked == 0 { at } else { 1 };
+                        reply.send(Reply::Choice(answer)).unwrap();
+                        asked += 1;
+                    }
+                    Msg::Artwork => break,
+                    _ => {}
+                }
+            }
+            worker.join().unwrap().unwrap();
+            asked
+        });
+
+        assert_eq!(asked, 2, "the row did not ask before rewriting the files");
+        assert!(
+            !dir.join("cover.jpg").exists(),
+            "the row was picked and the folder cover stayed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /* The other answer, and the one that has to leave the folder exactly as it
+       was: this row has two halves and refusing it must abandon both. Dropping
+       the early return still passes the test above, which answers "restore",
+       so the refusal needs its own. */
+    #[test]
+    fn refusing_the_confirmation_changes_nothing_at_all() {
+        let dir = scratch("restore-refused");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("cover.jpg"), b"a shared sleeve").unwrap();
+        let audio = dir.join("01 - A.opus");
+        std::fs::write(&audio, b"audio").unwrap();
+        let mut track = Track::new(1, "v1".into(), "01 - A.opus".into(), audio.clone());
+        track.listed = true;
+        let tracks = vec![track];
+
+        let (tx, rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let asker = Asker { tx: tx.clone(), enabled: true };
+                restore_art(&tx, &tracks, &asker, &AtomicBool::new(false), &dir, false)
+            });
+            while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
+                match msg {
+                    Msg::Ask(_, reply) => reply.send(Reply::Choice(0)).unwrap(),
+                    Msg::Flash(_) => break,
+                    _ => {}
+                }
+            }
+            worker.join().unwrap().unwrap();
+        });
+
+        assert!(
+            dir.join("cover.jpg").is_file(),
+            "refusing still took the folder cover away"
+        );
+        assert_eq!(
+            std::fs::read(&audio).unwrap(),
+            b"audio",
+            "refusing still rewrote a track"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /* A recorded path is not a file on disk. A `Gone` track keeps the path of
+       one that has been deleted, and without the `is_file` filter each of
+       those costs a lookup and a failed write, then lands in the same count
+       as a track whose art could not be found.
+
+       The disabled asker is what makes that visible here: it refuses every
+       question, so a folder that wrongly believes it has a file to rewrite
+       puts a confirmation in the way, gets refused, and keeps its cover. With
+       the filter there is nothing to confirm and the cover goes. */
+    #[test]
+    fn a_track_whose_file_has_gone_is_never_looked_up() {
+        let dir = scratch("restore-gone");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("cover.jpg"), b"a shared sleeve").unwrap();
+        let mut track = Track::new(1, "v1".into(), "01 - A.opus".into(), dir.join("01 - A.opus"));
+        track.listed = true;
+
+        let (tx, _rx) = mpsc::channel();
+        let asker = Asker { tx: tx.clone(), enabled: false };
+        restore_art(&tx, &[track], &asker, &AtomicBool::new(false), &dir, false).unwrap();
+
+        assert!(
+            !dir.join("cover.jpg").exists(),
+            "a track with no file behind it was treated as one worth rewriting"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /* The files change behind paths that do not, so the pane has no other way
+       to learn its decoded cover is stale. Without this it goes on showing the
+       sleeve that was just replaced, which is the one thing that would make
+       the whole row look as though it had done nothing. */
+    #[test]
+    fn a_restore_tells_the_pane_its_cover_is_out_of_date() {
+        let dir = scratch("restore-says");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let asker = Asker { tx: tx.clone(), enabled: false };
+        restore_art(&tx, &[], &asker, &AtomicBool::new(false), &dir, false).unwrap();
+        assert!(
+            rx.try_iter().any(|msg| matches!(msg, Msg::Artwork)),
+            "the pane was never told the art had changed"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 

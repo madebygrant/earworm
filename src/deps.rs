@@ -121,6 +121,11 @@ pub struct Facts<'a> {
     /// badly. A `[colors]` table makes the name "custom".
     pub theme: &'a str,
     pub theme_warnings: &'a [String],
+    /* How this terminal would draw a cover, as the protocol handshake
+       answered it. Gathered by the caller like everything else here, because
+       the query needs a real terminal and `--check` is meant to work without
+       one. */
+    pub graphics: &'a str,
     /// Whether tracks already on disk follow `format` at the next sync.
     pub convert: bool,
     /* Files under --dir that are in some other format, and the folders they
@@ -195,6 +200,11 @@ pub fn report(facts: &Facts) -> (String, bool) {
         "format",
         &format!("{} · writes .{}", facts.format, facts.extension),
     ));
+    /* The one row that answers "why is there no cover art". Everything about
+       it is invisible otherwise: whether the terminal answered the handshake,
+       and which of the four ways of drawing a picture it settled on. Never a
+       cross, because no protocol is a terminal's choice and not a fault. */
+    out.push_str(&row(true, "graphics", facts.graphics));
     /* Named here because `^t` writes it back to the config, so "which theme
        am I on" is a question with an answer that changes. A colour that
        measures badly is said here too: the TUI says it once at startup and
@@ -282,6 +292,7 @@ mod tests {
             extension: "opus",
             theme: "warm",
             theme_warnings: &[],
+            graphics: "halfblocks",
             dir,
             playlists: Some(7),
             apple: true,

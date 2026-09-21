@@ -64,8 +64,22 @@ fn main() -> Result<()> {
     let worker_cancel = Arc::clone(&cancel);
     std::thread::spawn(move || worker::run(cfg, tx, worker_cancel, cmd_rx));
 
+    /* Before ratatui takes the terminal, because the query writes an escape
+       to stdout and reads the answer back off stdin, and crossterm's event
+       loop would eat that answer. The protocol's own handshake rather than a
+       guess at `TERM`: Ghostty reports `xterm-256color` and speaks kitty
+       anyway, so env-sniffing gets this exactly backwards.
+
+       Only when the terminal can render 24-bit colour, which is not about the
+       picture. Kitty carries the image id in each placeholder cell's
+       foreground, and `recolour` rewrites every foreground it finds on a
+       terminal that cannot do truecolor — that would quantise the id into
+       some other number and address a picture nobody transmitted. */
+    let picker = graphics_picker();
+
     let mut terminal = ratatui::init();
     let mut app = App::new(cmd_tx, settings);
+    app.picker = picker;
     // The worker owns the config by now, so this is read across before it goes.
     app.format = format;
     app.theme = theme;
@@ -115,6 +129,67 @@ fn main() -> Result<()> {
    a bug report, so it answers both: what is installed, what earworm read, and
    what this run would do. Exits non-zero when a tool it cannot work without
    is missing, so a script can act on it. */
+/* How this terminal would draw a cover, or `None` for not at all.
+
+   The protocol's own handshake rather than a guess at `TERM`: Ghostty reports
+   `xterm-256color` and speaks kitty anyway, so env-sniffing gets this exactly
+   backwards. It writes an escape to stdout and reads the answer off stdin,
+   so it has to run before ratatui takes the terminal — crossterm's event loop
+   would eat the reply — and it must not run at all without one, or it writes
+   escapes into somebody's pipe.
+
+   Only when the terminal can render 24-bit colour, which is not about the
+   picture: kitty carries the image id in each placeholder cell's foreground,
+   and `recolour` rewrites every foreground it finds on a terminal that cannot
+   do truecolor. That would quantise the id into some other number and address
+   a picture nobody transmitted.
+
+   Costs up to two seconds on a terminal that never answers, which lands in
+   front of the first frame. Accepted: the alternative is guessing, and the
+   terminals that do not answer are the ones that would have nothing to draw. */
+/* Never inflate the cell size the terminal reported. The Kitty transmit
+   carries no placement size, so the terminal spans the image over cells by
+   its own pixel cell size: an image encoded at twice the reported size spans
+   twice the cells, the placeholders cover a quarter of it, and the cover
+   shows its top-left corner. Seen on Ghostty, whose `CSI 16 t` answer is
+   already in real pixels. */
+fn graphics_picker() -> Option<ratatui_image::picker::Picker> {
+    if theme::depth() != theme::Depth::Full
+        || !std::io::stdout().is_terminal()
+        || !std::io::stdin().is_terminal()
+    {
+        return None;
+    }
+    ratatui_image::picker::Picker::from_query_stdio().ok()
+}
+
+/* What the `--check` row says, from the same decision the pane makes.
+
+   The cell size is on the row because it is the number everything about a
+   cover's sharpness follows from, and it is the one number nobody can see: a
+   cover is encoded at exactly `cells × this`, so if the art looks like
+   squares, this row is where the answer is. */
+fn graphics_row(picker: Option<&ratatui_image::picker::Picker>) -> String {
+    use ratatui_image::picker::ProtocolType;
+    let Some(picker) = picker else {
+        return if theme::depth() != theme::Depth::Full {
+            "off · needs truecolor · set COLORTERM=truecolor".into()
+        } else {
+            "off · not a terminal".into()
+        };
+    };
+    let font = picker.font_size();
+    let cell = format!("{}x{} per cell", font.width, font.height);
+    match picker.protocol_type() {
+        ProtocolType::Kitty => format!("kitty · {cell} · cover art in the detail pane"),
+        ProtocolType::Iterm2 => format!("iterm2 · {cell} · cover art in the detail pane"),
+        ProtocolType::Sixel => format!("sixel · {cell} · cover art in the detail pane"),
+        ProtocolType::Halfblocks => {
+            format!("halfblocks · {cell} · no graphics protocol answered, covers will be coarse")
+        }
+    }
+}
+
 fn check(cfg: &Config) -> Result<()> {
     let tools = deps::probe_all();
     let config = cfg.config_file.clone();
@@ -127,6 +202,7 @@ fn check(cfg: &Config) -> Result<()> {
     } else {
         cfg.theme_name.clone()
     };
+    let graphics = graphics_row(graphics_picker().as_ref());
     // Walked once and read twice: the playlist count and the format tally.
     let shelves = if dir.is_dir() { worker::library(&dir) } else { Vec::new() };
     let (text, ready) = deps::report(&deps::Facts {
@@ -138,6 +214,7 @@ fn check(cfg: &Config) -> Result<()> {
         extension: config::extension(&cfg.format),
         theme: &theme_row,
         theme_warnings: &cfg.theme_warnings,
+        graphics: &graphics,
         dir: &dir,
         playlists: dir.is_dir().then_some(shelves.len()),
         convert: cfg.convert,

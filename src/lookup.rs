@@ -20,6 +20,7 @@ const ACOUSTID_MIN_SCORE: f64 = 0.8;
 // AcoustID asks for <=3 requests/second.
 const ACOUSTID_DELAY: Duration = Duration::from_millis(340);
 const DEEZER_DELAY: Duration = Duration::from_millis(200);
+const IMAGE_DELAY: Duration = Duration::from_millis(250);
 const ITUNES_DELAY: Duration = Duration::from_millis(200);
 
 /* What these services ask for is a gap between requests, and a request that
@@ -60,6 +61,10 @@ impl Limiter {
 
 static ACOUSTID_RATE: Limiter = Limiter::new(ACOUSTID_DELAY);
 static DEEZER_RATE: Limiter = Limiter::new(DEEZER_DELAY);
+/* Artwork comes off a CDN rather than an API, so this is politeness and not a
+   published limit. A download takes longer than the gap on any connection
+   that can carry one, so in practice it costs a restore nothing. */
+static IMAGE_RATE: Limiter = Limiter::new(IMAGE_DELAY);
 static ITUNES_RATE: Limiter = Limiter::new(ITUNES_DELAY);
 
 // ureq has no timeout by default, and a stalled lookup would hang the worker
@@ -100,7 +105,15 @@ pub fn get_text(url: &str) -> Option<String> {
     resp.body_mut().read_to_string().ok()
 }
 
+/* Every caller of this is downloading artwork, which is why the pacing sits
+   here rather than on one of them. It used to sit on none: the metadata
+   queries were paced and the image that followed was not, which cost nothing
+   while every caller fetched one image per keypress. `tag_tracks` fetches one
+   per track and `restore_art` fetches one per track on demand, so a folder of
+   forty arrived as forty back-to-back requests, and the Cover Art Archive URL
+   redirects to archive.org, which is the host in this set that minds most. */
 fn get_bytes(url: &str) -> Option<Vec<u8>> {
+    IMAGE_RATE.wait();
     let mut resp = agent().get(url).call().ok()?;
     resp.body_mut()
         .with_config()

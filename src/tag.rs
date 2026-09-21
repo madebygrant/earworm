@@ -192,6 +192,64 @@ pub fn image_extension(data: &[u8]) -> Option<&'static str> {
    audio it is attached to. */
 pub const COVER_MAX: u16 = 1000;
 
+/* A decode and a downscale with no encode on the end of it, measured at about
+   40ms on a real track. The bound is for a machine under load rather than an
+   expectation, and giving up costs nothing: the pane draws the words it
+   already has and the row carries no picture. */
+const COVER_READ: Duration = Duration::from_secs(3);
+
+/* The embedded cover as raw RGB, at exactly the pixels the pane covers.
+   One ffmpeg call rather than a lofty read and an image-crate decode: ffmpeg
+   already knows how to find the picture in any container earworm writes, it is
+   a required dependency, and this way no codec feature has to be switched on
+   in `image` — the pixels go straight into an `RgbImage`.
+
+   Cropped rather than padded, and asked for in the pane's own proportions
+   rather than as a square: a cell is about twice as tall as it is wide, so a
+   square request would be letterboxed back down by the resize and the pane
+   would carry fewer pixels than it has room for. */
+pub fn cover_rgb(path: &Path, width: u32, height: u32) -> Option<Vec<u8>> {
+    if width == 0 || height == 0 {
+        return None;
+    }
+    /* Through a file, like `shrink`: `run_bounded` polls `try_wait` and drains
+       nothing, so a pipe that fills its buffer hangs ffmpeg until the deadline
+       kills it. */
+    let dir = std::env::temp_dir().join(format!(
+        "earworm-art-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).ok()?;
+    let out = dir.join("art.raw");
+    let _ = std::fs::remove_file(&out);
+
+    let scale = format!(
+        "scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,crop={width}:{height}"
+    );
+    let ran = lookup::run_bounded(
+        std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-i"])
+            .arg(path)
+            // The audio stream is not wanted and is the expensive half.
+            .args(["-an", "-vf", &scale])
+            .args(["-f", "rawvideo", "-pix_fmt", "rgb24"])
+            .arg(&out)
+            // Same reason as `shrink`: an inherited stdin lets ffmpeg eat the
+            // keys meant for the UI.
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+        COVER_READ,
+    );
+    let raw = ran
+        .filter(|o| o.status.success())
+        .and_then(|_| std::fs::read(&out).ok())
+        .filter(|raw| raw.len() as u32 == width * height * 3);
+    let _ = std::fs::remove_dir_all(&dir);
+    raw
+}
+
 /// The embedded front cover, for carrying art across a rewrite or measuring
 /// what is already there. `None` when the file has no picture.
 pub fn read_cover(path: &Path) -> Option<Vec<u8>> {
