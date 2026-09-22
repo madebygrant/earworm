@@ -26,8 +26,8 @@ in **Themes and colour depth**.
   pick gate between the scan and the download; `open_shelf` builds the same
   rows from the manifest and the tags on disk, with no network
 - `ytdlp.rs` — `scan` (flat-playlist listing), `run` (the real download)
-- `manifest.rs` — the `.earworm` sidecar: `#url` and `#synced` headers plus
-  video id to current filename
+- `manifest.rs` — the `.earworm` sidecar: the `#url`, `#synced`, `#name`,
+  `#m3u8`, `#kind` and `#hidden` headers, plus video id to current filename
 - `tag.rs` — lofty reads and writes, `identify` decides a track's status
 - `lookup.rs` — AcoustID, Deezer, Cover Art Archive, all through one `ureq`
   agent
@@ -38,6 +38,11 @@ in **Themes and colour depth**.
   every frame) and the 256-colour quantiser
 
 ## Things that will bite you
+
+Rules, each with the reason it exists, because the reason is what stops the
+next person undoing it. The measurements and the trade-offs those reasons rest
+on are in docs/history.md, which is read when somebody doubts a rule rather
+than at the start of every session.
 
 ### Threads and messages
 
@@ -186,10 +191,8 @@ in **Themes and colour depth**.
   macOS stores these names composed and APFS ignores the difference on lookup,
   so the bug is invisible here: copying the folder to an iPhone hands the
   filenames over decomposed, iOS compares bytes, and the playlist names
-  nothing. Confirmed in VLC on iOS with one Korean track listed four ways in
-  one file: decomposed plays, composed does not, and percent-encoding changes
-  neither, which is what rules out the `.m3u8` URI rules as the cause. The
-  second half is what makes the first safe. `mark_departed` matches stems by
+  nothing. Measured in VLC on iOS; docs/history.md has the four spellings and
+  what they ruled out. The second half is what makes the first safe. `mark_departed` matches stems by
   string equality, so decomposed entries against composed filenames miss every
   Hangul or accented name while the ASCII ones still match, which is exactly
   enough to clear the "believe none of it" guard and call the rest `Gone`: the
@@ -197,11 +200,9 @@ in **Themes and colour depth**.
   one place it is closed. `repoint_playlist` matches composed for the same
   reason and because every playlist written before this holds composed entries.
   Relative names alone do not make a folder portable; this is the other half of
-  that promise. What it costs is the opposite case: on a byte-exact filesystem
-  holding composed files, Linux or Android, decomposed is now the wrong form and
-  the entries name nothing there. That was chosen rather than overlooked, on one
-  user who is on Apple hardware, and it is the point at which this becomes a
-  setting rather than a constant. `Playback::on` composes both sides too, since
+  that promise. It costs the opposite case, Linux or Android, which
+  docs/history.md records as a choice rather than an oversight and as the
+  point where this becomes a setting. `Playback::on` composes both sides too, since
   one path comes back out of cliamp and the other came off disk.
 - **`mark_departed` reads the folder's `.m3u8` to decide what is still in the
   playlist,** because offline there is no listing to ask and that file is the
@@ -247,6 +248,29 @@ in **Themes and colour depth**.
   retry time the tracks that worked are `ok` or `manual`, so keying on
   `Status::Have` would leave them out, and yt-dlp remuxing them fails the whole
   run.
+- **`run_with` takes the binary, like `scan_with`.** Asserting on a helper
+  that built the download's arguments would leave the call site free to pass
+  anything, which is exactly how the scan's format came to be right in the
+  helper and hardcoded at the call.
+- **The scan's `--print` carries duration and the playlist id, and the stubs
+  have to agree.** `splitn(6)` with the filename last, because that is the one
+  field that could hold a tab. Three stub yt-dlps print that line and all
+  three break together when the format changes, which is the point: a stub
+  still printing five fields would make every track look nameless rather than
+  failing where the format is.
+- **`is_file`, never `exists`, for a track's path.** A directory sitting where
+  the audio should go satisfies `exists`, and `scan` then calls the track
+  downloaded, so nothing fetches it or marks it failed.
+- **`ytdlp::run` can run twice in one process.** Its scratch directory carries
+  a counter as well as the pid. The `Download` guard removes the directory on
+  drop and would take the other run's archive with it.
+- **Bulk and single tag changes both go through `write_track`,** so the row,
+  the filename and the playlist name cannot drift apart.
+- **`summarise` feeds both the run and a retry.** `main` prints that summary on
+  exit, so a retry building its own message drops the folder path.
+
+### Cover art
+
 - **`--embed-thumbnail` belongs with the other cover arguments.** It sat in
   the unconditional block, so `--no-cover` embedded YouTube's thumbnail in
   every track while its own help promised nothing was embedded. It stays on
@@ -266,10 +290,6 @@ in **Themes and colour depth**.
   waiting for input that is not coming. It also checks the output is a JPEG
   before writing it back, or a truncated resize replaces good art with
   something no player will show.
-- **`run_with` takes the binary, like `scan_with`.** Asserting on a helper
-  that built the download's arguments would leave the call site free to pass
-  anything, which is exactly how the scan's format came to be right in the
-  helper and hardcoded at the call.
 - **A pass deletes only the folder image it wrote.** Every track carries the
   art embedded, so `cover.jpg` is a leftover once the pass finishes, but one
   the user dropped in by hand or chose with `c` is not: `folder_covers` reads
@@ -315,6 +335,18 @@ in **Themes and colour depth**.
   does not move, so no other message on that list means anything has happened.
   Without it the pane goes on drawing the sleeve that was just replaced, which
   makes the command look as though it did nothing at all.
+- **A folder image that was there before the download is the user's, and
+  `written` is what protects it.** `apply` writes `cover.jpg` from the first
+  track to resolve art, so on a folder somebody had already put art in, the
+  bytes were gone before `drop_folder_cover` ever ran: that function keeps the
+  *name* from deletion and nothing kept the contents. `pipeline` built
+  `written: false` where `retry` built it from `has_cover`, and two answers to
+  one question is an oversight, not a decision. It is `!theirs.is_empty()` now, the
+  same answer `folder_covers` already took before the download, so there is
+  one derivation rather than two.
+
+### Folders earworm didn't download
+
 - **A folder under `--dir` is a playlist if it holds audio, not only if it
   holds a sidecar.** `contents` is the one derivation, read by both `library`
   and `open_shelf`, and it drops a directory with neither audio nor a `#url`.
@@ -374,9 +406,9 @@ in **Themes and colour depth**.
   takes no binary to stub and does nothing without cliamp installed.
 - **`forget` no longer takes the row off the list.** It drops the sidecar and
   keeps the audio, and a folder of audio is on the list either way, so what it
-  loses is its URL. The flash says so. `D` refuses outright on a folder with
-  no sidecar, because the only answer left on that menu would be deleting the
-  user's music.
+  loses is its URL. The flash says so. What it is not is the way to take a row
+  off the library: `hide` is, and the two are one keypress apart on the same
+  menu, so the flash has to say which of them happened.
 - **A `~` id is one earworm invented, and no listing will ever name it.**
   `manifest::local_id` builds it from the filename at adoption and
   `manifest::is_local` is the check. It sits on the id rather than in a
@@ -410,8 +442,8 @@ in **Themes and colour depth**.
   edit either refuses for good and lets the playlist go stale, or replaces a
   file the user wrote with nothing saying so. `write_playlist` asks only when
   `cfg.url` is empty, and records the header at the moment of writing.
-- **`write_manifest` records `cfg.folder` as `#name`, and nothing else does.**
-  Attaching a URL pins the folder so the download lands there rather than under
+- **`write_manifest` records `cfg.folder` as `#name`; `set_name` is the only
+  other writer, and it is `e`.** Attaching a URL pins the folder so the download lands there rather than under
   the playlist's upstream title, and the header is what makes the next sync
   land there too. Written by whichever manifest write is first, so it arrives
   with the `#url` from the run that earned both. `sync_open` deliberately
@@ -426,6 +458,63 @@ in **Themes and colour depth**.
   `docs/library.md` says so before the section on attaching, because it is the
   one moment in this feature where earworm overwrites something it did not
   write.
+- **A rename moves the `#m3u8` header with the file.** Left naming the old
+  filename, `write_playlist` in a folder with no URL finds a playlist it does
+  not recognise and refuses for good: earworm stops updating its own playlist
+  after a rename, silently, for the life of that folder.
+- **`write_manifest` drops a kept entry naming a file a track now holds.**
+  Keyed on the id alone, a match that rewrites a `~` id to a video id leaves
+  both lines in the sidecar for one file, and the next sync reads the stale
+  one back as a file the playlist does not have.
+- **`Pass` carries `gate` and `attaching` as named fields.** Two loose bools
+  at six call sites is one transposition away from `--resync` reconciling
+  folders nobody is watching. `Pass::attaching()` forces the gate on whatever
+  asked for the sync, which is the one thing that overrides the `false`
+  literal `resync` passes: the matching is a guess made from tags the user
+  typed, and somebody reading "12 to download" against a folder they know
+  holds twelve is the last defence. `resync` never reaches it anyway, because
+  it skips a folder with no URL outright and logs why.
+- **`reconcile` matches by predicted filename, then title, then duration, and
+  duration only breaks a tie.** Every other song is three minutes, so a
+  duration match on its own would hand a video whatever file happens to be the
+  same length. Two files a rule cannot separate match nothing, which costs a
+  download where the wrong file costs the user their own music renamed to
+  something it is not. Both name comparisons go through `normalised`, composed
+  and lowercased, for the reason `mark_departed` does: matched raw, every
+  accented or Hangul title misses while the ASCII ones still match.
+  `strip_number` takes a leading run of digits *and a separator*, so `1979`
+  and `99 Luftballons` keep theirs. The fixtures for this have to be numbered
+  where the playlist does not put them, or rule 1 covers rule 2 and the test
+  passes with the title matching deleted.
+- **A `Local` row is numbered past the playlist on the reopen path too.**
+  `open_shelf`'s renumber excluded only `Gone`, so a local file carrying the
+  user's own `05 -` competed for index 5 with the playlist's actual track 5,
+  and whichever sat first in the sidecar won. The real track then landed at 11,
+  sorted to the bottom, and the first edit renamed the file to that position.
+  `reconcile` had this right and the read-back path did not, which is the shape
+  of every bug this feature has had: the status is set correctly by the sync
+  and then lost on the way back off disk.
+- **`open_shelf` gives a local id back its `Local` status, and only in a
+  folder that has a URL.** Reopening an attached folder reads its files out of
+  the sidecar, and a `~` entry there is one the sync could not place. Read
+  back as `Have` and `listed`, `mark_departed` finds it missing from the
+  `.m3u8` the sync correctly left it out of and calls it `gone`: the row then
+  claims a video left a playlist the file was never in. The URL is the other
+  half of the test, because in a folder with no playlist behind it every id is
+  local and every file genuinely belongs to it. `mark_departed` skips a
+  `Local` track for the same reason, or it overwrites the answer the line
+  above just gave. Both halves have a test and both were broken to prove it.
+- **`Status::Local` is not `Gone`.** `Gone` says a video left the playlist and,
+  once proven, lets `D` delete the file. Neither half is true of a file the
+  user put there: nothing left, and it is the one thing in the folder earworm
+  has no claim on. It is settled, `listed = false`, skipped by `tag_tracks`
+  beside `Gone` and `Skipped`, and unreachable from `can_purge`, which reads
+  `Gone && departure_proven`. Its legend row is its own rather than a fourth
+  word on the "not touched this run" row, which is three slots wide and would
+  push every gloss nine columns right on every terminal.
+
+### Albums and playlists
+
 - **A folder's kind is read off its name first, and the name is never
   written.** `manifest::kind_of` is the one derivation, asked by both the sync
   and `open_shelf` so the two cannot disagree. A bracket group whose whole
@@ -486,15 +575,6 @@ in **Themes and colour depth**.
   that album's sleeve and matches every file in the folder. The album flag is a
   parameter rather than a check at the call site so the rule is testable where
   it lives.
-- **A folder image that was there before the download is the user's, and
-  `written` is what protects it.** `apply` writes `cover.jpg` from the first
-  track to resolve art, so on a folder somebody had already put art in, the
-  bytes were gone before `drop_folder_cover` ever ran: that function keeps the
-  *name* from deletion and nothing kept the contents. `pipeline` built
-  `written: false` where `retry` built it from `has_cover`, and two answers to
-  one question is an oversight, not a decision. It is `!theirs.is_empty()` now, the
-  same answer `folder_covers` already took before the download, so there is
-  one derivation rather than two.
 - **Three lines in `pipeline` carry these answers and nothing tests them.**
   `one_sleeve: album` on the `CoverState`, the `album` argument to
   `drop_folder_cover`, and `written: !theirs.is_empty()`. All three still
@@ -539,74 +619,6 @@ in **Themes and colour depth**.
   for every existing folder, which this feature promised not to make;
   `--no-album` is the control that already exists. Worth doing on its own, not
   smuggled in here.
-- **A rename moves the `#m3u8` header with the file.** Left naming the old
-  filename, `write_playlist` in a folder with no URL finds a playlist it does
-  not recognise and refuses for good: earworm stops updating its own playlist
-  after a rename, silently, for the life of that folder.
-- **`write_manifest` drops a kept entry naming a file a track now holds.**
-  Keyed on the id alone, a match that rewrites a `~` id to a video id leaves
-  both lines in the sidecar for one file, and the next sync reads the stale
-  one back as a file the playlist does not have.
-- **`Pass` carries `gate` and `attaching` as named fields.** Two loose bools
-  at six call sites is one transposition away from `--resync` reconciling
-  folders nobody is watching. `Pass::attaching()` forces the gate on whatever
-  asked for the sync, which is the one thing that overrides the `false`
-  literal `resync` passes: the matching is a guess made from tags the user
-  typed, and somebody reading "12 to download" against a folder they know
-  holds twelve is the last defence. `resync` never reaches it anyway, because
-  it skips a folder with no URL outright and logs why.
-- **`reconcile` matches by predicted filename, then title, then duration, and
-  duration only breaks a tie.** Every other song is three minutes, so a
-  duration match on its own would hand a video whatever file happens to be the
-  same length. Two files a rule cannot separate match nothing, which costs a
-  download where the wrong file costs the user their own music renamed to
-  something it is not. Both name comparisons go through `normalised`, composed
-  and lowercased, for the reason `mark_departed` does: matched raw, every
-  accented or Hangul title misses while the ASCII ones still match.
-  `strip_number` takes a leading run of digits *and a separator*, so `1979`
-  and `99 Luftballons` keep theirs. The fixtures for this have to be numbered
-  where the playlist does not put them, or rule 1 covers rule 2 and the test
-  passes with the title matching deleted.
-- **A `Local` row is numbered past the playlist on the reopen path too.**
-  `open_shelf`'s renumber excluded only `Gone`, so a local file carrying the
-  user's own `05 -` competed for index 5 with the playlist's actual track 5,
-  and whichever sat first in the sidecar won. The real track then landed at 11,
-  sorted to the bottom, and the first edit renamed the file to that position.
-  `reconcile` had this right and the read-back path did not, which is the shape
-  of every bug this feature has had: the status is set correctly by the sync
-  and then lost on the way back off disk.
-- **`open_shelf` gives a local id back its `Local` status, and only in a
-  folder that has a URL.** Reopening an attached folder reads its files out of
-  the sidecar, and a `~` entry there is one the sync could not place. Read
-  back as `Have` and `listed`, `mark_departed` finds it missing from the
-  `.m3u8` the sync correctly left it out of and calls it `gone`: the row then
-  claims a video left a playlist the file was never in. The URL is the other
-  half of the test, because in a folder with no playlist behind it every id is
-  local and every file genuinely belongs to it. `mark_departed` skips a
-  `Local` track for the same reason, or it overwrites the answer the line
-  above just gave. Both halves have a test and both were broken to prove it.
-- **`Status::Local` is not `Gone`.** `Gone` says a video left the playlist and,
-  once proven, lets `D` delete the file. Neither half is true of a file the
-  user put there: nothing left, and it is the one thing in the folder earworm
-  has no claim on. It is settled, `listed = false`, skipped by `tag_tracks`
-  beside `Gone` and `Skipped`, and unreachable from `can_purge`, which reads
-  `Gone && departure_proven`. Its legend row is its own rather than a fourth
-  word on the "not touched this run" row, which is three slots wide and would
-  push every gloss nine columns right on every terminal.
-- **The scan's `--print` carries duration, and the stubs have to agree.**
-  `splitn(5)` with the filename last, because that is the one field that could
-  hold a tab. Three stub yt-dlps print that line and all three break together
-  when the format changes.
-- **`is_file`, never `exists`, for a track's path.** A directory sitting where
-  the audio should go satisfies `exists`, and `scan` then calls the track
-  downloaded, so nothing fetches it or marks it failed.
-- **`ytdlp::run` can run twice in one process.** Its scratch directory carries
-  a counter as well as the pid. The `Download` guard removes the directory on
-  drop and would take the other run's archive with it.
-- **Bulk and single tag changes both go through `write_track`,** so the row,
-  the filename and the playlist name cannot drift apart.
-- **`summarise` feeds both the run and a retry.** `main` prints that summary on
-  exit, so a retry building its own message drops the folder path.
 
 ### Playing through cliamp
 
@@ -701,8 +713,7 @@ in **Themes and colour depth**.
   never tagged again, refused a rename, dropped from the next playlist
   written. `repoint_playlist` renames the one entry, between the rename and
   the removal of the old file so the playlist never names a file that is not
-  there. Reproduced on a real folder: six of twelve converted, six dead
-  entries, six departures.
+  there. Reproduced on a real folder; the counts are in docs/history.md.
 - **`mark_departed` matches the stem, not the whole filename.** A conversion
   changes a track's extension and nothing else, and the playlist cannot be
   kept in step atomically: `repoint_playlist` narrows the gap to one track and
@@ -750,9 +761,8 @@ in **Themes and colour depth**.
   `transcode` try the next encoder in its list, so the shutdown killed one
   ffmpeg and the next line spawned another that nothing was left to kill. It
   also closes the gap between a loop's cancel check and the spawn a few lines
-  later. Verified by hand, like `ytdlp::stop`, which has no test either: 417ms
-  and a SIGTERM against a 60s bound, and the retry refused in microseconds.
-  **Nothing in the suite may call it.** It is process-wide and never cleared,
+  later. Verified by hand, like `ytdlp::stop`, which has no test either; the
+  timings are in docs/history.md. **Nothing in the suite may call it.** It is process-wide and never cleared,
   so one call makes every bounded subprocess after it in that binary return
   `None`, which is the trap the colour depth already documents.
 - **A killed transcode's scratch file is swept, not overwritten.** The kill
@@ -798,8 +808,8 @@ in **Themes and colour depth**.
   one, and it is why `m4a` is refetched rather than converted. It is also why
   an `opus` *target* is refetched from anything: a download remuxes, so it
   costs one generation against the two any conversion would. The first
-  version of this table had both wrong, on the assumption that a container
-  YouTube serves is a container yt-dlp picks.
+  version of this table had both wrong; docs/history.md says on what
+  assumption.
 - **`alac` and `m4a` share an extension, so the codec has to be read.**
   Without `tag::mp4_format` an AAC file sits untouched in a folder being
   brought to alac and an alac file does the same going the other way, because
@@ -883,9 +893,9 @@ in **Themes and colour depth**.
 - **`counts()` is built from the tracks, not from a list of statuses.**
   `tally()` is exhaustive and decides both whether a status is counted and
   where it sits, so a new one is either given a column or deliberately left
-  out and neither can be forgotten. The first attempt kept a hand-kept
-  `TALLY` array and read it here, which still compiled with a variant missing
-  and still dropped a whole column: proved by adding one. `TALLY` is now
+  out and neither can be forgotten. The first attempt read a hand-kept array
+  here and dropped a whole column with nothing failing, which docs/history.md
+  records. `TALLY` is now
   `#[cfg(test)]` and nothing in the running tool reads it, so forgetting an
   entry costs coverage rather than correctness.
 - **`save_format` edits one line and re-parses before writing.** The config is
@@ -1126,8 +1136,9 @@ in **Themes and colour depth**.
   it *into* that table. It parsed: a string in a `BTreeMap<String, String>` is
   a valid colour as far as serde is concerned, so the re-parse guard waved it
   through, the save reported success, nothing was recorded and the next start
-  refused the file naming a colour called "format". Shipped with `[colors]`
-  and found by a round-trip test for something else. The scan counts brackets
+  refused the file naming a colour called "format". Shipped, and found by a
+  round-trip test written for something else, in docs/history.md. The scan
+  counts brackets
   rather than reading the first character, because a multi-line string can
   hold a line that reads exactly like a header and inserting a key into the
   middle of somebody's value loses their data rather than just misplacing
@@ -1157,11 +1168,11 @@ in **Themes and colour depth**.
   than naming the twelve again, so a field added to `Palette` is one a baseless
   theme is immediately told to supply rather than one it quietly inherits from
   warm.
-- **Every palette is measured, not only the repainted ones.** The first version
-  of `theme()` ran `unreadable()` only on the `[colors]` path, so a
-  `[themes.*]` palette — just as unmeasurable by the suite — could be illegible
-  with nothing said. It runs on whatever comes out. The four that ship cost
-  nothing there, because their ratios are a test.
+- **Every palette is measured, not only the repainted ones.** `unreadable()`
+  runs on whatever comes out of `theme()`, because a `[themes.*]` palette is
+  as unmeasurable by the suite as a `[colors]` one. It once ran on only the
+  second, which docs/history.md records. The four that ship cost nothing
+  there, because their ratios are a test.
 - **`set_field` takes twelve names, `slots()` lists ten.** The gradient's two
   ends are colours a theme names like any other, but nothing is ever read *in*
   them, so they are grounds for the legibility checks rather than slots. One
