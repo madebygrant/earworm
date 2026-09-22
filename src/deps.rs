@@ -136,6 +136,9 @@ pub struct Facts<'a> {
     pub dir: &'a Path,
     /// `None` when the directory is not there yet.
     pub playlists: Option<usize>,
+    /// Folders `D` has hidden, which are on disk and on no screen. Named
+    /// rather than counted, since the question this answers is which one.
+    pub hidden: &'a [String],
     /// The newer release the probe found, gathered by the caller so this
     /// stays as testable as the rest of the report. `None` is also a switched
     /// off check, a stale read and "already current" all at once, which is
@@ -246,6 +249,20 @@ pub fn report(facts: &Facts) -> (String, bool) {
         Some(n) => row(true, "directory", &format!("{dir} · {n} playlists")),
         None => row(true, "directory", &format!("{dir} · not created yet")),
     });
+    /* Its own row rather than a clause on the directory's, since it is the
+       answer to "why is that folder not here", and a row the reader can find
+       is the whole point of putting it in `--check`. Absent when nothing is
+       hidden: a row saying none would be a question nobody asked. */
+    if !facts.hidden.is_empty() {
+        out.push_str(&row(
+            true,
+            "hidden",
+            &format!(
+                "{}  ·  on disk, on no screen, and passed over by --resync",
+                facts.hidden.join(", ")
+            ),
+        ));
+    }
     if let Some(latest) = &facts.update {
         /* Both sides carry exactly one `v`: `update::available` hands over the
            tag without one, so the prefix is added here and nowhere else. */
@@ -280,6 +297,26 @@ mod tests {
         }
     }
 
+    /* Hiding a folder takes it off every screen and out of `--resync`, and
+       says so once, in a flash, at the moment it happens. `--check` is where
+       somebody working out why a folder is not syncing goes, so it is where
+       the answer has to be. */
+    #[test]
+    fn check_names_the_folders_that_are_hidden_and_stays_quiet_when_none_are() {
+        let tools: Vec<Found> = Vec::new();
+        let dir = PathBuf::from("/tmp/music");
+
+        let quiet = report(&facts(&tools, &dir)).0;
+        assert!(!quiet.contains("hidden"), "a row about nothing: {quiet}");
+
+        let names = ["deep-focus-chillstep".to_string(), "sleep".to_string()];
+        let mut with = facts(&tools, &dir);
+        with.hidden = &names;
+        let text = report(&with).0;
+        assert!(text.contains("deep-focus-chillstep, sleep"), "{text}");
+        assert!(text.contains("--resync"), "no word on what it costs: {text}");
+    }
+
     fn facts<'a>(tools: &'a [Found], dir: &'a Path) -> Facts<'a> {
         Facts {
             tools,
@@ -295,6 +332,7 @@ mod tests {
             graphics: "halfblocks",
             dir,
             playlists: Some(7),
+            hidden: &[],
             apple: true,
             update: None,
         }

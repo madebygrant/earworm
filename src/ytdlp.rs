@@ -55,6 +55,10 @@ pub struct Listing {
     /// truncated one looks exactly like a playlist that lost tracks, which is
     /// why nothing may act on an absence unless this is true.
     pub complete: bool,
+    /// The playlist's own id. On `Listing` and not on `Track` because it
+    /// describes the playlist rather than the song, and every entry repeats
+    /// it. `None` for a single video, which has no playlist to name.
+    pub playlist_id: Option<String>,
 }
 
 /// Resolves ids, titles and destination paths from the playlist listing alone.
@@ -84,25 +88,42 @@ pub(crate) fn scan_with(bin: &str, cfg: &Config) -> Result<Listing> {
         .arg("--output")
         .arg(scan_template(cfg))
         .arg("--print")
-        .arg("%(id)s\t%(playlist_index)s\t%(title)s\t%(filename)s")
+        /* Duration is here for one caller: the pass that attaches a URL to a
+           folder earworm did not download and has to work out which file on
+           disk is which video. It breaks a tie between two tracks whose
+           titles match and is never enough on its own, since every other song
+           is three minutes. The playlist id is here for another: its prefix is
+           what says whether this is an album. The filename stays last, because
+           it is the one field that could hold a tab and `splitn` lets the last
+           one keep it. */
+        .arg("%(id)s\t%(playlist_index)s\t%(title)s\t%(duration)s\t%(playlist_id)s\t%(filename)s")
         .args(&cfg.extra)
         .arg(&cfg.url)
         .output()
         .map_err(|e| anyhow::anyhow!(crate::deps::launch_error(bin, &e)))?;
 
     let mut tracks = Vec::new();
+    let mut playlist_id: Option<String> = None;
     for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let parts: Vec<&str> = line.splitn(4, '\t').collect();
-        if parts.len() != 4 {
+        let parts: Vec<&str> = line.splitn(6, '\t').collect();
+        if parts.len() != 6 {
             continue;
         }
         let index: usize = parts[1].parse().unwrap_or(tracks.len() + 1);
+        // Every entry repeats it, so the first one that is not yt-dlp's "NA"
+        // is the answer for the whole listing.
+        if playlist_id.is_none() && parts[4] != "NA" && !parts[4].is_empty() {
+            playlist_id = Some(parts[4].to_string());
+        }
         let mut track = Track::new(
             index,
             parts[0].to_string(),
             parts[2].to_string(),
-            PathBuf::from(parts[3]),
+            PathBuf::from(parts[5]),
         );
+        // yt-dlp prints "NA" for a video whose duration it does not know,
+        // and 0 is what the rest of the tool already means by "no duration".
+        track.duration = parts[3].parse().unwrap_or(0);
         // is_file, not exists: a directory sitting on the destination path
         // would otherwise count as a track that had already downloaded.
         if track.path.as_ref().is_some_and(|p| p.is_file()) {
@@ -121,6 +142,13 @@ pub(crate) fn scan_with(bin: &str, cfg: &Config) -> Result<Listing> {
     {
         let known = manifest::read(&folder);
         for track in &mut tracks {
+            /* Nothing here needs to exclude the ids earworm invents for a
+               folder it did not download: this is a lookup by video id, and
+               `manifest::local_id` puts a `~` in front, which no video id
+               carries. A `~` entry is therefore unreachable from here, and
+               the reconciling pass is what places those files instead, by
+               name and tag. The other two readers of ids do need a guard,
+               because they walk the manifest rather than index into it. */
             if let Some(file) = known.get(&track.id) {
                 track.path = Some(file.clone());
                 track.status = Status::Have;
@@ -147,6 +175,7 @@ pub(crate) fn scan_with(bin: &str, cfg: &Config) -> Result<Listing> {
     Ok(Listing {
         tracks,
         complete: out.status.success(),
+        playlist_id,
     })
 }
 
@@ -176,6 +205,13 @@ pub(crate) fn write_archive(
     let mut count = 0;
     for track in tracks {
         if refetch.contains(&track.index) {
+            continue;
+        }
+        /* The archive is read by yt-dlp, which knows nothing about ids
+           earworm invented for files it never downloaded. Harmless there
+           either way, but a file written for another tool gets only what
+           that tool understands. */
+        if manifest::is_local(&track.id) {
             continue;
         }
         if track.status == Status::Skipped || track.path.as_deref().is_some_and(Path::is_file) {
@@ -411,7 +447,7 @@ mod tests {
                 &bin,
                 format!(
                     "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\" >> \"{}\"; done\n\
-                     printf 'id1\t1\tTitle\t{}
+                     printf 'id1\t1\tTitle\t213\tPL1\t{}
 '\n",
                     log.display(),
                     dir.join("music").join("track").display()

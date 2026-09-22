@@ -29,6 +29,10 @@ download from a music library:
 - **Cover art embedded at a sane size.** YouTube serves 2048² thumbnails for
   its auto-generated albums. earworm keeps them out of your files: what gets
   embedded is capped at 1000×1000.
+- **Albums get one sleeve, playlists get twelve.** A YouTube Music release is
+  recognised on sight, and anything else you settle by putting `[album]` or
+  `[playlist]` in the folder's name. earworm reads that marker and never
+  writes one.
 - **Re-runs skip work you already did.** Each playlist folder keeps an
   `.earworm` manifest with its URL and current filenames. Sync it again and
   earworm fetches only the new tracks, reports the ones that left the
@@ -36,6 +40,10 @@ download from a music library:
 - **Fix anything weeks later.** Every folder opens from disk, offline. Edit
   tags, swap artist and title, search `/` across every folder you own, rename
   a playlist and have the rename survive the next sync.
+- **Music earworm didn't download is welcome too.** Copy a folder of audio
+  into your library and it appears with the rest, opens from its tags, and
+  takes every editing key. Give it a URL later and earworm works out which
+  files it already has before it fetches anything.
 - **Change format without throwing away what you have.** Tracks already on
   disk convert on their next sync in whatever way costs the least re-encoding.
   Why some never re-encode at all is [documented](docs/formats.md), because

@@ -18,7 +18,7 @@ use crate::ytdlp;
 pub fn run(mut cfg: Config, tx: Sender<Msg>, cancel: Arc<AtomicBool>, cmds: Receiver<Cmd>) {
     let mut tracks = Vec::new();
     let result = match ask_start(&mut cfg, &tx) {
-        Start::Playlist => pipeline(&cfg, &tx, &cancel, &mut tracks, cfg.pick),
+        Start::Playlist => pipeline(&cfg, &tx, &cancel, &mut tracks, Pass::plain(cfg.pick)),
         Start::Resync(saved) => resync(&mut cfg, &tx, &cancel, &mut tracks, saved),
         /* Nothing has been synced and nothing has failed, so there is no
            outcome to report: the library screen is the whole answer. */
@@ -195,7 +195,7 @@ fn finish(
            mean what `p` means, or the same action is offered on one screen and
            hidden on the next. */
         let playable = folder_of(tracks)
-            .filter(|f| player::playlist_file(f).is_file())
+            .filter(|f| player::playlist_of(f).is_some())
             .filter(|_| player::running());
         let _ = tx.send(Msg::Done {
             result: result.clone(),
@@ -271,7 +271,7 @@ fn finish(
                 // As in `start_url`: this playlist is not the last one.
                 cfg.folder = None;
                 let gate = cfg.pick;
-                result = pipeline(cfg, tx, cancel, tracks, gate).map_err(|e| e.to_string());
+                result = pipeline(cfg, tx, cancel, tracks, Pass::plain(gate)).map_err(|e| e.to_string());
             }
             /* Closes the menu like Keep does: the answer is on the list
                behind it, and nothing more is being asked of the worker. */
@@ -308,8 +308,14 @@ enum Answer {
 }
 
 /// Every playlist folder already under `--dir`, in name order. Read from the
-/// manifests alone: this runs before the UI is up and must not touch the
-/// network. A folder with no recorded URL is not one of ours.
+/// manifests and the directory alone: this runs before the UI is up and must
+/// not touch the network.
+/* A folder earworm downloaded is known by its sidecar; a folder somebody
+   copied in is known by holding audio. Both are listed, because the tags and
+   the filenames are everything the library screen draws and nothing else on
+   that screen depends on where the files came from. The sidecar wins when
+   there is one, since it carries the playlist's order and the files a sync
+   found missing, neither of which a directory read can tell you. */
 pub fn library(dir: &Path) -> Vec<Shelf> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
@@ -321,30 +327,141 @@ pub fn library(dir: &Path) -> Vec<Shelf> {
         .filter_map(|path| {
             // One read for all three: this walks every folder under --dir.
             let sidecar = manifest::load(&path);
-            let url = sidecar.url?;
+            /* Asked before the stat pass, since a hidden folder is one
+               nothing on any screen is going to draw. */
+            if sidecar.hidden {
+                return None;
+            }
             // One stat per entry, feeding both the count and the preview.
-            let files: Vec<(String, bool)> = sidecar
-                .entries
+            let files: Vec<(String, bool)> = contents(&path, &sidecar)
                 .iter()
                 .map(|(_, f)| {
                     let name = f.file_name().unwrap_or_default().to_string_lossy().into();
                     (name, f.is_file())
                 })
                 .collect();
+            /* A folder with neither audio nor a recorded URL is some other
+               directory under `--dir` and not a playlist at all. The URL is
+               what keeps an emptied folder of ours on the list: it is still
+               syncable, and dropping it would hide the one row that says
+               every file went. */
+            if files.is_empty() && sidecar.url.is_none() {
+                return None;
+            }
             let missing = files.iter().filter(|(_, here)| !here).count();
+            /* Before the sidecar is taken apart below, and from the same
+               resolver the sync and `open_shelf` ask, so the row cannot
+               disagree with what a run would decide about the same folder. */
+            let kind = manifest::kind_of(&path, &sidecar).map(|(kind, _)| kind);
             Some(Shelf {
                 name: path.file_name().unwrap_or_default().to_string_lossy().into(),
-                url,
+                url: sidecar.url,
+                kind,
                 tracks: files.len() - missing,
                 missing,
                 synced: sidecar.synced,
                 files,
+                playlist: player::playlist_of(&path),
                 path,
             })
         })
         .collect();
     found.sort_by(|a, b| a.name.cmp(&b.name));
     found
+}
+
+/// The folders `library` is leaving out, by name.
+/* Hiding takes a folder off every screen and out of `--resync`, and the only
+   word it ever gets is one flash at the moment it happens. A month later
+   nothing could say why four folders were being passed over, which is the
+   same silence a sync that decides without reporting would have. `--check` is
+   where somebody working that out actually looks. */
+pub fn hidden(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<String> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .filter(|p| manifest::load(p).hidden)
+        .map(|p| p.file_name().unwrap_or_default().to_string_lossy().into())
+        .collect();
+    found.sort();
+    found
+}
+
+/// What a folder holds, as id and file, which is what both the library row
+/// and the track list are built from.
+/* The sidecar wins for a folder with a playlist behind it: it carries the
+   order the playlist is in and the files a sync found missing, neither of
+   which a directory read can tell you, and a file the user dropped in is the
+   sync's business to place rather than something to invent a row for here.
+
+   Without a URL the sidecar is only a tag ledger. It records which files
+   happened to be in the folder the last time somebody edited a tag, which is
+   no claim about anything, so the directory is authoritative and the sidecar
+   supplies ids for the files it already knows. Preferring it outright meant a
+   song copied into an adopted folder never appeared at all: no sync will ever
+   run there to notice it, because there is no URL for one to run against. */
+fn contents(folder: &Path, sidecar: &manifest::Sidecar) -> Vec<(String, PathBuf)> {
+    if sidecar.url.is_some() && !sidecar.entries.is_empty() {
+        return sidecar.entries.clone();
+    }
+    let known: HashMap<&Path, &str> = sidecar
+        .entries
+        .iter()
+        .map(|(id, file)| (file.as_path(), id.as_str()))
+        .collect();
+    audio_files(folder)
+        .into_iter()
+        .map(|file| {
+            let id = known.get(file.as_path()).map_or_else(
+                || {
+                    let name = file.file_name().unwrap_or_default().to_string_lossy();
+                    manifest::local_id(&name)
+                },
+                |id| (*id).to_string(),
+            );
+            (id, file)
+        })
+        .collect()
+}
+
+/// Audio files directly in `folder`, in name order, which for a folder
+/// earworm wrote is playlist order because every name carries its number.
+/* Filtered on the extensions `FORMATS` can produce rather than on anything
+   wider: a folder holding artwork, a text file and one `.m4a` is a one-track
+   playlist, and a `.DS_Store` beside it must not be counted as a track. */
+fn audio_files(folder: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        /* Hidden files are never tracks, and the extension filter alone does
+           not catch them: macOS writes `._01 - A.opus` beside every file on a
+           FAT or exFAT volume, which is exactly how a folder arrives off a
+           USB stick, and that is a one-byte row with unreadable tags. */
+        .filter(|p| {
+            !p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with('.'))
+        })
+        .filter(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| {
+                    config::FORMATS
+                        .iter()
+                        .any(|(_, known, _)| ext.eq_ignore_ascii_case(known))
+                })
+        })
+        .collect();
+    files.sort();
+    files
 }
 
 /* The tags on disk are the whole truth here: no listing, no lookup, no
@@ -357,10 +474,11 @@ fn open_shelf(
     tracks: &mut Vec<Track>,
     shelf: &Shelf,
 ) -> Result<String> {
-    let entries = manifest::entries(&shelf.path);
+    let sidecar = manifest::load(&shelf.path);
+    let entries = contents(&shelf.path, &sidecar);
     if entries.is_empty() {
         bail!(
-            "{} has no tracks recorded in its manifest  ·  sync it to fill one in",
+            "{} holds no audio earworm can read  ·  sync it to fill it in",
             shelf.name
         );
     }
@@ -368,10 +486,12 @@ fn open_shelf(
     let _ = tx.send(Msg::Restart);
     let _ = tx.send(Msg::Playlist(shelf.name.clone()));
     let _ = tx.send(Msg::Folder(shelf.path.clone()));
-    cfg.url = shelf.url.clone();
+    // Empty is how the rest of the tool spells "no URL", and `sync_open` is
+    // what turns that into the question rather than into a refusal.
+    cfg.url = shelf.url.clone().unwrap_or_default();
     /* Carried onto the config so a later `S` writes back into this folder
        rather than into whatever the playlist is called upstream. */
-    cfg.folder = manifest::load(&shelf.path).name;
+    cfg.folder = sidecar.name.clone();
     tracks.clear();
 
     let mut missing = 0;
@@ -390,10 +510,18 @@ fn open_shelf(
            time one of them was edited. 0 means the name had no usable number
            and one is handed out below. */
         let index = numbered(&name).unwrap_or(0);
+        /* A local id in a folder that has a playlist behind it is a file the
+           sync could not place: the user's own, in no playlist and never in
+           one. Read back as `Have` and `listed`, `mark_departed` below finds
+           it missing from the `.m3u8` the sync correctly left it out of and
+           calls it `gone`, which claims a video left a playlist the file was
+           never in. In a folder with no URL every id is local and every file
+           is genuinely part of it, which is why the URL is half the test. */
+        let own = manifest::is_local(&id) && shelf.url.is_some();
         let mut track = Track::new(index, id, name, file.clone());
-        track.status = Status::Have;
-        track.source = "on disk".into();
-        track.listed = true;
+        track.status = if own { Status::Local } else { Status::Have };
+        track.source = if own { "not in playlist" } else { "on disk" }.into();
+        track.listed = !own;
         if let Ok(info) = tag::read(&file) {
             track.artist = info.artist;
             track.title = info.title;
@@ -411,7 +539,14 @@ fn open_shelf(
         tracks.push(track);
     }
 
-    mark_departed(&shelf.path, tracks);
+    /* Only for a folder with a playlist upstream. `mark_departed` reads the
+       `.m3u8` as earworm's own last answer about what that playlist held, and
+       in a folder earworm did not download it is not that: it is whatever
+       file the user brought with them, naming whatever they chose to list.
+       Believing it would call every file it leaves out departed. */
+    if shelf.url.is_some() {
+        mark_departed(&shelf.path, tracks);
+    }
 
     /* Two files can carry the same number: removing a video renumbers the
        tracks after it, and the file that left keeps the name it had, so a
@@ -419,10 +554,15 @@ fn open_shelf(
        and takes the first match, so sharing one makes a row write tags to
        another row's file. Tracks still in the playlist claim their own number
        first, and everything else is numbered past them, which is where a
-       departed row sits after a real sync too. */
+       departed row sits after a real sync too. A local file is "everything
+       else" as much as a departure is: it carries whatever number the user
+       was numbering by, which collides with the playlist's, and whichever
+       happens to sit first in the sidecar would otherwise take it. That is
+       how a real track 5 ends up at 11, sorted to the bottom and renamed to
+       `11 - ` by the first edit. */
     let mut taken: HashSet<usize> = HashSet::new();
     for track in tracks.iter_mut() {
-        let live = track.status != Status::Gone;
+        let live = !matches!(track.status, Status::Gone | Status::Local);
         if !live || track.index == 0 || !taken.insert(track.index) {
             track.index = 0;
         }
@@ -448,6 +588,12 @@ fn open_shelf(
     if missing > 0 {
         let files = if missing == 1 { "file" } else { "files" };
         summary = format!("{summary}, {missing} {files} missing");
+    }
+    /* The same answer a sync reports, from the same resolver: offline there is
+       no listing, so the name and the header are all there is. Said here too,
+       because this is the screen `c` is pressed from. */
+    if let Some((kind, source)) = manifest::kind_of(&shelf.path, &sidecar) {
+        summary = format!("{summary}  ·  {} , from {source}", kind.label());
     }
     Ok(summary)
 }
@@ -485,7 +631,18 @@ fn mark_departed(folder: &Path, tracks: &mut [Track]) {
     if !tracks.iter().any(holds) {
         return;
     }
-    for track in tracks.iter_mut().filter(|t| !holds(t)) {
+    /* A local file is left out of the playlist on purpose, by the sync that
+       could not match it, so its absence from the `.m3u8` is the expected
+       answer rather than evidence a video left. `Gone` would claim it was in
+       the playlist once and, in the offline half, is the status `write_track`
+       and `rename` are keyed on: it would be renumbered past the playlist and
+       refused a rename, which is right for a departure and wrong for a file
+       the user owns outright. */
+    for track in tracks
+        .iter_mut()
+        .filter(|t| t.status != Status::Local)
+        .filter(|t| !holds(t))
+    {
         track.status = Status::Gone;
         track.listed = false;
         track.source = "not in playlist".into();
@@ -542,26 +699,39 @@ fn resync(
 ) -> Result<String> {
     if found.is_empty() {
         bail!(
-            "no playlist under {} has a saved URL yet; sync one by URL first",
+            "no playlist folder under {} yet; sync one by URL first",
             cfg.dir.display()
         );
     }
 
     let mut synced = 0;
     let mut listed = 0;
+    let mut skipped = 0;
     for (n, shelf) in found.iter().enumerate() {
         if cancel.load(Ordering::SeqCst) {
             break;
         }
         let name = &shelf.name;
+        /* Attaching a URL to a folder earworm did not download is an
+           interactive act: the matching that stops it downloading the folder
+           again is only as good as the tags, and the pick gate is the last
+           defence against getting it wrong. An unattended walk of the library
+           has nobody at the gate, so it passes this folder by and says so. */
+        let Some(url) = shelf.url.clone() else {
+            skipped += 1;
+            let _ = tx.send(Msg::Log(format!(
+                "{name}: no playlist URL  ·  open it and press S to attach one"
+            )));
+            continue;
+        };
         let _ = tx.send(Msg::Stage(format!("{} of {}: {name}", n + 1, found.len())));
         // Each folder starts from an empty list, so its rows are its own.
         tracks.clear();
         let _ = tx.send(Msg::Restart);
-        cfg.url = shelf.url.clone();
+        cfg.url = url;
         cfg.folder = manifest::load(&shelf.path).name;
 
-        match pipeline(cfg, tx, cancel, tracks, false) {
+        match pipeline(cfg, tx, cancel, tracks, Pass::plain(false)) {
             Ok(summary) => {
                 synced += 1;
                 listed += tracks.iter().filter(|t| t.listed).count();
@@ -574,21 +744,60 @@ fn resync(
         }
     }
 
-    Ok(format!(
-        "{synced} of {} playlists, {listed} tracks",
-        found.len()
-    ))
+    let mut summary = format!("{synced} of {} playlists, {listed} tracks", found.len());
+    if skipped > 0 {
+        let word = if skipped == 1 { "folder has" } else { "folders have" };
+        summary = format!("{summary}  ·  {skipped} {word} no URL  ·  l has which");
+    }
+    Ok(summary)
 }
 
-/// `gate` is separate from `cfg.pick` because `--resync` walks the whole
-/// library unattended: a question per folder is the one thing that would stop
-/// it, and the user asked for the sync, not for each playlist in it.
+/// What kind of pass this is, as named fields: two loose bools at six call
+/// sites is one transposition away from an unattended walk of the library
+/// reconciling folders nobody is watching.
+#[derive(Clone, Copy)]
+struct Pass {
+    /// `gate` is separate from `cfg.pick` because `--resync` walks the whole
+    /// library unattended: a question per folder is the one thing that would
+    /// stop it, and the user asked for the sync, not for each playlist in it.
+    gate: bool,
+    /// The one pass that matches files on disk to videos by name and tag
+    /// rather than by id: the sync that gives a URL to a folder earworm did
+    /// not download. Every later sync of that folder is an ordinary one,
+    /// because the ids it matched are real by then.
+    attaching: bool,
+}
+
+impl Pass {
+    fn plain(gate: bool) -> Self {
+        Pass {
+            gate,
+            attaching: false,
+        }
+    }
+
+    /* The gate is forced on, whatever asked for the sync. The matching is a
+       guess made from tags the user typed and titles YouTube chose, and the
+       cost of getting it wrong is the whole playlist downloading again beside
+       the folder. Somebody reading "12 to download" against a folder they
+       know holds twelve is the last defence, and CLAUDE.md calls the `false`
+       that `resync` passes load-bearing: this is the one thing that overrides
+       it, and `resync` never reaches here because it skips a folder with no
+       URL outright. */
+    fn attaching() -> Self {
+        Pass {
+            gate: true,
+            attaching: true,
+        }
+    }
+}
+
 fn pipeline(
     cfg: &Config,
     tx: &Sender<Msg>,
     cancel: &AtomicBool,
     tracks: &mut Vec<Track>,
-    gate: bool,
+    pass: Pass,
 ) -> Result<String> {
     let _ = tx.send(Msg::Stage("listing playlist".into()));
     let listing = ytdlp::scan(cfg)?;
@@ -603,11 +812,19 @@ fn pipeline(
             let _ = tx.send(Msg::Folder(folder));
         }
     }
+    /* Before the tagging pass, which is the first thing the answer changes,
+       and after the scan, which is where the only automatic signal is. */
+    let kind = settle_kind(listing.playlist_id.as_deref(), folder_of(tracks).as_deref());
+    let album = matches!(kind, Some((manifest::Kind::Album, _)));
+
+    if pass.attaching {
+        reconcile(tx, tracks);
+    }
     note_departures(cfg, tx, listing.complete, tracks);
     let _ = tx.send(Msg::Tracks(tracks.clone()));
 
     // Held on to, because `to_bring` has to honour the same answer.
-    let picked = gate.then(|| ask_which(tx, tracks)).flatten();
+    let picked = pass.gate.then(|| ask_which(tx, tracks)).flatten();
 
     let have = tracks.iter().filter(|t| t.status == Status::Have).count();
     let _ = tx.send(Msg::Stage(format!(
@@ -654,12 +871,21 @@ fn pipeline(
         tx: tx.clone(),
         enabled: cfg.fix,
     };
-    let mut cover = CoverState { written: false };
+    /* An image that was here before the download is the user's, and `apply`
+       writing over it is the same loss as deleting it: `drop_folder_cover`
+       keeps the name and nothing keeps the bytes. `theirs` is that same
+       answer, taken before the download for the same reason. */
+    let mut cover = CoverState {
+        written: !theirs.is_empty(),
+        one_sleeve: album,
+        ..CoverState::default()
+    };
     tag_tracks(cfg, tx, cancel, tracks, &playlist, &asker, &mut cover, None);
 
+    record_kind(tx, folder_of(tracks).as_deref(), kind);
     sync_manifest(cfg, tracks);
     let playlist_file = write_playlist(cfg, tracks)?;
-    drop_folder_cover(tracks, &theirs);
+    drop_folder_cover(tracks, &theirs, album);
     let mut summary = summarise(tracks, playlist_file.as_deref());
     /* Said out loud, because the rows scroll off and a --resync's one line
        per folder is the only record anyone reads afterwards. */
@@ -675,10 +901,226 @@ fn pipeline(
     if missing > 0 {
         summary = format!("{summary}, {missing} no longer downloadable");
     }
+    if let Some((kind, source)) = kind {
+        summary = format!("{summary}  ·  {} , from {source}", kind.label());
+    }
     if !warning.is_empty() {
         summary = format!("{summary}   [{warning}]");
     }
     Ok(summary)
+}
+
+/// The prefix YouTube Music gives a release, which is the one automatic signal
+/// worth acting on.
+const ALBUM_PREFIX: &str = "OLAK5uy_";
+
+/// What this folder is, and what said so, recording detection's answer.
+/* Detection only ever says "album": nothing it can see distinguishes a
+   playlist from an album reached by a `PL` link, and the two mistakes are not
+   equal. Calling an album a playlist leaves today's behaviour in place;
+   calling a playlist an album stamps one sleeve across a dozen records, which
+   is the bug this exists to prevent. So silence means playlist and only the
+   `OLAK5uy_` prefix, or the user, promotes a folder.
+
+   Resolves and writes nothing: the answer is wanted before the download and
+   the folder does not exist until the download makes it. `record_kind` is the
+   other half, and runs once there is somewhere to put it. */
+fn settle_kind(
+    playlist_id: Option<&str>,
+    folder: Option<&Path>,
+) -> Option<(manifest::Kind, &'static str)> {
+    let folder = folder?;
+    let named = manifest::kind_of(folder, &manifest::load(folder));
+    if let Some((kind, "the folder name")) = named {
+        return Some((kind, "the folder name"));
+    }
+    if playlist_id.is_some_and(|id| id.starts_with(ALBUM_PREFIX)) {
+        return Some((manifest::Kind::Album, "the playlist id"));
+    }
+    named
+}
+
+/// Writes down what detection worked out, once the folder is there to hold it.
+/* Only what the listing decided. A name that says it needs no header, and one
+   left behind by a marker somebody has since deleted would go on deciding
+   with nothing on screen to explain it; `an earlier sync` is the header
+   already saying the same thing.
+
+   After the download, because before it a brand new playlist's folder does
+   not exist and the write fails for that reason alone: the header was then
+   never recorded on the one run that discovered it, the library showed no
+   album until somebody synced a second time, and a retry in the same session
+   re-resolved `playlist` and deleted the `cover.jpg` the run had just kept.
+   A folder still missing here is a run where nothing downloaded at all, which
+   is not worth a line in the log. */
+fn record_kind(tx: &Sender<Msg>, folder: Option<&Path>, kind: Option<(manifest::Kind, &str)>) {
+    let (Some(folder), Some((kind, "the playlist id"))) = (folder, kind) else {
+        return;
+    };
+    if !folder.is_dir() {
+        return;
+    }
+    if let Err(err) = manifest::set_kind(folder, kind) {
+        let _ = tx.send(Msg::Log(format!("recording the album marker: {err}")));
+    }
+}
+
+/// Matches the files already in the folder to the videos the listing named,
+/// on the one sync that gives a folder earworm did not download a URL.
+/* The whole feature turns on this. Without it, attaching a URL downloads the
+   entire playlist again beside the copies already there, because `scan`
+   matches by video id and these files have none.
+
+   Three rules, in this order, and the order is the confidence:
+
+     1. The predicted filename, which `scan` has already tried: a track that
+        matched it is `Have` before this runs. That catches a folder somebody
+        made with earworm and then lost the sidecar from.
+     2. The title, against the file's title tag and then against its filename
+        stem with any leading number stripped. Composed and lowercased, the
+        way `mark_departed` and `shelf_matches` already normalise, or every
+        accented or Hangul title misses while the ASCII ones match.
+     3. Duration, within two seconds, and only to break a tie between two
+        files whose titles both matched. Never on its own: every other song
+        is three minutes long, and a duration match alone would hand a video
+        whatever file happens to be the same length.
+
+   A rule that finds more than one file and cannot break the tie matches
+   nothing, which costs a download rather than the wrong file. Everything left
+   over is `Local`: on disk, in no playlist, and not `Gone`, which would claim
+   a video left and let `D` delete it. */
+fn reconcile(tx: &Sender<Msg>, tracks: &mut Vec<Track>) {
+    let Some(folder) = folder_of(tracks) else {
+        return;
+    };
+    /* Every audio file in the folder that no track already holds. Not the
+       sidecar's `~` entries: a folder nobody has edited has no sidecar at
+       all, and the files are just as much there. */
+    let claimed: HashSet<PathBuf> = tracks.iter().filter_map(|t| t.path.clone()).collect();
+    let mut spare: Vec<PathBuf> = audio_files(&folder)
+        .into_iter()
+        .filter(|f| !claimed.contains(f))
+        .collect();
+    if spare.is_empty() {
+        return;
+    }
+
+    // Read once: a tag read per file per candidate would be one per pair.
+    let facts: Vec<(PathBuf, Vec<String>, u64)> = spare
+        .iter()
+        .map(|file| {
+            let info = tag::read(file).ok();
+            let stem = file.file_stem().unwrap_or_default().to_string_lossy().to_string();
+            let mut names = Vec::new();
+            if let Some(info) = &info {
+                names.push(normalised(&info.title));
+            }
+            names.push(normalised(strip_number(&stem)));
+            names.retain(|n| !n.is_empty());
+            (file.clone(), names, info.map_or(0, |i| i.duration))
+        })
+        .collect();
+
+    let mut taken: HashSet<PathBuf> = HashSet::new();
+    let mut matched = 0;
+    for track in tracks.iter_mut().filter(|t| t.status == Status::Pending) {
+        let wanted = normalised(&track.name);
+        if wanted.is_empty() {
+            continue;
+        }
+        let hits: Vec<&(PathBuf, Vec<String>, u64)> = facts
+            .iter()
+            .filter(|(file, _, _)| !taken.contains(file))
+            .filter(|(_, names, _)| names.contains(&wanted))
+            .collect();
+        let found = match hits.len() {
+            0 => continue,
+            1 => hits[0],
+            /* Two files claiming one title, which is where duration earns its
+               place. Still only a tiebreaker: one candidate within two
+               seconds or nothing, because two files that are both the right
+               title and both the right length are not something a guess
+               should choose between. */
+            _ => {
+                let close: Vec<&&(PathBuf, Vec<String>, u64)> = hits
+                    .iter()
+                    .filter(|(_, _, secs)| secs.abs_diff(track.duration) <= 2)
+                    .collect();
+                if close.len() != 1 {
+                    let _ = tx.send(Msg::Log(format!(
+                        "attach: {} matches {} files in this folder and none by duration  ·  \
+                         it will download again",
+                        track.name,
+                        hits.len()
+                    )));
+                    continue;
+                }
+                close[0]
+            }
+        };
+        taken.insert(found.0.clone());
+        track.path = Some(found.0.clone());
+        track.status = Status::Have;
+        matched += 1;
+    }
+
+    /* Numbered past the playlist for the same reason a departure is: the
+       index is what every command finds a track by, and a local file holds no
+       playlist position to collide over. */
+    spare.retain(|f| !taken.contains(f));
+    spare.sort();
+    let next = tracks.iter().map(|t| t.index).max().unwrap_or(0);
+    let local = spare.len();
+    for (offset, file) in spare.into_iter().enumerate() {
+        let name = file.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let id = manifest::local_id(&name);
+        let mut track = Track::new(next + offset + 1, id, name, file.clone());
+        track.status = Status::Local;
+        track.source = "not in playlist".into();
+        track.listed = false;
+        if let Ok(info) = tag::read(&file) {
+            track.artist = info.artist;
+            track.title = info.title;
+            track.album = info.album;
+            track.year = info.year;
+            track.duration = info.duration;
+            if !track.title.is_empty() {
+                track.name = label(&track.title, &track.artist);
+            }
+        }
+        track.was = track.name.clone();
+        tracks.push(track);
+    }
+
+    let word = if local == 1 { "file" } else { "files" };
+    let _ = tx.send(Msg::Log(format!(
+        "attach: {matched} of the playlist's tracks were already here, \
+         {local} {word} it does not list"
+    )));
+}
+
+/// Lowercased, composed and trimmed, which is what every other comparison in
+/// this file does and for the same reason: matched raw, every accented or
+/// Hangul title misses while the ASCII ones still match.
+fn normalised(text: &str) -> String {
+    composed(text.trim()).to_lowercase()
+}
+
+/// A filename stem without the playlist number earworm and most other people
+/// put in front of it, so `03 - Ping Pong` can be compared with `Ping Pong`.
+/* Only a leading run of digits followed by a separator: a title that opens
+   with a number, `1979` or `99 Luftballons`, keeps it, because there is no
+   separator after it. */
+fn strip_number(stem: &str) -> &str {
+    let rest = stem.trim_start_matches(|c: char| c.is_ascii_digit());
+    if rest.len() == stem.len() {
+        return stem;
+    }
+    let trimmed = rest.trim_start();
+    match trimmed.strip_prefix(['-', '.', '_']) {
+        Some(after) => after.trim_start(),
+        None => stem,
+    }
 }
 
 /* What a sync has to do to bring one track to the current format. Decided
@@ -1048,7 +1490,7 @@ fn convert_tracks(
                    every track either fully swapped or fully untouched. Before
                    the old file goes, so a kill in between leaves the sidecar
                    naming a file that is there. */
-                save_manifest(cfg, tracks);
+                save_manifest(cfg, tx, tracks);
                 if let Some(old) = stale {
                     let _ = std::fs::remove_file(old);
                 }
@@ -1133,7 +1575,7 @@ fn adopt_refetched(
                     name: None,
                 });
                 // Before the old file goes. See the same call in `convert_tracks`.
-                save_manifest(cfg, tracks);
+                save_manifest(cfg, tx, tracks);
                 if let Some(old) = stale {
                     let _ = std::fs::remove_file(old);
                 }
@@ -1216,11 +1658,14 @@ fn tag_tracks(
         if cancel.load(Ordering::SeqCst) {
             break;
         }
-        /* Neither has a file this run is entitled to touch: a departed one is
-           somebody else's playlist position, a skipped one was never fetched.
-           Falling through marks both `Failed` for having no file. */
+        /* None of these has a file this run is entitled to touch: a departed
+           one is somebody else's playlist position, a skipped one was never
+           fetched, and a local one is a file the playlist knows nothing about,
+           so a lookup here would retag somebody's own music off a playlist it
+           is not in. Falling through marks the first two `Failed` for having
+           no file. */
         if wanted.is_some_and(|only| !only.contains(&track.index))
-            || matches!(track.status, Status::Gone | Status::Skipped)
+            || matches!(track.status, Status::Gone | Status::Skipped | Status::Local)
         {
             continue;
         }
@@ -1420,6 +1865,14 @@ fn rename_shelf(
     let old_playlist = to.join(format!("{current}.m3u8"));
     if old_playlist.is_file() {
         let _ = std::fs::rename(&old_playlist, to.join(format!("{name}.m3u8")));
+        /* And the header that says which playlist file is earworm's own moves
+           with it. Left naming the old filename, `write_playlist` in a folder
+           with no URL finds a file it does not recognise and refuses for
+           good: earworm would stop updating its own playlist after a rename,
+           silently, for the rest of that folder's life. */
+        if manifest::load(&to).playlist.as_deref() == Some(format!("{current}.m3u8").as_str()) {
+            let _ = manifest::set_playlist(&to, &format!("{name}.m3u8"));
+        }
     }
     manifest::set_name(&to, &name)
         .with_context(|| format!("recording the name in {}", manifest::path(&to).display()))?;
@@ -1443,6 +1896,16 @@ fn rename_shelf(
    well. The question is asked here rather than in the UI because the reply
    channel lives on the worker, and the safe answer goes first because Enter
    takes the highlighted row. */
+/// What `D` was asked to do, so a row's meaning does not depend on its
+/// position in a menu that is a row shorter for some folders.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Remove {
+    Keep,
+    Forget,
+    Hide,
+    Delete,
+}
+
 fn remove_shelf(
     cfg: &mut Config,
     tx: &Sender<Msg>,
@@ -1459,25 +1922,69 @@ fn remove_shelf(
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
         .context("that folder has no name to remove")?;
+    /* The rows carry their answers rather than the reader counting them: a
+       folder earworm did not download has nothing to forget, so that row is
+       absent and a bare index would mean a different thing on the two
+       folders this menu opens on. */
+    let synced = manifest::path(folder).is_file();
+    let audio = audio_files(folder).len();
+    let mut rows = vec![("keep it".to_string(), Remove::Keep)];
+    if synced {
+        rows.push((format!("forget {name}"), Remove::Forget));
+    }
+    rows.push((format!("hide {name} from earworm"), Remove::Hide));
+    /* Tracks rather than files, because that is what the number counts:
+       `remove_dir_all` takes the whole folder, `cover.jpg` and the sidecar
+       with it, and a count of six against a word meaning everything would be
+       the one row on this menu that understates itself. */
+    let tracks_word = if audio == 1 { "track" } else { "tracks" };
+    rows.push((
+        format!("delete {name} and its {audio} {tracks_word}"),
+        Remove::Delete,
+    ));
+
+    /* Says what each row costs, since every one of them but the first takes
+       something away and only the last is undoable by re-downloading. */
+    let note = if synced {
+        "forget drops the playlist and stops syncing it  ·  hide takes the row off the library  ·  both keep the audio  ·  delete takes the folder as well"
+    } else {
+        "earworm did not download this folder, so there is nothing to forget  ·  hide takes the row off the library and keeps the audio  ·  delete takes the files with it"
+    };
     let Some(choice) = asker.choose_noted(
         &format!("Remove {name}?"),
-        "forget keeps the audio and drops the playlist  ·  delete takes the folder as well",
-        vec![
-            "keep it".into(),
-            format!("forget {name}"),
-            format!("delete {name} and its files"),
-        ],
+        note,
+        rows.iter().map(|(label, _)| label.clone()).collect(),
     ) else {
         return cancelled(tx);
     };
-    if choice == 0 {
+    /* Out of range can only be a bug in the menu above, and keeping is the
+       safe way to be wrong, but silently safe is how the last index drift
+       went unnoticed for a version. */
+    debug_assert!(choice < rows.len(), "answer {choice} is off a menu of {}", rows.len());
+    let chosen = rows.get(choice).map(|(_, act)| *act).unwrap_or(Remove::Keep);
+    if chosen == Remove::Keep {
         let _ = tx.send(Msg::Flash(format!("keeping {name}")));
         return Ok(());
     }
+    /* Hiding leaves the folder exactly as it is, so cliamp's copy of it is
+       still playable and still correct: only the row goes. */
+    if chosen == Remove::Hide {
+        manifest::hide(folder).with_context(|| format!("hiding {}", folder.display()))?;
+        /* The line to remove, not the file: a found folder's sidecar holds
+           nothing else and deleting it would be a clean undo, but a folder
+           earworm downloaded keeps its URL, its rename and every id in that
+           same file, and throwing it away re-downloads the lot beside the
+           copies on disk. One message has to be true of both. */
+        let _ = tx.send(Msg::Flash(format!(
+            "hid {name}  ·  the audio is untouched  ·  remove the #hidden line from its .earworm to bring it back"
+        )));
+    }
     /* Before either removal, since the stored name is built from the path
        this folder has now: afterwards there is nothing left that names it. */
-    player::forget(folder);
-    if choice == 1 {
+    if chosen != Remove::Hide {
+        player::forget(folder);
+    }
+    if chosen == Remove::Forget {
         /* Already gone is gone: the row was listed from a manifest that
            someone may have deleted by hand since. */
         for file in [manifest::path(folder), folder.join(format!("{name}.m3u8"))] {
@@ -1487,7 +1994,8 @@ fn remove_shelf(
                 Err(e) => bail!("removing {}: {e}", file.display()),
             }
         }
-    } else {
+    }
+    if chosen == Remove::Delete {
         std::fs::remove_dir_all(folder)
             .with_context(|| format!("deleting {}", folder.display()))?;
     }
@@ -1502,11 +2010,27 @@ fn remove_shelf(
         shelves: library(&cfg.dir),
         show: open,
     });
-    let _ = tx.send(Msg::Flash(if choice == 1 {
-        format!("forgot {name}  ·  audio kept")
-    } else {
-        format!("deleted {name}")
-    }));
+    /* Forgetting takes the sidecar, not the music, and a folder holding
+       audio is on the library list whether earworm downloaded it or not. So
+       the row does not go: it drops back to a folder earworm merely found,
+       which `R` passes by and `S` would have to be given a URL to sync. Say
+       that, or the key looks as though it half worked.
+
+       On `chosen`, not on the index: read as `choice == 1` this said "forgot"
+       after a hide on a found folder and "deleted" after a hide on a synced
+       one, which is a claim that earworm destroyed a folder still entirely on
+       disk. Hiding has already said its piece above and wants no second line. */
+    match chosen {
+        Remove::Forget => {
+            let _ = tx.send(Msg::Flash(format!(
+                "forgot {name}  ·  audio kept  ·  no longer synced"
+            )));
+        }
+        Remove::Delete => {
+            let _ = tx.send(Msg::Flash(format!("deleted {name}")));
+        }
+        Remove::Keep | Remove::Hide => {}
+    }
     Ok(())
 }
 
@@ -1815,24 +2339,51 @@ fn start_url(
        save reports rather than aborting the URL that was just typed. */
     report(tx, set_format(cfg, tx, asker));
     let gate = cfg.pick;
-    Some(pipeline(cfg, tx, cancel, tracks, gate))
+    Some(pipeline(cfg, tx, cancel, tracks, Pass::plain(gate)))
 }
 
 /// Syncs the playlist that is open against the URL its manifest recorded,
 /// which is the point of opening one offline: look first, download second.
+/* With no URL recorded, this is where one is given. A folder earworm did not
+   download has files and no playlist behind them, and attaching is the
+   interactive act that gives it one: `S` on the open folder and nowhere else,
+   because the matching that follows needs somebody at the pick gate. The
+   folder is pinned by name first, or the download writes the whole playlist
+   into a second folder named after the playlist upstream and leaves this one
+   sitting beside it. */
 fn sync_open(
     cfg: &mut Config,
     tx: &Sender<Msg>,
     cancel: &AtomicBool,
     tracks: &mut Vec<Track>,
 ) -> Result<String> {
-    if cfg.url.is_empty() {
-        bail!("this playlist has no saved URL to sync from  ·  n syncs one by URL");
+    let attaching = cfg.url.is_empty();
+    let folder = folder_of(tracks).context("no folder is open to sync")?;
+    if attaching {
+        let name = folder.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let Some(url) = prompt_url(tx, Escape::Keep) else {
+            bail!("cancelled  ·  nothing was downloaded");
+        };
+        cfg.url = url;
+        /* Before the run, because `output_template` reads it: without it the
+           download writes the whole playlist into a second folder named after
+           the playlist upstream and leaves this one sitting beside it. */
+        cfg.folder = Some(name);
     }
     let _ = tx.send(Msg::Restart);
     tracks.clear();
-    let gate = cfg.pick;
-    pipeline(cfg, tx, cancel, tracks, gate)
+    let pass = if attaching {
+        Pass::attaching()
+    } else {
+        Pass::plain(cfg.pick)
+    };
+    /* Nothing is written here. `write_manifest` records `cfg.folder` as it
+       writes the sidecar, so the `#name` header arrives with the `#url` in one
+       file, from the run that earned both. A sync that failed on a typo'd URL
+       or a dead network therefore leaves a folder earworm did not download
+       exactly as it found it, which matters because a hidden file appearing
+       in somebody's music folder is meant to be said out loud. */
+    pipeline(cfg, tx, cancel, tracks, pass)
 }
 
 /// Downloads and re-tags whatever came out `failed`. The archive names every
@@ -1885,14 +2436,23 @@ fn retry(
     /* The first pass dropped whatever it wrote, so an image here is one
        somebody chose: `written` leaves it alone, and it is on `theirs`, so
        the end of this pass leaves it alone too. */
+    /* The same answer the first pass used, re-resolved rather than carried:
+       a retry is a separate command and the folder may have been renamed
+       between the two. */
+    let album = folder
+        .as_deref()
+        .and_then(|f| manifest::kind_of(f, &manifest::load(f)))
+        .is_some_and(|(kind, _)| kind == manifest::Kind::Album);
     let mut cover = CoverState {
         written: folder.as_deref().is_some_and(has_cover),
+        one_sleeve: album,
+        ..CoverState::default()
     };
     tag_tracks(cfg, tx, cancel, tracks, &playlist, asker, &mut cover, Some(&failed));
 
     sync_manifest(cfg, tracks);
     let playlist_file = write_playlist(cfg, tracks)?;
-    drop_folder_cover(tracks, &theirs);
+    drop_folder_cover(tracks, &theirs, album);
 
     /* Rebuilt rather than appended to: this replaces the run's own summary,
        which is what gets printed on exit, so it has to still say where the
@@ -1961,7 +2521,7 @@ fn undo(cfg: &Config, tx: &Sender<Msg>, tracks: &mut [Track], held: &mut Option<
         }
     }
     if back > 0 {
-        save_manifest(cfg, tracks);
+        save_manifest(cfg, tx, tracks);
         write_playlist(cfg, tracks)?;
     }
     let _ = tx.send(Msg::Flash(format!("undid {what}")));
@@ -2098,7 +2658,7 @@ fn bulk(
        selection, and rebuilding a twenty-track one by hand is the annoyance
        the deferred unmark exists to avoid. */
     if changed > 0 {
-        save_manifest(cfg, tracks);
+        save_manifest(cfg, tx, tracks);
         write_playlist(cfg, tracks)?;
         let _ = tx.send(Msg::Unmark);
         let plural = if changed == 1 { "track" } else { "tracks" };
@@ -2217,7 +2777,7 @@ fn edit(
         year,
     };
     write_track(cfg, tx, tracks, pos, fields, "typed")?;
-    save_manifest(cfg, tracks);
+    save_manifest(cfg, tx, tracks);
     write_playlist(cfg, tracks)?;
     *held = Some(Undo {
         what: format!("the edit of track {index}"),
@@ -2265,7 +2825,12 @@ fn search(
     };
     /* The folder image went with the pass: the hit still gets embedded, and
        no new file is left behind. */
-    let mut cover = CoverState { written: true };
+    /* One track, so there is no sleeve to share, and `written` keeps this
+       from touching the folder image either way. */
+    let mut cover = CoverState {
+        written: true,
+        ..CoverState::default()
+    };
     let old = tracks[pos].artist.clone();
     let mut note = m.score.map(|score| format!("score {score:.2}")).unwrap_or_default();
     let (artist, title, why) = tag::apply(&path, &m, cfg, &mut cover, asker, index, &old)?;
@@ -2308,7 +2873,7 @@ fn search(
     if !departed {
         rename(cfg, tx, &mut tracks[pos]);
     }
-    save_manifest(cfg, tracks);
+    save_manifest(cfg, tx, tracks);
     write_playlist(cfg, tracks)?;
     /* Recording no undo is not the same as leaving the last one armed: `u`
        would put the tags back that this search has just replaced, over a
@@ -2375,6 +2940,12 @@ fn note_departures(cfg: &Config, tx: &Sender<Msg>, complete: bool, tracks: &mut 
     let mut missing: Vec<(String, PathBuf)> = manifest::read(&folder)
         .into_iter()
         .filter(|(id, _)| !current.contains(id.as_str()))
+        /* A file earworm did not download is in no listing, ever, so its
+           absence from one says nothing: this is the id earworm invented for
+           it. Without this, attaching a URL to a folder somebody copied in
+           would call every file it holds departed, mark the departures proven
+           off a complete listing, and offer the lot to `D`. */
+        .filter(|(id, _)| !manifest::is_local(id))
         .collect();
     if missing.is_empty() {
         return;
@@ -2461,7 +3032,15 @@ fn folder_covers(tracks: &[Track]) -> Vec<&'static str> {
    and nothing else. Only what the pass wrote, though. Deleting one that was
    already there is not recoverable and nothing on screen would say it
    happened, so `keep` is what `folder_covers` saw on the way in. */
-fn drop_folder_cover(tracks: &[Track], keep: &[&str]) {
+/* An album is the other exception. Its `cover.jpg` is that album's sleeve
+   rather than an arbitrary track's, and one image matching every file in the
+   folder is what a file manager and most players want. On a playlist the same
+   file is the first track's art wearing the folder's name, which is what this
+   was written to clear up. */
+fn drop_folder_cover(tracks: &[Track], keep: &[&str], album: bool) {
+    if album {
+        return;
+    }
     if let Some(folder) = folder_of(tracks) {
         for name in COVER_NAMES {
             if keep.contains(&name) {
@@ -2543,7 +3122,7 @@ fn purge(cfg: &Config, tx: &Sender<Msg>, tracks: &mut Vec<Track>, asker: &Asker)
        sidecar here rather than needing to be named. Written before the
        flash: a sidecar still naming a deleted file would re-list it as
        missing on the library screen. */
-    save_manifest(cfg, tracks);
+    save_manifest(cfg, tx, tracks);
 
     let done = dropped.len();
     if done < count {
@@ -2844,8 +3423,21 @@ fn clean(text: &str) -> String {
     }
 }
 
-fn save_manifest(cfg: &Config, tracks: &[Track]) {
+/* Adoption is this function running for the first time in a folder earworm
+   did not download: an edit is the moment the user asks earworm to change
+   that folder, and the sidecar is what carries the change. It is said once,
+   because a hidden file appearing in somebody's music folder should not be
+   something they find out about by looking. A folder with a URL is one
+   earworm downloaded, whose sidecar is no news at all. */
+fn save_manifest(cfg: &Config, tx: &Sender<Msg>, tracks: &[Track]) {
+    let fresh = folder_of(tracks).filter(|f| !manifest::path(f).is_file());
     write_manifest(cfg, tracks, false);
+    if let Some(folder) = fresh.filter(|_| cfg.url.is_empty()) {
+        let name = folder.file_name().unwrap_or_default().to_string_lossy();
+        let _ = tx.send(Msg::Flash(format!(
+            "adopted {name}  ·  earworm keeps a .earworm here now"
+        )));
+    }
 }
 
 /// For a pass that actually met the playlist, so the library can say how long
@@ -2875,10 +3467,32 @@ fn write_manifest(cfg: &Config, tracks: &[Track], synced: bool) {
        whose file has gone are the one thing dropped, so a folder that churns
        does not collect dead lines for good. */
     let mine: HashSet<&str> = known.iter().map(|(id, _)| id.as_str()).collect();
+    /* By file as well as by id, which is what lets an id change under a file.
+       Attaching a URL rewrites a local `~id` to the video id the sync matched
+       it to, and the entry it replaces names the same file: kept on id alone,
+       the sidecar would hold two lines for one track, and the next sync would
+       read the stale one back as a file the playlist does not have. */
+    let ours: HashSet<&Path> = known.iter().map(|(_, file)| file.as_path()).collect();
     let kept: Vec<(String, PathBuf)> = manifest::entries(&folder)
         .into_iter()
-        .filter(|(id, file)| !mine.contains(id.as_str()) && file.is_file())
+        .filter(|(id, file)| {
+            !mine.contains(id.as_str()) && !ours.contains(file.as_path()) && file.is_file()
+        })
         .collect();
+
+    /* The run knows which folder it is writing into and the sidecar may not
+       yet: attaching a URL to a folder earworm did not download pins
+       `cfg.folder` so the download lands here rather than under the playlist's
+       upstream title, and the header is what makes the next sync land here
+       too. Recorded by whichever write happens to be first, so it arrives with
+       the `#url` in one file rather than needing a second step afterwards
+       that a failed sync would have to remember not to take. Never overwritten:
+       a name already in the file is one somebody chose with `e`. */
+    if let Some(name) = cfg.folder.as_deref()
+        && manifest::load(&folder).name.is_none()
+    {
+        let _ = manifest::set_name(&folder, name);
+    }
 
     let entries = kept.into_iter().chain(known);
     let _ = if synced {
@@ -2931,7 +3545,27 @@ fn write_playlist(cfg: &Config, tracks: &[Track]) -> Result<Option<PathBuf>> {
         return Ok(None);
     };
     let name = folder.file_name().unwrap_or_default().to_string_lossy();
-    let playlist = folder.join(format!("{name}.m3u8"));
+    let file = format!("{name}.m3u8");
+    let playlist = folder.join(&file);
+
+    /* A folder with a playlist upstream is one earworm owns the `.m3u8` of:
+       the sync decides what the playlist holds, so it rewrites the file every
+       pass. A folder somebody copied in may have brought its own, and it may
+       be named exactly what earworm would name one, after the folder. So in a
+       folder with no URL the file is written only when there is nothing there
+       or when the sidecar says earworm put it there, and the header is
+       recorded at the moment of writing. Replacing somebody's playlist does
+       not come back and nothing on screen would say it happened. */
+    /* Only asked while the folder has no playlist behind it. A sync takes the
+       `.m3u8` over: from then on the playlist upstream is what the folder
+       holds and in what order, which is earworm's answer to write down, and
+       `docs/library.md` says so where somebody can read it before attaching. */
+    let ours = cfg.url.is_empty().then(|| {
+        !playlist.exists() || manifest::load(folder).playlist.as_deref() == Some(file.as_str())
+    });
+    if ours == Some(false) {
+        return Ok(None);
+    }
 
     let mut body = String::from("#EXTM3U\n");
     for track in listed {
@@ -2954,6 +3588,11 @@ fn write_playlist(cfg: &Config, tracks: &[Track]) -> Result<Option<PathBuf>> {
         ));
     }
     std::fs::write(&playlist, body)?;
+    // Only where the question can arise: a folder with a URL never asks it,
+    // and a header written there would be noise in every sidecar earworm has.
+    if ours == Some(true) {
+        let _ = manifest::set_playlist(folder, &file);
+    }
     Ok(Some(playlist))
 }
 
@@ -3188,11 +3827,9 @@ pub mod tests {
         let shelf = Shelf {
             path: folder.clone(),
             name: "Evenings".into(),
-            url: "https://example.com".into(),
+            url: Some("https://example.com".into()),
             tracks: 1,
-            missing: 0,
-            synced: None,
-            files: Vec::new(),
+            ..Shelf::default()
         };
 
         // Nobody has renamed it, so the folder is still the playlist's own
@@ -3264,26 +3901,37 @@ pub mod tests {
         cfg.url.clear();
         let mut tracks = Vec::new();
 
-        let no_url = sync_open(&mut cfg, &channel().0, &AtomicBool::new(false), &mut tracks)
+        /* `S` with no folder open at all. With one open and no URL it asks
+           for one instead of refusing, which is what attaching is. */
+        let no_folder = sync_open(&mut cfg, &channel().0, &AtomicBool::new(false), &mut tracks)
             .unwrap_err()
             .to_string();
-        assert!(no_url.contains("n syncs one by URL"), "{no_url}");
+        assert!(no_folder.contains("no folder is open"), "{no_folder}");
+
+        /* And refusing that question says the download did not happen, rather
+           than leaving the reader to guess from a bare "cancelled". The
+           receiver is dropped rather than left on a temporary, or the ask
+           lands in a channel nobody is reading and blocks for good. */
+        let mut open = vec![Track::new(1, "~a.opus".into(), "A".into(), dir.join("a.opus"))];
+        let (dead, hung_up) = channel();
+        drop(hung_up);
+        let declined = sync_open(&mut cfg, &dead, &AtomicBool::new(false), &mut open)
+            .unwrap_err()
+            .to_string();
+        assert!(declined.contains("nothing was downloaded"), "{declined}");
 
         // A folder of ours with nothing recorded in its sidecar.
         std::fs::write(dir.join(".earworm"), "#url\thttps://example.com\n").unwrap();
         let shelf = Shelf {
             path: dir.clone(),
             name: "Focus".into(),
-            url: "u".into(),
-            tracks: 0,
-            missing: 0,
-            synced: None,
-            files: Vec::new(),
+            url: Some("u".into()),
+            ..Shelf::default()
         };
         let empty = open_shelf(&mut config(true), &channel().0, &mut tracks, &shelf)
             .unwrap_err()
             .to_string();
-        assert!(empty.contains("sync it to fill one in"), "{empty}");
+        assert!(empty.contains("sync it to fill it in"), "{empty}");
 
         // Not downloaded, which is what `r` is for.
         let mut one = vec![Track::new(
@@ -3477,26 +4125,140 @@ pub mod tests {
         }
     }
 
-    /* Only folders that recorded where they came from, in a stable order, and
-       no crash on a directory holding anything else. */
+    /* Attaching a URL to a folder earworm did not download runs a matching
+       pass whose only backstop is somebody at the pick gate reading it. An
+       unattended walk of the library has nobody there, so it must pass the
+       folder by rather than download the whole playlist beside the files
+       already in it. Nothing here reaches yt-dlp: every folder is URL-less,
+       so a skip that was not happening would be a failed network call. */
+    /* The row's pill has to come from the same resolver the sync asks, or
+       the library can say one thing about a folder and a run another. Both
+       sources, since the name and the header reach it by different paths. */
     #[test]
-    fn the_library_finds_the_folders_that_know_their_url() {
-        let root = scratch("library");
-        for (name, url) in [("Beta", Some("u-beta")), ("Alpha", Some("u-alpha")), ("NoUrl", None)] {
+    fn a_library_row_carries_the_kind_from_the_name_or_the_header() {
+        let root = scratch("library-kind");
+        for name in ["Autobahn [album]", "Chill Evenings", "Kraftwerk"] {
             let folder = root.join(name);
             std::fs::create_dir_all(&folder).unwrap();
-            match url {
-                Some(u) => manifest::write(&folder, u, std::iter::empty()).unwrap(),
-                // Written before the header existed, so it cannot be resynced.
-                None => std::fs::write(manifest::path(&folder), "vid\tfile.opus\n").unwrap(),
-            }
+            std::fs::write(folder.join("01 - A.opus"), "audio").unwrap();
         }
+        // What a sync that met an OLAK5uy_ listing leaves behind.
+        std::fs::write(
+            manifest::path(&root.join("Kraftwerk")),
+            "#url\thttps://x\n#kind\talbum\n",
+        )
+        .unwrap();
+
+        let kind = |name: &str| {
+            library(&root)
+                .into_iter()
+                .find(|s| s.name == name)
+                .unwrap()
+                .kind
+        };
+        assert_eq!(kind("Autobahn [album]"), Some(manifest::Kind::Album));
+        assert_eq!(kind("Kraftwerk"), Some(manifest::Kind::Album));
+        assert_eq!(kind("Chill Evenings"), None, "a plain folder claimed a kind");
+    }
+
+    #[test]
+    fn a_resync_passes_by_a_folder_with_no_url_and_says_which() {
+        let root = scratch("resync-skip");
+        for name in ["Copied", "Adopted"] {
+            let folder = root.join(name);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("01 - A.opus"), "audio").unwrap();
+        }
+        // The adopted shape: a sidecar with entries and no `#url`.
+        std::fs::write(
+            manifest::path(&root.join("Adopted")),
+            "~01 - A.opus\t01 - A.opus\n",
+        )
+        .unwrap();
+
+        let found = library(&root);
+        assert_eq!(found.len(), 2, "the folders are not on the list at all");
+
+        let (tx, rx) = mpsc::channel();
+        let mut cfg = config(true);
+        cfg.dir = root.clone();
+        let cancel = AtomicBool::new(false);
+        let mut tracks = Vec::new();
+        let summary = resync(&mut cfg, &tx, &cancel, &mut tracks, found).unwrap();
+        drop(tx);
+
+        assert!(
+            summary.starts_with("0 of 2 playlists"),
+            "something was synced: {summary}"
+        );
+        assert!(summary.contains("2 folders have no URL"), "{summary}");
+        let logs: Vec<String> = rx
+            .into_iter()
+            .filter_map(|m| match m {
+                Msg::Log(line) => Some(line),
+                _ => None,
+            })
+            .collect();
+        for name in ["Copied", "Adopted"] {
+            assert!(
+                logs.iter().any(|l| l.starts_with(&format!("{name}: no playlist URL"))),
+                "{name} was passed by with nothing saying why: {logs:?}"
+            );
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /* Every folder that holds a playlist, in a stable order, and no crash on
+       a directory holding anything else. A recorded URL is what makes a row
+       syncable, not what makes it a row: a folder somebody copied in holds
+       the same tags and filenames and the library draws nothing else. */
+    #[test]
+    fn the_library_finds_every_folder_and_says_which_know_their_url() {
+        let root = scratch("library");
+        for (name, url) in [("Beta", "u-beta"), ("Alpha", "u-alpha")] {
+            let folder = root.join(name);
+            std::fs::create_dir_all(&folder).unwrap();
+            manifest::write(&folder, url, std::iter::empty()).unwrap();
+        }
+        // A sidecar written before the `#url` header existed: it has entries
+        // and no URL, which is the adopted folder's shape as well.
+        let legacy = root.join("NoUrl");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("file.opus"), "audio").unwrap();
+        std::fs::write(manifest::path(&legacy), "vid\tfile.opus\n").unwrap();
+        // Nothing of ours in it at all, which is the found folder.
+        let copied_dir = root.join("Copied");
+        std::fs::create_dir_all(&copied_dir).unwrap();
+        std::fs::write(copied_dir.join("01 - A.m4a"), "audio").unwrap();
+        std::fs::write(copied_dir.join("cover.jpg"), "not audio").unwrap();
+        /* The AppleDouble macOS writes beside every file on a FAT or exFAT
+           volume, which is exactly how a folder arrives off a USB stick. It
+           carries the audio extension and is not audio, so the extension
+           filter alone counts it as a track. */
+        std::fs::write(copied_dir.join("._01 - A.m4a"), "resource fork").unwrap();
+        std::fs::write(copied_dir.join(".DS_Store"), "junk").unwrap();
+        // A directory under --dir that is not a playlist at all.
+        std::fs::create_dir_all(root.join("Scratch")).unwrap();
+        std::fs::write(root.join("Scratch/notes.txt"), "text").unwrap();
         std::fs::write(root.join("loose.opus"), "not a folder").unwrap();
 
         let found = library(&root);
         let names: Vec<&str> = found.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["Alpha", "Beta"], "wrong folders or wrong order");
-        assert_eq!(found[0].url, "u-alpha");
+        assert_eq!(
+            names,
+            ["Alpha", "Beta", "Copied", "NoUrl"],
+            "wrong folders or wrong order"
+        );
+        assert_eq!(found[0].url.as_deref(), Some("u-alpha"));
+        let copied = &found[2];
+        assert_eq!(copied.url, None, "a folder nobody synced claims a URL");
+        assert_eq!(
+            copied.files,
+            vec![("01 - A.m4a".to_string(), true)],
+            "something that is not a track was counted as one"
+        );
+        assert_eq!(copied.tracks, 1);
+        assert_eq!(found[3].url, None, "a sidecar with no #url claims one");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -3562,8 +4324,8 @@ pub mod tests {
             // waiting for a message nothing is going to send.
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
                 match msg {
-                    Msg::Ask(_, reply) => {
-                        reply.send(Reply::Choice(1)).unwrap();
+                    Msg::Ask(prompt, reply) => {
+                        reply.send(pick(&prompt, "forget")).unwrap();
                         answered = true;
                     }
                     Msg::Flash(line) => flashes.push(line),
@@ -3594,6 +4356,141 @@ pub mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /* Driving the menu once and handing back what it offered, since what is
+       on it is the thing these two are about. */
+    fn remove_menu(
+        cfg: &mut Config,
+        folder: &Path,
+        answer: &str,
+    ) -> (Vec<String>, String, Vec<String>) {
+        let (tx, rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let asker = Asker { tx: tx.clone(), enabled: true };
+                let mut tracks = Vec::new();
+                remove_shelf(cfg, &tx, &asker, &mut tracks, folder)
+            });
+            let (mut rows, mut note, mut flashes) = (Vec::new(), String::new(), Vec::new());
+            while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
+                match msg {
+                    Msg::Ask(prompt, reply) => {
+                        if let crate::app::Prompt::Choice { options, note: said, .. } = &prompt {
+                            rows.clone_from(options);
+                            note.clone_from(said);
+                        }
+                        reply.send(pick(&prompt, answer)).unwrap();
+                    }
+                    Msg::Flash(line) => flashes.push(line),
+                    _ => {}
+                }
+                if !rows.is_empty() && worker.is_finished() {
+                    break;
+                }
+            }
+            worker.join().unwrap().unwrap();
+            while let Ok(msg) = rx.try_recv() {
+                if let Msg::Flash(line) = msg {
+                    flashes.push(line);
+                }
+            }
+            (rows, note, flashes)
+        })
+    }
+
+    /* `D` used to refuse a folder earworm did not download outright, on the
+       grounds that the only row left would be deleting somebody's music. It
+       left no way to get such a row off the library at all, which is worse:
+       the answer is a menu without the row that cannot apply, not no menu. */
+    #[test]
+    fn a_found_folder_is_offered_every_row_that_means_something() {
+        let root = scratch("remove-found");
+        let folder = root.join("deep-focus-chillstep");
+        std::fs::create_dir_all(&folder).unwrap();
+        for n in 1..=6 {
+            std::fs::write(folder.join(format!("Chillstep #{n}.mp3")), "audio").unwrap();
+        }
+        let mut cfg = config(true);
+        cfg.dir = root.clone();
+
+        let (rows, note, _) = remove_menu(&mut cfg, &folder, "keep");
+        assert!(
+            !rows.iter().any(|r| r.starts_with("forget")),
+            "offered to forget a sidecar that is not there: {rows:?}"
+        );
+        assert!(rows.iter().any(|r| r.starts_with("hide")), "{rows:?}");
+        /* The count is the thing worth reading twice, and the header clips,
+           so it goes in the row and the note carries the rest. */
+        assert!(
+            rows.iter().any(|r| r.contains("6 tracks")),
+            "the delete row did not say what it would take: {rows:?}"
+        );
+        assert!(note.contains("nothing to forget"), "{note:?}");
+        assert!(folder.is_dir(), "keeping removed something");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /* The row goes and the music does not, which is the whole point of it:
+       every other answer on that menu takes something off the disk. */
+    #[test]
+    fn hiding_a_folder_takes_the_row_and_leaves_every_file() {
+        let root = scratch("remove-hide");
+        let folder = root.join("deep-focus-chillstep");
+        std::fs::create_dir_all(&folder).unwrap();
+        let files: Vec<PathBuf> = (1..=3)
+            .map(|n| folder.join(format!("Chillstep #{n}.mp3")))
+            .collect();
+        for file in &files {
+            std::fs::write(file, "audio").unwrap();
+        }
+        let mut cfg = config(true);
+        cfg.dir = root.clone();
+        assert_eq!(library(&root).len(), 1, "the folder was not on the list to start with");
+
+        let (_, _, flashes) = remove_menu(&mut cfg, &folder, "hide");
+
+        assert!(library(&root).is_empty(), "the row survived being hidden");
+        assert_eq!(
+            hidden(&root),
+            vec!["deep-focus-chillstep".to_string()],
+            "nothing could say which folder had gone"
+        );
+        for file in &files {
+            assert!(file.is_file(), "hiding took {} with it", file.display());
+        }
+        assert!(manifest::load(&folder).hidden, "nothing recorded it as hidden");
+        /* The whole list, not `any`: read off the row index rather than the
+           answer, the line after this one claimed the folder had been forgotten
+           on a found folder and deleted on a synced one, and `any` cannot see a
+           message that is there and wrong. */
+        assert_eq!(flashes.len(), 1, "hiding said something else as well: {flashes:?}");
+        /* A row that vanished with no way back is a folder somebody has lost,
+           so the flash carries the undo: the line, not the file, since that
+           file is where a synced folder keeps its URL and every id. */
+        assert!(flashes[0].contains("#hidden"), "no word on how to bring it back: {flashes:?}");
+
+        // And the way back is exactly what it says.
+        let body = std::fs::read_to_string(manifest::path(&folder)).unwrap();
+        let kept: String = body.lines().filter(|l| !l.starts_with("#hidden")).collect();
+        std::fs::write(manifest::path(&folder), kept).unwrap();
+        assert_eq!(library(&root).len(), 1, "dropping the line did not bring it back");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /* The remove menu is a row shorter for a folder earworm did not download,
+       so a test answering by index answers a different question depending on
+       the fixture. Picked by the word the row opens with, which is what the
+       reader picks by as well. */
+    fn pick(prompt: &crate::app::Prompt, word: &str) -> Reply {
+        let crate::app::Prompt::Choice { options, .. } = prompt else {
+            panic!("that was not a menu");
+        };
+        let at = options
+            .iter()
+            .position(|row| row.starts_with(word))
+            .unwrap_or_else(|| panic!("no {word:?} row in {options:?}"));
+        Reply::Choice(at)
+    }
+
     /* Answered "delete": the whole folder goes, audio with it. */
     #[test]
     fn deleting_a_playlist_takes_the_folder_with_it() {
@@ -3614,8 +4511,8 @@ pub mod tests {
             });
             let mut answered = false;
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
-                if let Msg::Ask(_, reply) = msg {
-                    reply.send(Reply::Choice(2)).unwrap();
+                if let Msg::Ask(prompt, reply) = msg {
+                    reply.send(pick(&prompt, "delete")).unwrap();
                     answered = true;
                     break;
                 }
@@ -3649,8 +4546,8 @@ pub mod tests {
             let mut flashes = Vec::new();
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
                 match msg {
-                    Msg::Ask(_, reply) => {
-                        reply.send(Reply::Choice(0)).unwrap();
+                    Msg::Ask(prompt, reply) => {
+                        reply.send(pick(&prompt, "keep")).unwrap();
                         break;
                     }
                     Msg::Flash(line) => flashes.push(line),
@@ -3690,16 +4587,16 @@ pub mod tests {
                 remove_shelf(&mut cfg, &tx, &asker, &mut tracks, &folder)?;
                 Ok::<_, anyhow::Error>(tracks.len())
             });
-            let (mut restarted, mut back, mut empty) = (false, false, false);
+            let (mut restarted, mut back, mut empty) = (false, false, Vec::new());
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
                 match msg {
-                    Msg::Ask(_, reply) => {
-                        reply.send(Reply::Choice(1)).unwrap();
+                    Msg::Ask(prompt, reply) => {
+                        reply.send(pick(&prompt, "forget")).unwrap();
                     }
                     Msg::Restart => restarted = true,
                     Msg::Library { shelves, show } => {
                         back = show;
-                        empty = shelves.is_empty();
+                        empty = shelves.iter().map(|s| s.url.clone()).collect();
                     }
                     _ => {}
                 }
@@ -3714,7 +4611,11 @@ pub mod tests {
         assert_eq!(tracks_left, 0, "the open run kept its tracks");
         assert!(restarted, "the run state was never cleared");
         assert!(back, "the screen stayed on the deleted folder");
-        assert!(empty, "the library still lists what was removed");
+        /* Forgetting takes the sidecar and leaves the audio, and a folder
+           holding audio is on the list either way: what it loses is its URL,
+           which is what makes `R` pass it by and `S` ask for one. Deleting is
+           the answer that takes the row, and it takes the music with it. */
+        assert_eq!(empty, vec![None], "forgetting kept the playlist URL");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -3874,7 +4775,7 @@ pub mod tests {
         tracks[1].status = Status::Skipped;
 
         let asker = Asker { tx: tx.clone(), enabled: false };
-        let mut cover = CoverState { written: true };
+        let mut cover = CoverState { written: true, ..CoverState::default() };
         let cancel = AtomicBool::new(false);
         tag_tracks(
             &config(false),
@@ -4115,6 +5016,965 @@ pub mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /* Adoption. The first edit in a folder earworm did not download writes a
+       hidden file into somebody's music folder, which is a thing they should
+       be told once rather than find out about by looking. Once, because a
+       line on every edit is nagging, and the ids in it have to be earworm's
+       own or every guard above has nothing to bite on.
+
+       And the playlist: `write_playlist` runs on every edit and names its
+       file after the folder, which in a folder somebody copied in may already
+       be their own. Replacing it does not come back. */
+    #[test]
+    fn the_first_edit_adopts_the_folder_and_leaves_the_users_playlist_alone() {
+        let dir = scratch("adopt");
+        let file = dir.join("01 - A.opus");
+        if tiny_opus(&file).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        /* Named exactly what earworm would name its own, which is the case
+           that cannot be told apart without a record of who wrote it. */
+        let name = dir.file_name().unwrap().to_string_lossy().to_string();
+        let theirs = dir.join(format!("{name}.m3u8"));
+        let hand_written = "#EXTM3U\n# my favourites, in my order\n01 - A.opus\n";
+        std::fs::write(&theirs, hand_written).unwrap();
+
+        let shelf = library(dir.parent().unwrap())
+            .into_iter()
+            .find(|s| s.path == dir)
+            .expect("the folder is not in the library");
+        let mut cfg = config(false);
+        cfg.dir = dir.parent().unwrap().to_path_buf();
+        let mut tracks = Vec::new();
+        open_shelf(&mut cfg, &channel().0, &mut tracks, &shelf).unwrap();
+        assert!(cfg.url.is_empty(), "a folder nobody synced carries a URL");
+
+        let flashes = |rx: &Receiver<Msg>| -> Vec<String> {
+            rx.try_iter()
+                .filter_map(|m| match m {
+                    Msg::Flash(said) => Some(said),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let (tx, rx) = channel();
+        write_track(&cfg, &tx, &mut tracks, 0, named("Neu!", "Hallogallo"), "typed").unwrap();
+        save_manifest(&cfg, &tx, &tracks);
+        write_playlist(&cfg, &tracks).unwrap();
+        let said = flashes(&rx);
+        assert!(
+            said.iter().any(|f| f.starts_with("adopted ")),
+            "a sidecar appeared in the folder with nothing saying so: {said:?}"
+        );
+
+        // The sidecar is there, and its ids are earworm's own.
+        let ids: Vec<String> = manifest::entries(&dir).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(ids.len(), 1);
+        assert!(manifest::is_local(&ids[0]), "the edit invented a video id: {ids:?}");
+
+        // And their playlist file is exactly as they left it.
+        assert_eq!(
+            std::fs::read_to_string(&theirs).unwrap(),
+            hand_written,
+            "the first edit replaced a playlist file earworm did not write"
+        );
+
+        // Said once. A second edit is no longer news about the folder.
+        let (tx, rx) = channel();
+        write_track(&cfg, &tx, &mut tracks, 0, named("Neu!", "Negativland"), "typed").unwrap();
+        save_manifest(&cfg, &tx, &tracks);
+        write_playlist(&cfg, &tracks).unwrap();
+        let said = flashes(&rx);
+        assert!(
+            !said.iter().any(|f| f.starts_with("adopted ")),
+            "every edit says it again: {said:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&theirs).unwrap(),
+            hand_written,
+            "the second edit replaced the playlist the first one spared"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* The other half of that rule: with no playlist file in the folder there
+       is nothing to spare, so earworm writes one and records that it is its
+       own. Without the record the next edit would find a file there, take it
+       for the user's, and leave the playlist stale for good. */
+    #[test]
+    fn an_adopted_folder_with_no_playlist_file_gets_one_earworm_then_keeps() {
+        let dir = scratch("adopt-m3u8");
+        let file = dir.join("01 - A.opus");
+        if tiny_opus(&file).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let name = dir.file_name().unwrap().to_string_lossy().to_string();
+        let ours = dir.join(format!("{name}.m3u8"));
+
+        let shelf = library(dir.parent().unwrap())
+            .into_iter()
+            .find(|s| s.path == dir)
+            .expect("the folder is not in the library");
+        let mut cfg = config(false);
+        cfg.dir = dir.parent().unwrap().to_path_buf();
+        let mut tracks = Vec::new();
+        open_shelf(&mut cfg, &channel().0, &mut tracks, &shelf).unwrap();
+
+        let (tx, _rx) = channel();
+        write_track(&cfg, &tx, &mut tracks, 0, named("Neu!", "Hallogallo"), "typed").unwrap();
+        save_manifest(&cfg, &tx, &tracks);
+        write_playlist(&cfg, &tracks).unwrap();
+        assert!(ours.is_file(), "no playlist was written at all");
+        assert_eq!(
+            manifest::load(&dir).playlist.as_deref(),
+            Some(format!("{name}.m3u8").as_str()),
+            "earworm wrote a playlist and did not record that it was its own"
+        );
+
+        write_track(&cfg, &tx, &mut tracks, 0, named("Neu!", "Negativland"), "typed").unwrap();
+        write_playlist(&cfg, &tracks).unwrap();
+        let after = std::fs::read_to_string(&ours).unwrap();
+        assert!(
+            after.contains("Negativland"),
+            "earworm stopped updating its own playlist: {after}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A listed video the scan found no file for, which is what `reconcile`
+    /// is handed.
+    fn listed(index: usize, id: &str, title: &str, secs: u64, folder: &Path) -> Track {
+        let mut track = Track::new(
+            index,
+            id.into(),
+            title.into(),
+            folder.join(format!("{index:02} - {title}.opus")),
+        );
+        track.duration = secs;
+        track
+    }
+
+    /* The matching, rule by rule. Everything here turns on one thing: a file
+       already in the folder must not be downloaded again, and a file the
+       playlist does not have must not be called departed. */
+    #[test]
+    fn attaching_a_url_matches_the_files_already_in_the_folder() {
+        let dir = scratch("reconcile");
+        let tagged = dir.join("07 - whatever they called it.opus");
+        /* Numbered 05 where the playlist puts it at 2, so the filename the
+           scan predicts is not this one: rule 1 would otherwise cover rule 2
+           and the test would pass with the title matching removed. */
+        let by_name = dir.join("05 - Hallogallo.opus");
+        let theirs = dir.join("99 - Something Else.opus");
+        for file in [&tagged, &by_name, &theirs] {
+            if tiny_opus(file).is_none() {
+                eprintln!("no ffmpeg, skipping");
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+        }
+        // The title tag wins over the filename, which here says nothing.
+        tag::set_fields(
+            &tagged,
+            &tag::Fields {
+                artist: "Stereolab".into(),
+                title: "Ping Pong".into(),
+                ..tag::Fields::default()
+            },
+        )
+        .unwrap();
+
+        let mut tracks = vec![
+            // Matched on its title tag, against a file named nothing like it.
+            listed(1, "vid1", "Ping Pong", 0, &dir),
+            // Matched on the filename stem, with the number stripped off.
+            listed(2, "vid2", "Hallogallo", 0, &dir),
+            // In the playlist and genuinely not here: this one downloads.
+            listed(3, "vid3", "Brand New", 0, &dir),
+        ];
+        let (tx, _rx) = channel();
+        reconcile(&tx, &mut tracks);
+
+        assert_eq!(tracks[0].status, Status::Have, "the title tag was not read");
+        assert_eq!(tracks[0].path.as_deref(), Some(tagged.as_path()));
+        assert_eq!(tracks[1].status, Status::Have, "the filename was not matched");
+        assert_eq!(tracks[1].path.as_deref(), Some(by_name.as_path()));
+        assert_eq!(
+            tracks[2].status,
+            Status::Pending,
+            "a track the folder does not hold was called present"
+        );
+
+        /* And the file the playlist never had: on the list, settled, and not
+           `Gone`, which would claim a video left and let `D` delete it. */
+        assert_eq!(tracks.len(), 4, "the user's own file vanished from the list");
+        let local = &tracks[3];
+        assert_eq!(local.status, Status::Local);
+        assert!(local.status.settled(), "the run would never finish");
+        assert!(!local.listed, "it would be written into the .m3u8");
+        assert!(!local.departure_proven, "D was offered somebody's own music");
+        assert_eq!(local.path.as_deref(), Some(theirs.as_path()));
+        assert!(manifest::is_local(&local.id), "{}", local.id);
+        // Numbered past the playlist, or it collides with a real position.
+        assert!(local.index > 3, "index {}", local.index);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* Duration is a tiebreaker and never a rule of its own: every other song
+       is three minutes, and matching on length alone would hand a video
+       whatever file happens to be the same size. So it only ever chooses
+       between files whose titles already matched. */
+    #[test]
+    fn two_files_with_one_title_are_told_apart_by_length_and_not_by_order() {
+        let dir = scratch("reconcile-tie");
+        // Three files of one title, numbered where the playlist does not put
+        // them, so no predicted filename resolves any of this.
+        let short = dir.join("11 - Intro.opus");
+        let same = dir.join("12 - Intro.opus");
+        let long = dir.join("13 - Intro.opus");
+        if opus_of(&short, "1").is_none()
+            || opus_of(&same, "1").is_none()
+            || opus_of(&long, "6").is_none()
+        {
+            eprintln!("no ffmpeg, skipping");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let (short_secs, long_secs) = (
+            tag::read(&short).unwrap().duration,
+            tag::read(&long).unwrap().duration,
+        );
+        if short_secs.abs_diff(long_secs) <= 2 {
+            eprintln!("ffmpeg gave the fixtures the same length, skipping");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+
+        /* The long one is third in the folder, so a match by position would
+           take the first file and pass for the wrong reason. */
+        let mut tracks = vec![listed(1, "vid1", "Intro", long_secs, &dir)];
+        let (tx, _rx) = channel();
+        reconcile(&tx, &mut tracks);
+        assert_eq!(tracks[0].path.as_deref(), Some(long.as_path()), "matched by order");
+        assert_eq!(tracks[0].status, Status::Have);
+
+        /* And with two files equally good, nothing is matched: the track
+           downloads, which costs a duplicate, where the wrong file costs the
+           user their own music renamed to something it is not. */
+        let mut blind = vec![listed(1, "vid1", "Intro", short_secs, &dir)];
+        let (tx, rx) = channel();
+        reconcile(&tx, &mut blind);
+        drop(tx);
+        assert_eq!(
+            blind[0].status,
+            Status::Pending,
+            "one of two equally good files was picked anyway"
+        );
+        let logs: Vec<String> = rx
+            .into_iter()
+            .filter_map(|m| match m {
+                Msg::Log(line) => Some(line),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            logs.iter().any(|l| l.contains("matches 3 files")),
+            "the download was left unexplained: {logs:?}"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* A matched file changes id: the `~` earworm invented becomes the video
+       id the sync placed it against. Both lines name the same file, so
+       keeping the old one would leave the sidecar holding two entries for one
+       track, and the next sync would read the stale one back as a file the
+       playlist does not have. */
+    #[test]
+    fn a_matched_file_has_its_invented_id_rewritten_in_place() {
+        let dir = scratch("reconcile-id");
+        // Numbered where the playlist does not put it, so the match has to be
+        // the title rather than the filename the scan predicts.
+        let file = dir.join("05 - Hallogallo.opus");
+        if tiny_opus(&file).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        // The sidecar an edit left behind, before any URL was attached.
+        let local = manifest::local_id("05 - Hallogallo.opus");
+        manifest::write(&dir, "", [(local.clone(), file.clone())].into_iter()).unwrap();
+
+        let mut tracks = vec![listed(1, "vid1", "Hallogallo", 0, &dir)];
+        let (tx, _rx) = channel();
+        reconcile(&tx, &mut tracks);
+        assert_eq!(tracks[0].status, Status::Have);
+        tracks[0].listed = true;
+
+        let mut cfg = config(true);
+        cfg.url = "https://www.youtube.com/playlist?list=PL1".into();
+        sync_manifest(&cfg, &tracks);
+
+        let after = manifest::entries(&dir);
+        assert_eq!(
+            after,
+            vec![("vid1".to_string(), file.clone())],
+            "the sidecar kept a second line for the same file"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* A file the playlist does not have is the one thing in the folder
+       earworm has no claim on at all. The lookup must not retag it off a
+       playlist it is not in, the `.m3u8` must not list it, and `D` must never
+       reach it: `Gone` would give it all three, which is why it is not
+       `Gone`. */
+    #[test]
+    fn a_local_file_is_not_retagged_not_listed_and_not_deletable() {
+        let dir = scratch("local-left-alone");
+        let listed_file = dir.join("01 - Mine.opus");
+        let theirs = dir.join("77 - Theirs.opus");
+        if tiny_opus(&listed_file).is_none() || tiny_opus(&theirs).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let was = tag::Fields {
+            artist: "Somebody".into(),
+            title: "Their Own Track".into(),
+            album: "Their Own Record".into(),
+            year: Some(1998),
+        };
+        tag::set_fields(&theirs, &was).unwrap();
+
+        let mut listed_track =
+            Track::new(1, "vid1".into(), "Mine".into(), listed_file.clone());
+        listed_track.status = Status::Have;
+        listed_track.listed = true;
+        let mut local = Track::new(2, manifest::local_id("77 - Theirs.opus"), "Theirs".into(), theirs.clone());
+        local.status = Status::Local;
+        let mut tracks = vec![listed_track, local];
+
+        let cfg = config(true);
+        let (tx, _rx) = channel();
+        // `enabled: false`, so any question the lookup asked would be refused
+        // rather than hanging, and the row would come back changed.
+        let asker = Asker { tx: tx.clone(), enabled: false };
+        let mut cover = CoverState { written: true, ..CoverState::default() };
+        tag_tracks(
+            &cfg,
+            &tx,
+            &AtomicBool::new(false),
+            &mut tracks,
+            "Focus",
+            &asker,
+            &mut cover,
+            None,
+        );
+
+        assert_eq!(
+            tracks[1].status,
+            Status::Local,
+            "the tag pass claimed a file the playlist does not have"
+        );
+        let after = tag::read(&theirs).unwrap();
+        assert_eq!(after.artist, was.artist, "their tags were rewritten");
+        assert_eq!(after.title, was.title);
+        assert_eq!(after.album, was.album, "the playlist name was stamped on it");
+
+        let playlist = write_playlist(&cfg, &tracks).unwrap().unwrap();
+        let body = std::fs::read_to_string(&playlist).unwrap();
+        assert!(body.contains("01 - Mine"), "the playlist lost its own track: {body}");
+        assert!(
+            !body.contains("Theirs"),
+            "a file the playlist does not have was written into it: {body}"
+        );
+
+        // And `D` is not even drawn: it reads `Gone` plus a proven departure,
+        // and a local row is neither.
+        let (ui_tx, _ui_rx) = std::sync::mpsc::channel();
+        let mut app = crate::app::App::new(ui_tx, String::new());
+        app.tracks = tracks.clone();
+        app.done = Some(Ok(String::new()));
+        assert!(!app.can_purge(), "D was offered somebody's own music");
+        assert_eq!(app.purgeable(), 0);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* The gate is forced on for an attaching sync whatever asked for it.
+       CLAUDE.md calls the `false` that `resync` passes load-bearing, and this
+       is the one thing that overrides it: the matching above is a guess, and
+       somebody reading "12 to download" against a folder they know holds
+       twelve is the last defence against it being wrong. A literal at one
+       call site still compiles and still passes the suite when flipped, which
+       is exactly why it is pinned here. */
+    #[test]
+    fn an_attaching_sync_always_stops_at_the_pick_gate() {
+        assert!(Pass::attaching().gate, "the matching would download unwatched");
+        assert!(Pass::attaching().attaching);
+        assert!(!Pass::plain(false).gate);
+        assert!(!Pass::plain(false).attaching, "an ordinary sync reconciles");
+        assert!(!Pass::plain(true).attaching);
+    }
+
+    /* A filename's leading number is earworm's own convention and most other
+       people's, so it has to come off before a title is compared. A title
+       that opens with a number is not one: there is no separator after it. */
+    #[test]
+    fn a_leading_track_number_comes_off_and_a_numeric_title_does_not() {
+        for (stem, want) in [
+            ("03 - Ping Pong", "Ping Pong"),
+            ("03 Ping Pong", "03 Ping Pong"),
+            ("03. Ping Pong", "Ping Pong"),
+            ("03_Ping Pong", "Ping Pong"),
+            ("1979", "1979"),
+            ("99 Luftballons", "99 Luftballons"),
+            ("Ping Pong", "Ping Pong"),
+        ] {
+            assert_eq!(strip_number(stem), want, "{stem}");
+        }
+    }
+
+    /* Reopening an attached folder has to give a local file back the status
+       the sync gave it. Read back as `Have` and `listed`, `mark_departed` then
+       finds it missing from the `.m3u8` the sync correctly left it out of and
+       calls it `gone`: the row claims a video left a playlist the file was
+       never in, which is the one thing `Status::Local` exists to avoid. */
+    #[test]
+    fn a_local_file_is_still_local_when_the_folder_is_reopened() {
+        let root = scratch("local-reopen");
+        let dir = root.join("Focus");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mine = dir.join("01 - Mine.opus");
+        let theirs = dir.join("77 - Theirs.opus");
+        if tiny_opus(&mine).is_none() || tiny_opus(&theirs).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        /* What an attaching sync leaves behind: a URL, the video it matched,
+           and the file it could not place keeping the id earworm invented. */
+        let local = manifest::local_id("77 - Theirs.opus");
+        manifest::write_synced(
+            &dir,
+            "https://www.youtube.com/playlist?list=PL1",
+            [
+                ("vid1".to_string(), mine.clone()),
+                (local.clone(), theirs.clone()),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        // The playlist that sync wrote, which correctly leaves the local file
+        // out because it was never in the playlist.
+        std::fs::write(dir.join("Focus.m3u8"), "#EXTM3U\n01 - Mine.opus\n").unwrap();
+
+        let mut cfg = config(true);
+        cfg.dir = root.clone();
+        let shelf = library(&root).into_iter().find(|s| s.path == dir).unwrap();
+        assert!(shelf.url.is_some(), "the fixture is not an attached folder");
+        let mut tracks = Vec::new();
+        open_shelf(&mut cfg, &channel().0, &mut tracks, &shelf).unwrap();
+
+        let back = tracks
+            .iter()
+            .find(|t| t.path.as_deref() == Some(theirs.as_path()))
+            .expect("the local file is not on the list at all");
+        assert_eq!(
+            back.status,
+            Status::Local,
+            "reopening turned the user's own file into a departure"
+        );
+        assert!(!back.listed, "it would be written into the next .m3u8");
+        assert!(!back.departure_proven);
+        // And the track the playlist does have is unaffected.
+        let real = tracks
+            .iter()
+            .find(|t| t.path.as_deref() == Some(mine.as_path()))
+            .expect("the playlist's own track went missing");
+        assert_eq!(real.status, Status::Have);
+        assert!(real.listed);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /* The read-back path, which is where the last three bugs in this feature
+       lived: every other `Local` test asserts on what `reconcile` leaves in
+       memory, and the folder is reopened from disk far more often than it is
+       attached. */
+    #[test]
+    fn reopening_an_attached_folder_keeps_the_playlists_own_numbers() {
+        let root = scratch("local-number");
+        let dir = root.join("Focus");
+        std::fs::create_dir_all(&dir).unwrap();
+        /* Both numbered 05: the user was numbering by their own scheme and it
+           collides with the playlist's, which is the ordinary case rather than
+           a contrived one. The local entry sits first in the sidecar, where a
+           sync that could not place it would have written it. */
+        let theirs = dir.join("05 - Theirs.opus");
+        let mine = dir.join("05 - Mine.opus");
+        for file in [&theirs, &mine] {
+            if tiny_opus(file).is_none() {
+                eprintln!("no ffmpeg, skipping");
+                let _ = std::fs::remove_dir_all(&root);
+                return;
+            }
+        }
+        let local = manifest::local_id("05 - Theirs.opus");
+        manifest::write_synced(
+            &dir,
+            "https://www.youtube.com/playlist?list=PL1",
+            [
+                (local.clone(), theirs.clone()),
+                ("vid5".to_string(), mine.clone()),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("Focus.m3u8"), "#EXTM3U\n05 - Mine.opus\n").unwrap();
+
+        let mut cfg = config(true);
+        cfg.dir = root.clone();
+        let shelf = library(&root).into_iter().find(|s| s.path == dir).unwrap();
+        let mut tracks = Vec::new();
+        open_shelf(&mut cfg, &channel().0, &mut tracks, &shelf).unwrap();
+
+        let real = tracks
+            .iter()
+            .find(|t| t.path.as_deref() == Some(mine.as_path()))
+            .expect("the playlist's own track went missing");
+        assert_eq!(
+            real.index, 5,
+            "a local file took the playlist's number, so the real track sorts \
+             to the bottom and the first edit renames it to that position"
+        );
+        let own = tracks
+            .iter()
+            .find(|t| t.path.as_deref() == Some(theirs.as_path()))
+            .expect("the local file went missing");
+        assert_eq!(own.status, Status::Local);
+        assert!(own.index > 5, "a local row sits inside the playlist: {}", own.index);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /* Without a URL the sidecar is only a tag ledger: it says which files
+       happened to be there the last time somebody edited a tag, which is no
+       claim about the folder. Preferred outright, a song copied into an
+       adopted folder never appeared anywhere, and nothing would ever pick it
+       up, because no sync can run against a folder with no URL. */
+    #[test]
+    fn a_song_added_to_an_adopted_folder_shows_up() {
+        let root = scratch("adopted-grows");
+        let dir = root.join("Copied");
+        std::fs::create_dir_all(&dir).unwrap();
+        let first = dir.join("01 - A.opus");
+        if tiny_opus(&first).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        // Adopted: a sidecar naming the one file that was there at the time.
+        let known = manifest::local_id("01 - A.opus");
+        manifest::write(&dir, "", [(known.clone(), first.clone())].into_iter()).unwrap();
+
+        // And then a second song is dropped in.
+        let second = dir.join("02 - B.opus");
+        if tiny_opus(&second).is_none() {
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+
+        let shelf = library(&root)
+            .into_iter()
+            .find(|s| s.path == dir)
+            .expect("the folder is not in the library");
+        assert_eq!(shelf.tracks, 2, "the library row still counts one track");
+
+        let mut cfg = config(true);
+        cfg.dir = root.clone();
+        let mut tracks = Vec::new();
+        open_shelf(&mut cfg, &channel().0, &mut tracks, &shelf).unwrap();
+        assert_eq!(tracks.len(), 2, "the new song is invisible on the track list");
+        // The file the sidecar already knew keeps the id it was given, or the
+        // entry it has would be orphaned beside a second one for one file.
+        let old = tracks.iter().find(|t| t.path.as_deref() == Some(first.as_path())).unwrap();
+        assert_eq!(old.id, known, "the adopted file was given a second id");
+        let new = tracks.iter().find(|t| t.path.as_deref() == Some(second.as_path())).unwrap();
+        assert!(manifest::is_local(&new.id), "{}", new.id);
+        assert_eq!(new.status, Status::Have, "a folder with no URL has no local rows");
+        assert!(new.listed);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /* The folder a run is writing into has to reach the sidecar, or the next
+       sync fetches the playlist again under its upstream title and leaves this
+       folder beside it. Written by whichever manifest write happens first, so
+       it arrives with the `#url` from the run that earned both rather than
+       needing a second step afterwards that a failed sync must remember not to
+       take. Never over a name somebody chose with `e`. */
+    #[test]
+    fn a_run_records_the_folder_it_is_writing_into() {
+        let dir = scratch("pins-folder");
+        let file = dir.join("01 - A.opus");
+        std::fs::write(&file, "audio").unwrap();
+        let mut tracks = vec![Track::new(1, "vid1".into(), "A".into(), file.clone())];
+        tracks[0].status = Status::Have;
+
+        let mut cfg = config(true);
+        cfg.url = "https://www.youtube.com/playlist?list=PL1".into();
+        cfg.folder = Some("Neon Venom".into());
+        sync_manifest(&cfg, &tracks);
+
+        let after = manifest::load(&dir);
+        assert_eq!(after.name.as_deref(), Some("Neon Venom"), "the folder is not pinned");
+        assert_eq!(after.url.as_deref(), Some("https://www.youtube.com/playlist?list=PL1"));
+        assert_eq!(after.entries.len(), 1, "the header ate the entry");
+
+        // And a name already recorded is one somebody chose, so it stands.
+        cfg.folder = Some("Something Else".into());
+        sync_manifest(&cfg, &tracks);
+        assert_eq!(
+            manifest::load(&dir).name.as_deref(),
+            Some("Neon Venom"),
+            "a later run overwrote the name the user chose"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* A sync that fails on a typo'd URL or a dead network must leave the
+       folder as it found it. The sidecar is the first thing ever written into
+       a folder earworm did not download, and the rule is that a hidden file
+       appearing in somebody's music folder is said out loud. */
+    #[test]
+    fn an_attach_that_fails_writes_nothing_into_the_folder() {
+        let root = scratch("attach-fails");
+        let dir = root.join("Copied");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("01 - A.opus");
+        std::fs::write(&file, "audio").unwrap();
+
+        let mut cfg = config(true);
+        cfg.dir = root.clone();
+        cfg.url.clear();
+        let mut tracks = vec![Track::new(
+            1,
+            manifest::local_id("01 - A.opus"),
+            "A".into(),
+            file.clone(),
+        )];
+
+        /* The URL question is refused, which is the cheapest failure to drive
+           and takes the same road out as a failed listing. The receiver is
+           dropped rather than left on a temporary, or the ask lands in a
+           channel nobody reads and blocks for good. */
+        let (dead, hung_up) = channel();
+        drop(hung_up);
+        assert!(sync_open(&mut cfg, &dead, &AtomicBool::new(false), &mut tracks).is_err());
+        assert!(
+            !manifest::path(&dir).is_file(),
+            "a failed attach left a sidecar behind with nothing saying so"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /* A rename moves the playlist file with the folder, and the header saying
+       which playlist file is earworm's own has to move with it. Left naming
+       the old filename, `write_playlist` in a folder with no URL finds a file
+       it does not recognise and refuses for good: earworm stops updating its
+       own playlist after the rename, silently, for good. */
+    #[test]
+    fn renaming_an_adopted_folder_keeps_earworms_claim_on_its_playlist() {
+        let root = scratch("rename-m3u8");
+        let dir = root.join("Copied");
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("01 - A.opus");
+        if tiny_opus(&file).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+
+        let mut cfg = config(false);
+        cfg.dir = root.clone();
+        let shelf = library(&root).into_iter().find(|s| s.path == dir).unwrap();
+        let mut tracks = Vec::new();
+        open_shelf(&mut cfg, &channel().0, &mut tracks, &shelf).unwrap();
+
+        // The first edit adopts the folder and writes earworm's own playlist.
+        let (tx, _rx) = channel();
+        write_track(&cfg, &tx, &mut tracks, 0, named("Neu!", "Hallogallo"), "typed").unwrap();
+        save_manifest(&cfg, &tx, &tracks);
+        write_playlist(&cfg, &tracks).unwrap();
+        assert_eq!(manifest::load(&dir).playlist.as_deref(), Some("Copied.m3u8"));
+
+        // Then the rename, answered by the UI on another thread.
+        let (tx, rx) = mpsc::channel();
+        let moved = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let asker = Asker { tx: tx.clone(), enabled: true };
+                let mut own = config(false);
+                own.dir = root.clone();
+                rename_shelf(&mut own, &tx, &asker, &tracks, &dir)
+            });
+            while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
+                if let Msg::Ask(_, reply) = msg {
+                    reply.send(Reply::Text("Neon Venom".into())).unwrap();
+                    break;
+                }
+            }
+            worker.join().unwrap()
+        });
+        moved.unwrap();
+
+        let to = root.join("Neon Venom");
+        assert!(to.is_dir(), "the folder did not move");
+        assert_eq!(
+            manifest::load(&to).playlist.as_deref(),
+            Some("Neon Venom.m3u8"),
+            "the claim was left naming a file that is no longer there"
+        );
+
+        /* And it still updates: without the header moving, this write is
+           refused and the playlist names the old title for good. */
+        let mut after = Vec::new();
+        let shelf = library(&root).into_iter().find(|s| s.path == to).unwrap();
+        let mut cfg = config(false);
+        cfg.dir = root.clone();
+        open_shelf(&mut cfg, &channel().0, &mut after, &shelf).unwrap();
+        let (tx, _rx) = channel();
+        write_track(&cfg, &tx, &mut after, 0, named("Neu!", "Negativland"), "typed").unwrap();
+        write_playlist(&cfg, &after).unwrap();
+        let body = std::fs::read_to_string(to.join("Neon Venom.m3u8")).unwrap();
+        assert!(
+            body.contains("Negativland"),
+            "earworm stopped updating its own playlist after the rename: {body}"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /* Detection only ever promotes, never demotes, and the reason is that the
+       two mistakes are not equal. Calling an album a playlist leaves today's
+       behaviour in place; calling a playlist an album stamps one sleeve
+       across a dozen unrelated records, which is the bug this exists to stop.
+       Nothing in a flat listing separates a playlist from an album reached by
+       a `PL` link, so silence has to mean playlist. */
+    #[test]
+    fn only_a_youtube_music_release_id_promotes_a_folder_to_an_album() {
+        let root = scratch("detect-kind");
+        let dir = root.join("Autobahn");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tx, _rx) = channel();
+
+        // A hand-made playlist, whatever is in it.
+        assert_eq!(settle_kind(Some("PLabc123"), Some(&dir)), None);
+        assert_eq!(settle_kind(None, Some(&dir)), None);
+
+        // A YouTube Music release, which is the one signal worth acting on.
+        let said = settle_kind(Some("OLAK5uy_kAbCdEf"), Some(&dir));
+        assert_eq!(said, Some((manifest::Kind::Album, "the playlist id")));
+        assert!(
+            !manifest::path(&dir).is_file(),
+            "resolving wrote a header, which is `record_kind`'s job and not this one"
+        );
+
+        record_kind(&tx, Some(&dir), said);
+        assert_eq!(
+            manifest::load(&dir).kind,
+            Some(manifest::Kind::Album),
+            "the answer was not recorded, so opening the folder offline loses it"
+        );
+
+        /* And the recorded answer is what a later sync of the same folder
+           reports even when the listing no longer says so, because offline
+           that header is all there is. */
+        assert_eq!(
+            settle_kind(Some("PLabc123"), Some(&dir)),
+            Some((manifest::Kind::Album, "an earlier sync"))
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /* The folder does not exist until the download makes it, and the answer
+       is wanted before the download: written where it is decided, the one run
+       that discovered the album recorded nothing, the library showed no album
+       until a second sync, and `r` in the same session re-resolved `playlist`
+       and deleted the `cover.jpg` the run had just kept. */
+    #[test]
+    fn the_album_header_waits_for_the_folder_the_download_makes() {
+        let root = scratch("kind-timing");
+        let dir = root.join("Autobahn");
+        let (tx, rx) = channel();
+
+        let said = settle_kind(Some("OLAK5uy_kAbCdEf"), Some(&dir));
+        assert_eq!(
+            said,
+            Some((manifest::Kind::Album, "the playlist id")),
+            "a folder that is not there yet still has an answer"
+        );
+        // A run where nothing arrived says nothing: there is no folder to blame.
+        record_kind(&tx, Some(&dir), said);
+        drop(tx);
+        let logs: Vec<String> = rx
+            .iter()
+            .filter_map(|m| match m {
+                Msg::Log(line) => Some(line),
+                _ => None,
+            })
+            .collect();
+        assert!(logs.is_empty(), "a missing folder was reported as a failure: {logs:?}");
+
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tx, _rx) = channel();
+        record_kind(&tx, Some(&dir), said);
+        assert_eq!(
+            manifest::load(&dir).kind,
+            Some(manifest::Kind::Album),
+            "the header never arrived, so the library and a retry both read playlist"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /* The name is the override, so it has to beat the listing as well as the
+       header, and it must leave no header behind: one that outlived a deleted
+       marker would go on deciding with nothing on screen to explain it. */
+    #[test]
+    fn a_marked_folder_name_beats_detection_and_records_nothing() {
+        let root = scratch("named-kind");
+        let dir = root.join("Some Compilation [playlist]");
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tx, _rx) = channel();
+
+        let said = settle_kind(Some("OLAK5uy_kAbCdEf"), Some(&dir));
+        assert_eq!(
+            said,
+            Some((manifest::Kind::Playlist, "the folder name")),
+            "the release id overrode the name somebody typed"
+        );
+        record_kind(&tx, Some(&dir), said);
+        assert!(
+            !manifest::path(&dir).is_file(),
+            "a marked name left a header behind, which outlives the marker"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /* The trap this whole feature is shaped around. An edit in a folder
+       earworm did not download writes a sidecar, and the ids in it have to be
+       invented. Attach a URL later and every one of them reaches three places
+       that read ids and expect video ids:
+
+         1. `scan` matches a listed video against the sidecar. A `~` id
+            matching one would hand a local file to an unrelated video.
+         2. `write_archive` names ids for yt-dlp, which knows nothing of them.
+         3. `note_departures` calls every manifest id not in the listing
+            departed, off a complete listing, and marks it proven, which is
+            what lets `D` delete it. Every file the user copied in would be
+            offered for deletion.
+
+       Driven through a stub yt-dlp printing a listing that names neither
+       file, which is the shape of attaching an unrelated URL and the worst
+       case for all three. */
+    #[test]
+    fn a_local_id_is_never_matched_archived_or_called_departed() {
+        let dir = scratch("localids");
+        let theirs = dir.join("01 - Copied.opus");
+        let predicted = dir.join("01 - Brand New.opus");
+        if tiny_opus(&theirs).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let mut cfg = config(true);
+        cfg.dir = dir.parent().unwrap().to_path_buf();
+        cfg.url = "https://www.youtube.com/playlist?list=PL1".into();
+
+        // The sidecar an edit in a found folder leaves behind: no URL yet, and
+        // one entry whose id earworm invented from the filename.
+        let local = manifest::local_id("01 - Copied.opus");
+        manifest::write(&dir, "", [(local.clone(), theirs.clone())].into_iter()).unwrap();
+        assert!(
+            std::fs::read_to_string(manifest::path(&dir)).unwrap().contains(&local),
+            "the sidecar did not keep the local id"
+        );
+
+        let bin = dir.join("yt-dlp");
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\nprintf 'vid1\t1\tBrand New\t213\tPL1\t{}\\n'\n",
+                predicted.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let listing = crate::ytdlp::scan_with(&bin.display().to_string(), &cfg).unwrap();
+        assert!(listing.complete, "an incomplete listing silences the departure half");
+        let mut found = listing.tracks;
+
+        // 1. The listed video is a download, not the file sitting on disk.
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].status, Status::Pending);
+        assert_eq!(found[0].path.as_deref(), Some(predicted.as_path()));
+
+        /* 2. The file the user copied in is not called departed, off a
+              listing that never had any reason to name it. Before the local
+              row joins the list, because that is the order a sync runs in and
+              because a row already on it is excluded by the plain "not in the
+              current tracks" filter, which would make this prove nothing. */
+        let (tx, rx) = channel();
+        note_departures(&cfg, &tx, listing.complete, &mut found);
+        drop(tx);
+        assert_eq!(
+            found.len(),
+            1,
+            "the copied file was added as a departure: {:?}",
+            found.iter().map(|t| (t.name.clone(), t.status)).collect::<Vec<_>>()
+        );
+        assert!(
+            !found.iter().any(|t| t.departure_proven),
+            "a file earworm never downloaded was offered to D"
+        );
+        /* Not merely silent about it: a doubt message would mean the guard
+           above never ran and something else swallowed the departure. */
+        let logs: Vec<String> = rx
+            .into_iter()
+            .filter_map(|m| match m {
+                Msg::Log(line) => Some(line),
+                _ => None,
+            })
+            .collect();
+        assert!(logs.is_empty(), "the departure was doubted rather than skipped: {logs:?}");
+
+        /* 3. And yt-dlp is handed nothing it cannot read. The local file is
+              on the list here because that is what a reconciling sync builds:
+              the listing's tracks plus the files on disk it could not place,
+              and `write_archive` names every id whose file exists. */
+        let mut local_track = Track::new(2, local.clone(), "Copied".into(), theirs.clone());
+        local_track.status = Status::Have;
+        found.push(local_track);
+        let archive = dir.join("archive");
+        crate::ytdlp::write_archive(&found, &archive, &HashSet::new()).unwrap();
+        let written = std::fs::read_to_string(&archive).unwrap();
+        assert!(
+            !written.contains('~'),
+            "an id earworm invented reached the yt-dlp archive: {written:?}"
+        );
+
+        /* And the entry survives the sync that did not match it: dropped
+           here, the next one would have no record of the file at all. */
+        sync_manifest(&cfg, &found);
+        let after: Vec<String> = manifest::entries(&dir).into_iter().map(|(id, _)| id).collect();
+        assert!(after.contains(&local), "the local entry was rewritten away: {after:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     /* The chain behind "does a resync keep what I typed". Every link is
        tested on its own; this is the three of them in a row, because the
        guarantee lives in the join and not in any one of them:
@@ -4174,7 +6034,7 @@ pub mod tests {
         std::fs::write(
             &bin,
             format!(
-                "#!/bin/sh\nprintf 'vid1\t1\tOriginal Title\t{}\\n'\n",
+                "#!/bin/sh\nprintf 'vid1\t1\tOriginal Title\t213\tPL1\t{}\\n'\n",
                 downloaded.display()
             ),
         )
@@ -4206,7 +6066,7 @@ pub mod tests {
 
         // 3. And the tag pass reads what is on disk rather than looking it up.
         let asker = Asker { tx: tx.clone(), enabled: false };
-        let mut cover = CoverState { written: true };
+        let mut cover = CoverState { written: true, ..CoverState::default() };
         tag_tracks(
             &cfg,
             &tx,
@@ -4259,7 +6119,7 @@ pub mod tests {
 
         let (tx, rx) = channel();
         let asker = Asker { tx: tx.clone(), enabled: false };
-        let mut cover = CoverState { written: true };
+        let mut cover = CoverState { written: true, ..CoverState::default() };
         let mut cfg = config(false);
         cfg.lookup = false;
         tag_tracks(
@@ -4439,13 +6299,66 @@ pub mod tests {
     /// A real opus file, since `tag::set_fields` has to succeed for the code
     /// under test to be reached at all. `None` if ffmpeg is not installed.
     pub fn tiny_opus(at: &Path) -> Option<()> {
+        opus_of(at, "0.2")
+    }
+
+    /// A fixture of a chosen length, for the matching that breaks a tie on it.
+    pub fn opus_of(at: &Path, seconds: &str) -> Option<()> {
         let made = std::process::Command::new("ffmpeg")
             .args(["-v", "error", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=mono"])
-            .args(["-t", "0.2", "-c:a", "libopus", "-y"])
+            .args(["-t", seconds, "-c:a", "libopus", "-y"])
             .arg(at)
             .status()
             .ok()?;
         made.success().then_some(())
+    }
+
+    /* The line that routes the album tag through the folder's one answer,
+       which nothing else reaches: `tag::apply` needs a `Match`, and during a
+       run that only ever comes off the network. Built by hand here, with the
+       cover off so the same call touches nothing. Track two matched a
+       compilation, which is exactly the case the sharing exists for: without
+       it the file wears "Now 47" beside the record's own sleeve. */
+    #[test]
+    fn an_albums_files_all_read_back_the_same_album_tag() {
+        let dir = scratch("album-tag");
+        let (one, two) = (dir.join("01 - A.opus"), dir.join("02 - B.opus"));
+        if tiny_opus(&one).is_none() || tiny_opus(&two).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            return;
+        }
+        let (tx, _rx) = channel();
+        let asker = Asker { tx, enabled: false };
+        let mut cfg = config(false);
+        cfg.cover = false;
+        let found = |title: &str, album: &str| crate::lookup::Match {
+            title: title.into(),
+            artist: "Kraftwerk".into(),
+            album: Some(album.into()),
+            mbid: None,
+            cover_url: None,
+            score: None,
+            source: "test",
+        };
+
+        let mut cover = CoverState {
+            one_sleeve: true,
+            ..CoverState::default()
+        };
+        for (path, m) in [
+            (&one, found("Autobahn", "Autobahn")),
+            (&two, found("Kometenmelodie", "Now 47")),
+        ] {
+            tag::apply(path, &m, &cfg, &mut cover, &asker, 1, "").unwrap();
+        }
+
+        assert_eq!(tag::read(&one).unwrap().album, "Autobahn");
+        assert_eq!(
+            tag::read(&two).unwrap().album,
+            "Autobahn",
+            "one record's files disagree about which record they are"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /* A departed track has no playlist position, so renumbering it stamps one
@@ -4532,7 +6445,7 @@ pub mod tests {
         assert_eq!(tracks[1].name, "Sea - Cee");
         assert_eq!(tracks[1].was, tracks[1].name, "every row would claim a rename");
         assert!(tracks.iter().all(|t| t.status == Status::Have && t.listed));
-        assert_eq!(cfg.url, shelf.url, "S would have no URL to sync from");
+        assert_eq!(Some(cfg.url.clone()), shelf.url, "S would have no URL to sync from");
         assert!(summary.contains("1 file missing"), "{summary}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -4561,7 +6474,7 @@ pub mod tests {
         .unwrap();
 
         let tracks = vec![Track::new(4, "d".into(), "04 - D.opus".into(), mine)];
-        save_manifest(&config(true), &tracks);
+        save_manifest(&config(true), &channel().0, &tracks);
 
         let back = manifest::read(&dir);
         assert_eq!(back.get("a"), Some(&others), "a file outside this pass was forgotten");
@@ -4622,6 +6535,119 @@ pub mod tests {
                 track.index
             );
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* Nothing in a folder earworm did not download says what is in it but
+       the files themselves, so the track list is built from the directory and
+       the tags. Read-only: opening must write nothing, because the folder is
+       the user's until they change something in it. */
+    #[test]
+    fn a_folder_earworm_never_downloaded_opens_from_its_own_files() {
+        let dir = scratch("found-open");
+        let files = ["03 - Third.opus", "01 - First.opus", "02 - Second.opus"];
+        for name in files {
+            if tiny_opus(&dir.join(name)).is_none() {
+                eprintln!("no ffmpeg, skipping");
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+        }
+        // Not audio, and not a track.
+        std::fs::write(dir.join("cover.jpg"), "image").unwrap();
+        tag::set_fields(
+            &dir.join("01 - First.opus"),
+            &tag::Fields {
+                artist: "Stereolab".into(),
+                title: "Ping Pong".into(),
+                album: "Mars Audiac Quintet".into(),
+                year: Some(1994),
+            },
+        )
+        .unwrap();
+
+        let shelf = library(dir.parent().unwrap())
+            .into_iter()
+            .find(|s| s.path == dir)
+            .expect("the folder is not in the library");
+        assert_eq!(shelf.url, None);
+
+        let mut tracks = Vec::new();
+        let summary = open_shelf(&mut config(true), &channel().0, &mut tracks, &shelf).unwrap();
+        assert!(summary.contains("3 tracks"), "{summary}");
+
+        // Numbered off the filenames, which is playlist order for a folder
+        // anybody made with a numbering scheme, ours included.
+        assert_eq!(
+            tracks.iter().map(|t| t.index).collect::<Vec<_>>(),
+            [1, 2, 3],
+            "the rows were numbered by position rather than by name"
+        );
+        assert!(
+            tracks.iter().all(|t| t.status == Status::Have && t.listed),
+            "a file sitting in the folder was reported as anything but present"
+        );
+        /* The ids are earworm's own, which is what stops a later sync
+           matching them against a listing or handing them to yt-dlp. */
+        assert!(
+            tracks.iter().all(|t| manifest::is_local(&t.id)),
+            "a found file was given an id a listing could match: {:?}",
+            tracks.iter().map(|t| t.id.clone()).collect::<Vec<_>>()
+        );
+        let first = &tracks[0];
+        assert_eq!(first.artist, "Stereolab");
+        assert_eq!(first.title, "Ping Pong");
+        assert_eq!(first.album, "Mars Audiac Quintet");
+        assert_eq!(first.year, Some(1994));
+        // An untagged file falls back to its filename rather than to "? - ?".
+        assert!(tracks[1].name.contains("Second"), "{}", tracks[1].name);
+
+        assert!(
+            !manifest::path(&dir).is_file(),
+            "opening wrote a sidecar into a folder nobody has edited"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* `mark_departed` reads the `.m3u8` as earworm's own last answer about
+       the playlist, and in a folder earworm did not download it is nothing of
+       the kind: it is whatever file the user brought, listing whatever they
+       chose. Believed, it calls every file it leaves out departed, and a
+       departed row is never renamed, never re-tagged, and dropped from the
+       next playlist written. */
+    #[test]
+    fn a_found_folders_own_playlist_file_does_not_depart_the_rest_of_it() {
+        let dir = scratch("found-m3u8");
+        for name in ["01 - A.opus", "02 - B.opus", "03 - C.opus"] {
+            if tiny_opus(&dir.join(name)).is_none() {
+                eprintln!("no ffmpeg, skipping");
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+        }
+        /* Named after the folder, so it is exactly the file `last_playlist`
+           looks for, and listing half the folder, which is what a hand-made
+           playlist of favourites looks like. */
+        let name = dir.file_name().unwrap().to_string_lossy().to_string();
+        std::fs::write(
+            dir.join(format!("{name}.m3u8")),
+            "#EXTM3U\n01 - A.opus\n",
+        )
+        .unwrap();
+
+        let shelf = library(dir.parent().unwrap())
+            .into_iter()
+            .find(|s| s.path == dir)
+            .expect("the folder is not in the library");
+        let mut tracks = Vec::new();
+        open_shelf(&mut config(true), &channel().0, &mut tracks, &shelf).unwrap();
+
+        assert_eq!(tracks.len(), 3);
+        assert!(
+            tracks.iter().all(|t| t.status != Status::Gone),
+            "the user's own playlist file was believed about a folder earworm did not sync: {:?}",
+            tracks.iter().map(|t| (t.name.clone(), t.status)).collect::<Vec<_>>()
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -4767,7 +6793,7 @@ pub mod tests {
 
         note_departures(&config(true), &channel().0, true, &mut tracks);
         tracks[0].listed = true;
-        save_manifest(&config(true), &tracks);
+        save_manifest(&config(true), &channel().0, &tracks);
 
         let back = manifest::read(&dir);
         assert!(back.contains_key("dropped"), "the departed id was forgotten");
@@ -4809,13 +6835,37 @@ pub mod tests {
         }
         std::fs::write(dir.join("list.m3u8"), "tracks").unwrap();
 
-        drop_folder_cover(&tracks, &[]);
+        drop_folder_cover(&tracks, &[], false);
 
         for name in COVER_NAMES {
             assert!(!dir.join(name).exists(), "{name} survived the pass");
         }
         assert!(dir.join("01 - a - b.opus").is_file(), "a track went with it");
         assert!(dir.join("list.m3u8").is_file(), "the playlist went with it");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* An album is the other exception, and the reason is that the image is
+       no longer arbitrary. On a playlist `cover.jpg` is whichever track
+       resolved art first, wearing the folder's name, and dropping it is right.
+       On an album it is that album's sleeve and matches every file in the
+       folder, which is what a file manager shows and what most players want. */
+    #[test]
+    fn an_albums_folder_image_is_the_albums_sleeve_and_stays() {
+        let dir = scratch("albumcover");
+        let tracks = vec![track_at(&dir, "01 - a - b.opus", Status::Have)];
+        for name in COVER_NAMES {
+            std::fs::write(dir.join(name), "sleeve").unwrap();
+        }
+
+        drop_folder_cover(&tracks, &[], true);
+
+        for name in COVER_NAMES {
+            assert!(
+                dir.join(name).is_file(),
+                "{name} was dropped from an album, which is its own sleeve"
+            );
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -4835,7 +6885,7 @@ pub mod tests {
         // And then the download leaves one of its own beside it.
         std::fs::write(dir.join("cover.png"), "ours").unwrap();
 
-        drop_folder_cover(&tracks, &theirs);
+        drop_folder_cover(&tracks, &theirs, false);
 
         assert_eq!(
             std::fs::read_to_string(dir.join("cover.jpg")).unwrap(),
@@ -6165,7 +8215,7 @@ mod convert_tests {
         let shelf = Shelf {
             path: PathBuf::from("/tmp/x"),
             name: "X".into(),
-            url: "u".into(),
+            url: Some("u".into()),
             tracks: 3,
             missing: 1,
             synced: None,
@@ -6176,6 +8226,7 @@ mod convert_tests {
                 // Not on disk, so nothing is going to convert it.
                 ("04 - d.mp3".into(), false),
             ],
+            ..Shelf::default()
         };
         assert_eq!(crate::app::off_format(&shelf, "opus"), 2);
         assert_eq!(crate::app::off_format(&shelf, "mp3"), 2);

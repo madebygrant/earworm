@@ -416,8 +416,53 @@ pub fn transcode(from: &Path, to: &Path, format: &str, source: Option<&str>) -> 
     anyhow::bail!("{last}")
 }
 
+#[derive(Default)]
 pub struct CoverState {
     pub written: bool,
+    /// Whether this folder's tracks share one sleeve, which an album's do.
+    pub one_sleeve: bool,
+    /// That sleeve, once a track has resolved one.
+    pub shared: Option<Vec<u8>>,
+    /// The album name the folder settled on, under the same rule.
+    pub album: Option<String>,
+}
+
+/// The art for one track, which in an album is the folder's one sleeve.
+/* An album's tracks share a sleeve, so looking each one up separately returns
+   whatever release that track happened to match: a folder of one record ends
+   up holding three covers, at one download per track for an answer that
+   cannot legitimately differ. The first answer is kept and reused. A track
+   that finds nothing stores nothing, so the next one still tries and one miss
+   does not cost the folder its art.
+
+   Takes the fetch rather than doing it, so the sharing is testable without a
+   network: the test counts how many times the closure runs. */
+pub fn sleeve(cover: &mut CoverState, fetch: impl FnOnce() -> Option<Vec<u8>>) -> Option<Vec<u8>> {
+    if let Some(held) = &cover.shared {
+        return Some(held.clone());
+    }
+    let found = fetch();
+    if cover.one_sleeve {
+        // A miss stores nothing, so the next track still tries.
+        cover.shared.clone_from(&found);
+    }
+    found
+}
+
+/// The album name for one track, under the same rule as the sleeve.
+/* The two are read together, so sharing one and not the other is what the
+   sharing was meant to stop: track five matching a compilation would wear
+   that compilation's name beside the record's sleeve. Kept apart from
+   `sleeve` because this answer costs no request, so it is first-found rather
+   than first-fetched and a track whose art failed still settles the name. */
+pub fn album_name(cover: &mut CoverState, found: Option<String>) -> Option<String> {
+    if let Some(held) = &cover.album {
+        return Some(held.clone());
+    }
+    if cover.one_sleeve {
+        cover.album.clone_from(&found);
+    }
+    found
 }
 
 pub fn identify(
@@ -588,14 +633,16 @@ pub fn apply(
         note = why;
     }
 
-    let jpeg = cfg
-        .cover
-        .then(|| lookup::cover_bytes(m, cfg.apple))
-        .flatten();
+    let jpeg = sleeve(cover, || {
+        cfg.cover
+            .then(|| lookup::cover_bytes(m, cfg.apple))
+            .flatten()
+    });
+    let album = album_name(cover, m.album.clone());
     with_tag(path, |tag| {
         tag.set_title(m.title.clone());
         tag.set_artist(artist.clone());
-        if let Some(album) = &m.album {
+        if let Some(album) = &album {
             tag.set_album(album.clone());
         }
         if let Some(data) = &jpeg {
@@ -642,6 +689,113 @@ fn choose_artist(asker: &Asker, index: usize, old: &str, new: &str) -> (String, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /* An album's tracks share a sleeve, so one lookup is both the right
+       answer and twelve fewer downloads. A playlist's do not: its tracks come
+       from a dozen records, and reusing the first one's art is the bug the
+       `c` menu's restore row exists to undo. The closure counts the requests,
+       which is the half a "the files all match" assertion cannot see. */
+    #[test]
+    fn an_album_resolves_one_sleeve_and_a_playlist_resolves_each_track() {
+        let art = |n: u8| Some(vec![n; 4]);
+
+        let mut album = CoverState {
+            one_sleeve: true,
+            ..CoverState::default()
+        };
+        let mut calls = 0;
+        let got: Vec<Option<Vec<u8>>> = (1..=3)
+            .map(|n| {
+                sleeve(&mut album, || {
+                    calls += 1;
+                    art(n)
+                })
+            })
+            .collect();
+        assert_eq!(calls, 1, "an album looked its sleeve up once per track");
+        assert_eq!(
+            got,
+            vec![art(1), art(1), art(1)],
+            "the tracks of one record were given different covers"
+        );
+
+        let mut playlist = CoverState::default();
+        let mut calls = 0;
+        let got: Vec<Option<Vec<u8>>> = (1..=3)
+            .map(|n| {
+                sleeve(&mut playlist, || {
+                    calls += 1;
+                    art(n)
+                })
+            })
+            .collect();
+        assert_eq!(calls, 3, "a playlist reused one track's art for the rest");
+        assert_eq!(got, vec![art(1), art(2), art(3)]);
+    }
+
+    /* The album tag and the sleeve are read together, so sharing one without
+       the other is the bug wearing different clothes: a track that matched a
+       compilation would wear that compilation's name beside the record's
+       own sleeve, which is worse than the twelve-covers case it replaced
+       because the file now contradicts itself. */
+    #[test]
+    fn an_album_settles_on_one_name_as_well_as_one_sleeve() {
+        let mut album = CoverState {
+            one_sleeve: true,
+            ..CoverState::default()
+        };
+        let got: Vec<Option<String>> = ["Autobahn", "Now 47", "Autobahn"]
+            .into_iter()
+            .map(|name| album_name(&mut album, Some(name.into())))
+            .collect();
+        assert_eq!(
+            got.iter().filter(|n| n.as_deref() == Some("Autobahn")).count(),
+            3,
+            "one record's tracks were given different album names: {got:?}"
+        );
+
+        /* First found, not first fetched: this answer costs no request, so a
+           track whose art failed still settles the name for the folder. */
+        let mut late = CoverState {
+            one_sleeve: true,
+            ..CoverState::default()
+        };
+        assert_eq!(album_name(&mut late, None), None);
+        assert_eq!(album_name(&mut late, Some("Autobahn".into())).as_deref(), Some("Autobahn"));
+        assert_eq!(album_name(&mut late, Some("Now 47".into())).as_deref(), Some("Autobahn"));
+
+        // A playlist's tracks are from different records and keep their own.
+        let mut playlist = CoverState::default();
+        let got: Vec<Option<String>> = ["Autobahn", "Now 47"]
+            .into_iter()
+            .map(|name| album_name(&mut playlist, Some(name.into())))
+            .collect();
+        assert_eq!(got, vec![Some("Autobahn".into()), Some("Now 47".into())]);
+    }
+
+    /* One track finding nothing must not cost the folder its art: the next
+       one still tries. Otherwise an album whose first track is untagged or
+       obscure ends up with no cover at all. */
+    #[test]
+    fn an_album_keeps_looking_until_a_track_finds_a_sleeve() {
+        let mut cover = CoverState {
+            one_sleeve: true,
+            ..CoverState::default()
+        };
+        let mut calls = 0;
+        let mut ask = |found: Option<Vec<u8>>| {
+            sleeve(&mut cover, || {
+                calls += 1;
+                found
+            })
+        };
+        assert_eq!(ask(None), None);
+        assert_eq!(ask(None), None);
+        assert_eq!(ask(Some(vec![7; 4])), Some(vec![7; 4]));
+        assert_eq!(ask(None), Some(vec![7; 4]), "the sleeve was not kept");
+        assert_eq!(calls, 3, "it asked again after finding one");
+    }
+
     use crate::lookup;
     use std::path::{Path, PathBuf};
 

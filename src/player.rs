@@ -28,6 +28,36 @@ pub fn playlist_file(folder: &Path) -> PathBuf {
     folder.join(format!("{name}.m3u8"))
 }
 
+/// The playlist file to hand a player, or `None` when there is no one answer.
+/* earworm names its own after the folder, so that is checked first and wins
+   even in a folder holding several: it is the one file earworm knows the
+   contents of. A folder somebody copied in brought its own playlist under its
+   own name, and refusing to play it because the name is not the one earworm
+   would have chosen would hide a file that is sitting right there. Several,
+   with none of them ours, is no answer rather than a guess, since picking one
+   plays the folder from a file the user did not choose.
+
+   `library` and `p` both read this, so the row that offers the key and the
+   command behind it cannot disagree about whether a folder can be played. */
+pub fn playlist_of(folder: &Path) -> Option<PathBuf> {
+    let ours = playlist_file(folder);
+    if ours.is_file() {
+        return Some(ours);
+    }
+    let mut found = std::fs::read_dir(folder)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_file())
+        .filter(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("m3u8"))
+        });
+    let one = found.next()?;
+    found.next().is_none().then_some(one)
+}
+
 /// FNV-1a, written out rather than taken from `DefaultHasher`, whose output is
 /// explicitly not stable between releases: a changed hash would orphan every
 /// playlist already sitting in cliamp under the old name.
@@ -207,10 +237,12 @@ pub fn load(folder: &Path) -> Result<String> {
    first is what makes this a refresh, and the delete failing is the ordinary
    first-time case rather than an error. */
 fn load_with(bin: &str, store: Duration, ipc: Duration, folder: &Path) -> Result<String> {
-    let playlist = playlist_file(folder);
-    if !playlist.is_file() {
-        bail!("no .m3u8 in this folder  ·  sync it again without --no-m3u8");
-    }
+    let Some(playlist) = playlist_of(folder) else {
+        /* Two folders reach this now, so the message names both roads out:
+           one earworm synced with `--no-m3u8`, and one somebody copied in
+           that brought no playlist file and has not been synced. */
+        bail!("no .m3u8 in this folder  ·  sync it without --no-m3u8, or add one yourself");
+    };
     let Some(file) = playlist.to_str() else {
         bail!("playlist path is not valid UTF-8  ·  rename the folder and sync again");
     };
@@ -327,7 +359,9 @@ mod tests {
         let err = load_with("cliamp", IPC, IPC, &dir.join("Focus"))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("sync it again without --no-m3u8"), "{err}");
+        assert!(err.contains("sync it without --no-m3u8"), "{err}");
+        // The other road out, for a folder earworm did not download.
+        assert!(err.contains("add one yourself"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

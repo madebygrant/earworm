@@ -315,6 +315,288 @@ in **Themes and colour depth**.
   does not move, so no other message on that list means anything has happened.
   Without it the pane goes on drawing the sleeve that was just replaced, which
   makes the command look as though it did nothing at all.
+- **A folder under `--dir` is a playlist if it holds audio, not only if it
+  holds a sidecar.** `contents` is the one derivation, read by both `library`
+  and `open_shelf`, and it drops a directory with neither audio nor a `#url`.
+  The sidecar wins only for a folder that has a URL: there it carries the
+  playlist's order and the files a sync found missing, and a file the user
+  dropped in is the sync's business to place. Without a URL it is only a tag
+  ledger, recording which files happened to be there the last time somebody
+  edited a tag, so the directory is authoritative and the sidecar supplies ids
+  for what it already knows. Preferring it outright meant a song copied into an
+  adopted folder never appeared anywhere and nothing would ever pick it up,
+  because no sync can run against a folder with no URL. `audio_files` also
+  skips anything whose name starts with a dot: macOS writes `._01 - A.opus`
+  beside every file on a FAT or exFAT volume, which carries the audio
+  extension and is not audio. `Shelf.url` is therefore
+  `Option`, and the three answers on the row are `synced 3d ago`, `never
+  synced` and a `local` pill: collapsing the last two leaves somebody
+  pressing `R` and wondering why one row never moves. The third is filled
+  rather than dim because it is the row whose keys behave differently and it
+  was the quietest thing on the screen, and it lives in the sync column rather
+  than beside the name, where it would want a slot of its own and could land
+  next to the album pill on a folder that is both.
+- **`D`'s rows carry their answers, because the menu is a row shorter for a
+  folder earworm did not download.** `Remove` is the enum and `rows` is built
+  from it, so the third row does not mean "delete" on one folder and "hide" on
+  another. `D` used to refuse such a folder outright, on the grounds that the
+  only row left would be deleting somebody's music: what that actually did was
+  leave no way to get the row off the library at all, since any folder of
+  audio is on it. The answer is a menu without the row that cannot apply, not
+  no menu. The delete row names its count in *tracks*, because that is what
+  the number counts: `remove_dir_all` takes the folder, `cover.jpg` and the
+  sidecar with it, so "6 files" was the one row on that menu understating
+  itself. The closing flash reads `chosen` too, and did not: as `choice == 1`
+  it said "forgot" after a hide on a found folder and "deleted" after a hide
+  on a synced one, which is a claim that earworm destroyed a folder still
+  entirely on disk. The test missed it by asserting `any()` over the flashes,
+  and `any` cannot see a message that is there and wrong.
+- **`#hidden` is how a folder leaves the library with its files intact.**
+  `manifest::hide` writes it and nothing clears it: the way back is removing
+  that *line*, and the flash says so, because a row that vanishes with no way
+  back is a folder somebody has lost. The line and not the file, which is what
+  it said first: a found folder's sidecar holds nothing else, but a folder
+  earworm downloaded keeps its URL, its rename and every id in that same file,
+  and throwing it away re-downloads the whole playlist beside the copies on
+  disk. One message has to be true of both. It is in the sidecar rather than the config
+  because it is a fact about that folder and moves with it, and because an
+  array in the config would need a writer `save_key` does not have. `library`
+  asks before the stat pass, since a hidden folder is one nothing draws.
+  `worker::hidden` and the `--check` row are the other half of it: the only
+  word a hidden folder ever gets is one flash at the moment it happens, and a
+  `--resync` passing over four folders with nothing saying why is the album
+  plan's "decide silently" arriving by another road. `--list` was left alone
+  on purpose, because it is script-facing and a new line shape there breaks
+  whatever is parsing it.
+  Hiding deliberately does *not* call `player::forget`: the files are all
+  still there and still in the order cliamp imported them, so a playlist that
+  plays should go on playing. That line has no test, because `player::forget`
+  takes no binary to stub and does nothing without cliamp installed.
+- **`forget` no longer takes the row off the list.** It drops the sidecar and
+  keeps the audio, and a folder of audio is on the list either way, so what it
+  loses is its URL. The flash says so. `D` refuses outright on a folder with
+  no sidecar, because the only answer left on that menu would be deleting the
+  user's music.
+- **A `~` id is one earworm invented, and no listing will ever name it.**
+  `manifest::local_id` builds it from the filename at adoption and
+  `manifest::is_local` is the check. It sits on the id rather than in a
+  header, because a folder can be half reconciled: eight files matched and two
+  not, beside each other, where a header is one bit for the whole folder that
+  would have to be cleared at exactly the right moment or left on for good.
+  Two readers need the guard and one does not: `note_departures` walks the
+  manifest and would call every copied-in file departed off a complete
+  listing, proven, and offer the lot to `D`; `write_archive` hands ids to
+  yt-dlp, which knows nothing of them. `ytdlp::scan` indexes the manifest *by*
+  video id, so a `~` key is unreachable from there and a guard would be dead
+  code. `a_local_id_is_never_matched_archived_or_called_departed` is the whole
+  trap in one test, and the order matters: `note_departures` runs before the
+  local row joins the list, or the plain "not in the current tracks" filter
+  excludes it and the test proves nothing.
+- **`open_shelf` skips `mark_departed` when there is no `#url`.** That
+  function reads the `.m3u8` as earworm's own last answer about the playlist,
+  and in a folder earworm did not download it is whatever file the user
+  brought, listing whatever they chose. Believed, it calls everything the file
+  leaves out `Gone`: never renamed, never re-tagged, dropped from the next
+  playlist written.
+- **Adoption is `save_manifest` running for the first time in a folder with no
+  URL, and it is said once.** A hidden file appearing in somebody's music
+  folder is not something they should find out by looking, and a line on every
+  edit is nagging. The URL is what tells it apart from a fresh download, whose
+  sidecar is no news.
+- **`#m3u8` records the playlist file earworm wrote.** A synced folder's
+  `.m3u8` is earworm's outright, so a sync rewrites it every pass. A folder
+  somebody copied in may have brought one, and it may be named exactly what
+  earworm would name its own, after the folder. Without the record the first
+  edit either refuses for good and lets the playlist go stale, or replaces a
+  file the user wrote with nothing saying so. `write_playlist` asks only when
+  `cfg.url` is empty, and records the header at the moment of writing.
+- **`write_manifest` records `cfg.folder` as `#name`, and nothing else does.**
+  Attaching a URL pins the folder so the download lands there rather than under
+  the playlist's upstream title, and the header is what makes the next sync
+  land there too. Written by whichever manifest write is first, so it arrives
+  with the `#url` from the run that earned both. `sync_open` deliberately
+  writes nothing itself: a second step afterwards is one a failed sync has to
+  remember not to take, and a sidecar appearing in a folder earworm did not
+  download after a typo'd URL is the one case the adoption flash cannot cover.
+  Never over a name already there, which is one somebody chose with `e`.
+- **A sync takes the `.m3u8` over; adoption does not.** `write_playlist`'s
+  `#m3u8` guard is asked only while `cfg.url` is empty, so the first sync after
+  a URL is attached replaces a playlist file the user wrote. That is deliberate
+  (the playlist upstream is then what the folder holds, and in what order) and
+  `docs/library.md` says so before the section on attaching, because it is the
+  one moment in this feature where earworm overwrites something it did not
+  write.
+- **A folder's kind is read off its name first, and the name is never
+  written.** `manifest::kind_of` is the one derivation, asked by both the sync
+  and `open_shelf` so the two cannot disagree. A bracket group whose whole
+  contents are `album` or `playlist`, case ignored, anywhere in the name. The
+  whole contents, because brackets in music folder names are usually a year, a
+  format or an edition, and a substring match reads `[Album Version]` and half
+  a library besides as albums. Two different markers in one name is no answer
+  rather than the first. Re-read every time, so deleting the marker takes
+  effect at once, which is the thing a stored answer cannot do.
+- **A marked name records no `#kind` header.** Two records of one fact drift,
+  and this drift is silent: a header left behind by a marker somebody has since
+  deleted would go on deciding with nothing on screen saying why. Only
+  detection writes the header, because detection has nowhere else to put its
+  answer; the name does not need one.
+- **Detection resolves before the download and records after it.**
+  `settle_kind` answers and writes nothing; `record_kind` writes the header
+  once there is a folder to write into. They were one function, and the bug
+  that split them is that a brand new playlist's folder does not exist until
+  yt-dlp makes it: the write failed with ENOENT on the one run that discovered
+  the album, so the header was never recorded, the library showed no album
+  until somebody synced a second time, an error line landed in the log pane on
+  every first album download, and `r` in that same session re-resolved
+  `playlist` and deleted the `cover.jpg` the run had just deliberately kept.
+  `record_kind` returns quietly when the folder is still missing, because that
+  is a run where nothing downloaded at all and there is nothing to report.
+- **Detection only ever promotes to `album`, never demotes.** The two mistakes
+  are not equal. Calling an album a playlist leaves today's behaviour in place;
+  calling a playlist an album stamps one sleeve across a dozen unrelated
+  records, which is the whole bug. So only the `OLAK5uy_` prefix on
+  `Listing.playlist_id` promotes a folder and silence means playlist. The
+  uploader was going to be the second signal and is not: yt-dlp reports an Art
+  Track's channel as `Kraftwerk`, not `Kraftwerk - Topic`, so one shared
+  channel cannot tell an album from a single-artist playlist. Measured, not
+  assumed. The flat listing carries no `album` or `release_year` field at all,
+  so there is nothing else in it to read.
+- **An album's tracks share one sleeve, and `tag::sleeve` is where that
+  happens.** `lookup::cover_bytes` is keyed on each track's own `Match` with no
+  cache, so twelve tracks of one record resolve twelve times and a track that
+  matched a single, a reissue or a compilation comes back with that sleeve: one
+  album, three covers. The first answer is kept on `CoverState.shared` and
+  reused. It takes the fetch as a closure rather than calling `lookup`, which
+  is the only reason the sharing is testable without a network: the test counts
+  how many times the closure runs, and "the files all match" cannot see the
+  difference between one request and twelve. A miss stores nothing, so the next
+  track still tries and an obscure opening track does not cost the folder its
+  art.
+- **An album shares its album tag as well as its sleeve, and `tag::album_name`
+  is the other half of `tag::sleeve`.** The two are read together, so sharing
+  one and not the other is the same bug wearing different clothes: track five
+  matching a compilation wore that compilation's name beside the record's own
+  sleeve, which is worse than the twelve-covers case it replaced, because the
+  file now contradicts itself. Kept apart from `sleeve` rather than folded
+  into it, because this answer costs no request: it is first-found rather than
+  first-fetched, so a track whose art failed still settles the name.
+- **An album keeps its folder image; a playlist drops one.** On a playlist
+  `cover.jpg` is whichever track resolved art first wearing the folder's name,
+  which is what `drop_folder_cover` was written to clear up. On an album it is
+  that album's sleeve and matches every file in the folder. The album flag is a
+  parameter rather than a check at the call site so the rule is testable where
+  it lives.
+- **A folder image that was there before the download is the user's, and
+  `written` is what protects it.** `apply` writes `cover.jpg` from the first
+  track to resolve art, so on a folder somebody had already put art in, the
+  bytes were gone before `drop_folder_cover` ever ran: that function keeps the
+  *name* from deletion and nothing kept the contents. `pipeline` built
+  `written: false` where `retry` built it from `has_cover`, and two answers to
+  one question is an oversight, not a decision. It is `!theirs.is_empty()` now, the
+  same answer `folder_covers` already took before the download, so there is
+  one derivation rather than two.
+- **Three lines in `pipeline` carry these answers and nothing tests them.**
+  `one_sleeve: album` on the `CoverState`, the `album` argument to
+  `drop_folder_cover`, and `written: !theirs.is_empty()`. All three still
+  compile and the whole suite still passes with any of them flipped, because
+  reaching them needs a live scan and, for the last two, a live lookup. Same
+  trap as the `gate` literal `resync` passes, and the same answer: treat those
+  three lines as load-bearing. What can be tested is tested one level down:
+  `an_albums_files_all_read_back_the_same_album_tag` builds a `Match` by hand
+  with the cover off, which is the only way to reach `tag::apply` without a
+  network.
+- **The pill takes the marker out of the name, and only the album one.**
+  `Autobahn [album]` beside a pill saying `album` says it twice.
+  `manifest::without_marker` drops the group, in the library row alone: the
+  folder is not renamed, `e` still opens on the name it really has, and the
+  `/` filter still matches the text that is no longer on screen, which the
+  preview already does for filenames. Only the kind the row is showing,
+  because a `[playlist]` folder has no pill and the name is then the one
+  place that answer is on screen. It reads a bracket group exactly as
+  `kind_from_name` does, or the screen and the answer would disagree about
+  what counts as a marker, and a name that is nothing but the marker comes
+  back whole, since an empty name column says less than a repeated word.
+- **The album pill's slot is reserved per draw, not per row.**
+  `draw_library` asks whether any row on screen is an album and only then
+  takes `KIND_WIDTH` off the name column, so a library with no album in it
+  draws exactly as it did before the pill existed. Per row it would cost
+  eight columns of name on every library; always on it would cost them on
+  every library. The gap sits outside the fill, or the pill is not one and
+  the counts after it step sideways between rows. `ink` on `accent` is the
+  fill, reversed without colour, because that is the one pair every palette
+  is measured on and `draw_band` is the precedent; the word `album` is what
+  carries the state, so nothing here is told apart by colour alone. Only an
+  album is marked: silence is the playlist answer everywhere else in this
+  feature. Testing the fill is the part that bit. `bg.is_some()` is true of
+  every cell, because the gradient paints one, and "different from the cell
+  beside it" is true of plain text for the same reason: the assertion has to
+  name `WARM.ink` and `WARM.accent`. A row comparison has to count columns
+  rather than bytes, too, since the selected row opens with a three-byte
+  `▌`.
+- **The album tag fill was deliberately left alone.** `cfg.album` still writes
+  the playlist's name into an empty album tag whatever the kind is. Gating it
+  on `album` would be better tagging and is a silent change to the default path
+  for every existing folder, which this feature promised not to make;
+  `--no-album` is the control that already exists. Worth doing on its own, not
+  smuggled in here.
+- **A rename moves the `#m3u8` header with the file.** Left naming the old
+  filename, `write_playlist` in a folder with no URL finds a playlist it does
+  not recognise and refuses for good: earworm stops updating its own playlist
+  after a rename, silently, for the life of that folder.
+- **`write_manifest` drops a kept entry naming a file a track now holds.**
+  Keyed on the id alone, a match that rewrites a `~` id to a video id leaves
+  both lines in the sidecar for one file, and the next sync reads the stale
+  one back as a file the playlist does not have.
+- **`Pass` carries `gate` and `attaching` as named fields.** Two loose bools
+  at six call sites is one transposition away from `--resync` reconciling
+  folders nobody is watching. `Pass::attaching()` forces the gate on whatever
+  asked for the sync, which is the one thing that overrides the `false`
+  literal `resync` passes: the matching is a guess made from tags the user
+  typed, and somebody reading "12 to download" against a folder they know
+  holds twelve is the last defence. `resync` never reaches it anyway, because
+  it skips a folder with no URL outright and logs why.
+- **`reconcile` matches by predicted filename, then title, then duration, and
+  duration only breaks a tie.** Every other song is three minutes, so a
+  duration match on its own would hand a video whatever file happens to be the
+  same length. Two files a rule cannot separate match nothing, which costs a
+  download where the wrong file costs the user their own music renamed to
+  something it is not. Both name comparisons go through `normalised`, composed
+  and lowercased, for the reason `mark_departed` does: matched raw, every
+  accented or Hangul title misses while the ASCII ones still match.
+  `strip_number` takes a leading run of digits *and a separator*, so `1979`
+  and `99 Luftballons` keep theirs. The fixtures for this have to be numbered
+  where the playlist does not put them, or rule 1 covers rule 2 and the test
+  passes with the title matching deleted.
+- **A `Local` row is numbered past the playlist on the reopen path too.**
+  `open_shelf`'s renumber excluded only `Gone`, so a local file carrying the
+  user's own `05 -` competed for index 5 with the playlist's actual track 5,
+  and whichever sat first in the sidecar won. The real track then landed at 11,
+  sorted to the bottom, and the first edit renamed the file to that position.
+  `reconcile` had this right and the read-back path did not, which is the shape
+  of every bug this feature has had: the status is set correctly by the sync
+  and then lost on the way back off disk.
+- **`open_shelf` gives a local id back its `Local` status, and only in a
+  folder that has a URL.** Reopening an attached folder reads its files out of
+  the sidecar, and a `~` entry there is one the sync could not place. Read
+  back as `Have` and `listed`, `mark_departed` finds it missing from the
+  `.m3u8` the sync correctly left it out of and calls it `gone`: the row then
+  claims a video left a playlist the file was never in. The URL is the other
+  half of the test, because in a folder with no playlist behind it every id is
+  local and every file genuinely belongs to it. `mark_departed` skips a
+  `Local` track for the same reason, or it overwrites the answer the line
+  above just gave. Both halves have a test and both were broken to prove it.
+- **`Status::Local` is not `Gone`.** `Gone` says a video left the playlist and,
+  once proven, lets `D` delete the file. Neither half is true of a file the
+  user put there: nothing left, and it is the one thing in the folder earworm
+  has no claim on. It is settled, `listed = false`, skipped by `tag_tracks`
+  beside `Gone` and `Skipped`, and unreachable from `can_purge`, which reads
+  `Gone && departure_proven`. Its legend row is its own rather than a fourth
+  word on the "not touched this run" row, which is three slots wide and would
+  push every gloss nine columns right on every terminal.
+- **The scan's `--print` carries duration, and the stubs have to agree.**
+  `splitn(5)` with the filename last, because that is the one field that could
+  hold a tab. Three stub yt-dlps print that line and all three break together
+  when the format changes.
 - **`is_file`, never `exists`, for a track's path.** A directory sitting where
   the audio should go satisfies `exists`, and `scan` then calls the track
   downloaded, so nothing fetches it or marks it failed.

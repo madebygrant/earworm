@@ -30,6 +30,14 @@ pub enum Status {
     /// In the playlist and not on disk, because the run was never asked to
     /// fetch it. Distinct from `Failed`, which would overstate what went wrong.
     Skipped,
+    /// On disk and not in the playlist, and never was: a file the user put in
+    /// the folder themselves, that a sync could not match to any video.
+    /* Not `Gone`, which says a video left the playlist and, once proven,
+       lets `D` delete the file. Neither half is true here: nothing left, and
+       the file is the one thing in the folder earworm has no claim on at all.
+       A separate status is also what keeps it out of `tag_tracks`, where a
+       lookup would retag a file the playlist knows nothing about. */
+    Local,
 }
 
 /* Every variant, for the tests that have to walk them all. Rust will not
@@ -39,7 +47,7 @@ pub enum Status {
    the tally with nothing saying why, and it now builds itself from the
    tracks instead. */
 #[cfg(test)]
-pub const TALLY: [Status; 14] = [
+pub const TALLY: [Status; 15] = [
     Status::Pending,
     Status::Have,
     Status::Downloading,
@@ -54,6 +62,7 @@ pub const TALLY: [Status; 14] = [
     Status::Failed,
     Status::Gone,
     Status::Skipped,
+    Status::Local,
 ];
 
 impl Status {
@@ -81,6 +90,7 @@ impl Status {
             Status::Failed => "failed",
             Status::Gone => "gone",
             Status::Skipped => "skipped",
+            Status::Local => "local",
         }
     }
 
@@ -101,7 +111,13 @@ impl Status {
             | Status::Downloaded
             | Status::Converting => p.accent,
             // Nothing to act on: not downloaded, or deliberately left alone.
-            Status::Pending | Status::Have | Status::Gone | Status::Skipped => p.muted,
+            /* Nothing to act on: not downloaded, deliberately left alone, or
+               the user's own file, which is settled by definition. */
+            Status::Pending
+            | Status::Have
+            | Status::Gone
+            | Status::Skipped
+            | Status::Local => p.muted,
         }
     }
 
@@ -132,6 +148,7 @@ impl Status {
             Status::Gone => Some(6),
             Status::Skipped => Some(7),
             Status::Have => Some(8),
+            Status::Local => Some(9),
             Status::Pending
             | Status::Downloading
             | Status::Downloaded
@@ -153,6 +170,7 @@ impl Status {
                 | Status::Gone
                 | Status::Skipped
                 | Status::Have
+                | Status::Local
         )
     }
 }
@@ -213,13 +231,21 @@ impl Track {
     }
 }
 
-/// One already-downloaded playlist folder, read from its manifest alone so the
-/// library opens with no network and no yt-dlp.
-#[derive(Clone)]
+/// One playlist folder under `--dir`: either one earworm downloaded, read from
+/// its manifest alone so the library opens with no network and no yt-dlp, or
+/// one somebody put there, read from the audio sitting in it.
+/* `Default` is for the tests, which build a row to ask one question of it and
+   would otherwise restate every field each time a new one is added. Nothing
+   in the running tool builds a shelf that way: `library` fills all of them. */
+#[derive(Clone, Default)]
 pub struct Shelf {
     pub path: PathBuf,
     pub name: String,
-    pub url: String,
+    /// `None` for a folder earworm did not download: one somebody copied in,
+    /// or one adopted by an edit and never attached to a playlist. Every key
+    /// that means "the playlist upstream" has to answer for that case rather
+    /// than assume a string is there.
+    pub url: Option<String>,
     pub tracks: usize,
     /// Entries whose file has since been deleted. Not the same as a track that
     /// left the playlist, which needs a listing to know about.
@@ -229,6 +255,18 @@ pub struct Shelf {
     /// here because the draw loop must not stat, and the filename carries the
     /// number and tags already, so the preview needs no tag read.
     pub files: Vec<(String, bool)>,
+    /// The folder's `.m3u8`, whatever it is called. earworm names its own
+    /// after the folder, but a folder somebody copied in brought its own
+    /// playlist file with its own name, and `p` is what reads this: handing
+    /// cliamp a path earworm invented would refuse a folder that has one.
+    /// `None` when the folder has no playlist file, or more than one and so
+    /// no single answer.
+    pub playlist: Option<PathBuf>,
+    /// What `manifest::kind_of` makes of the folder, from its name or from
+    /// what a sync recorded. `None` is the answer for almost every folder and
+    /// means playlist: the row says nothing, because playlist is the default
+    /// rather than a finding.
+    pub kind: Option<crate::manifest::Kind>,
 }
 
 /// What earworm knows about cliamp. `Missing` is also the starting guess, so
@@ -1053,7 +1091,9 @@ impl App {
                 self.marked = self
                     .tracks
                     .iter()
-                    .filter(|t| !matches!(t.status, Status::Have | Status::Gone))
+                    /* Nothing the pick gate could ask about: already on
+                       disk, departed, or a file the playlist never had. */
+                    .filter(|t| !matches!(t.status, Status::Have | Status::Gone | Status::Local))
                     .map(|t| t.index)
                     .collect();
                 self.follow = false;
@@ -1319,6 +1359,14 @@ impl App {
     /// nothing.
     pub fn selected_shelf(&self) -> Option<&Shelf> {
         self.library.get(self.shelf)
+    }
+
+    /// Whether `p` on the library has something to hand over. cliamp being up
+    /// is only half of it: the folder under the cursor has to hold a playlist
+    /// file, and a folder earworm did not download need not. A key that can
+    /// only refuse is worse than no key, so the row goes with it.
+    pub fn can_play_shelf(&self) -> bool {
+        self.can_play() && self.selected_shelf().is_some_and(|s| s.playlist.is_some())
     }
 
     /* Not gated on the library having rows: `n` is the way out of an empty
@@ -2270,11 +2318,11 @@ mod tests {
         Shelf {
             path: PathBuf::from("/tmp").join(name),
             name: name.into(),
-            url: String::new(),
+            url: Some("u".into()),
             tracks: 10,
             missing,
             synced,
-            files: Vec::new(),
+            ..Shelf::default()
         }
     }
 
@@ -3119,11 +3167,9 @@ mod tests {
         Shelf {
             path: PathBuf::from("/music").join(name),
             name: name.into(),
-            url: "u".into(),
+            url: Some("u".into()),
             tracks: 3,
-            missing: 0,
-            synced: None,
-            files: Vec::new(),
+            ..Shelf::default()
         }
     }
 
@@ -3640,7 +3686,8 @@ mod tests {
                 | Status::NoMatch
                 | Status::Failed
                 | Status::Gone
-                | Status::Skipped => false,
+                | Status::Skipped
+                | Status::Local => false,
             };
             assert_eq!(status.settled(), !in_flight, "{status:?}");
         }

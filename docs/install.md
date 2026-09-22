@@ -58,7 +58,12 @@ settings
   ✓ format     opus · writes .opus
   ✓ convert    off · tracks already on disk keep their format
   ✓ directory  ~/Music · 7 playlists
+  ✓ hidden     deep-focus-chillstep  ·  on disk, on no screen, and passed over by --resync
 ```
+
+The `hidden` row is only there when something is. `D`'s hide answer takes a
+folder off the library and out of `--resync`, and this row is the only place
+that says which folders those are.
 
 It exits 1 when something earworm can't work without is missing and 0 when
 only the optional tools are, so a script can act on it.

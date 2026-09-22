@@ -36,7 +36,7 @@ touch, and failures](images/keys.png)
 | `A` | set one artist across the marked tracks |
 | `tab` `^s` | next field, swap artist and title (in the edit form) |
 | `r` | retry every failed track (after the run) |
-| `S` | sync the open playlist against its saved URL |
+| `S` | sync the open playlist, asking for a URL if it has none |
 | `D` | delete the files of tracks a sync found had left the playlist |
 | `p` | play this playlist in cliamp (only while cliamp is running) |
 | `a` `i` `enter` | all, invert, download (at the pick gate) |
@@ -54,12 +54,12 @@ touch, and failures](images/keys.png)
 | `^d` `^u` `PgDn` `PgUp` | move by a screenful |
 | `enter` | open this playlist from disk |
 | `e` | rename this playlist |
-| `D` | remove this playlist: forget it or delete its folder |
+| `D` | remove this playlist: forget, hide, or delete its folder |
 | `O` | open this folder in the file manager |
 | `/` | filter the folders by name, or by a track inside them |
 | `t` | every matching track across the library, flat |
 | `o` | order: name, last synced, most missing |
-| `p` | play the folder under the cursor in cliamp |
+| `p` | play the folder under the cursor in cliamp (needs a playlist file) |
 | `space` | play/pause cliamp |
 | `R` | sync every playlist |
 | `n` | sync a new URL |
@@ -88,6 +88,8 @@ The status column says which route a track took.
 - `failed` — a download or tag write that didn't work.
 - `on disk` — already there. `skipped` — one you left out at the gate. `gone`
   — a file whose video has left the playlist.
+- `local` — a file of yours that the playlist doesn't have. Nothing touches
+  it, it stays out of the `.m3u8`, and `D` never deletes it.
 - During a run: `queued`, `fetching`, `fetched` and `tagging`, in the same
   words the header uses for the run as a whole.
 
@@ -113,16 +115,21 @@ Refusing leaves the folder exactly as it was, cover included. It needs the
 network; a track it can't find art for keeps what it has and is named in the
 log pane.
 
-After an ordinary run there is no folder image to remove. earworm writes one
+After a playlist's run there is no folder image to remove. earworm writes one
 while it tags and deletes it again at the end, since every track already
 carries the art. One you dropped in yourself is never touched.
+
+A folder earworm has decided is an album keeps its `cover.jpg`, and its tracks
+all get the one sleeve rather than each looking up its own.
+[The library](library.md#albums-and-playlists) covers which folders those are
+and how to mark one yourself.
 
 ## On screen
 
 Nothing is told apart by colour alone. Statuses are words, a missing file
 carries `!`, an error waiting in the log pane puts `!` in front of the hint,
-and the bar says `♪ cliamp ▶` or `♪ cliamp ⏸` rather than leaving the
-transport to the colour.
+a library row's pills say `album` and `local` in words, and the bar says
+`♪ cliamp ▶` or `♪ cliamp ⏸` rather than leaving the transport to the colour.
 
 While a run is going the bar says `⟳ following`, because the cursor being
 dragged to whatever is downloading reads as a bug until you know a mode is

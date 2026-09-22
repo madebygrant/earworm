@@ -217,6 +217,8 @@ fn check(cfg: &Config) -> Result<()> {
         graphics: &graphics,
         dir: &dir,
         playlists: dir.is_dir().then_some(shelves.len()),
+        // A second walk, because `library` drops these before it counts.
+        hidden: &if dir.is_dir() { worker::hidden(&dir) } else { Vec::new() },
         convert: cfg.convert,
         off_format: dir.is_dir().then(|| {
             let counts: Vec<usize> = shelves
@@ -248,22 +250,39 @@ fn list(cfg: &Config) {
     }
     let widest = shelves.iter().map(|s| s.name.chars().count()).max().unwrap_or(0);
     for shelf in shelves {
-        let synced = shelf
-            .synced
-            .map_or_else(|| "never synced".to_string(), manifest::ago);
-        /* Both in one column, since a folder rarely has either and a second
-           fixed field would push the URL off an eighty-column terminal. */
-        let note = match (shelf.missing, app::off_format(&shelf, &cfg.format)) {
-            (0, 0) => String::new(),
-            (0, n) => format!(", {n} not {}", cfg.format),
-            (n, 0) => format!(", {n} missing"),
-            (m, n) => format!(", {m} missing, {n} not {}", cfg.format),
-        };
-        println!(
-            "{:widest$}  {:>4} tracks{:<24}  {synced:<13}  {}",
-            shelf.name, shelf.tracks, note, shelf.url
-        );
+        println!("{}", list_line(&shelf, &cfg.format, widest));
     }
+}
+
+/// One `--list` row. Kept apart from the printing so it is testable as the
+/// text it is, the way `deps::report` is.
+fn list_line(shelf: &app::Shelf, format: &str, widest: usize) -> String {
+    let synced = match (&shelf.url, shelf.synced) {
+        (Some(_), Some(at)) => manifest::ago(at),
+        (Some(_), None) => "never synced".to_string(),
+        /* Nothing to sync from, which is a different answer from having a URL
+           and not having got round to it: `S` asks for one rather than
+           running. Three states, three words, no colour in it. */
+        (None, _) => "no url".to_string(),
+    };
+    /* Both in one column, since a folder rarely has either and a second
+       fixed field would push the URL off an eighty-column terminal. */
+    let note = match (shelf.missing, app::off_format(shelf, format)) {
+        (0, 0) => String::new(),
+        (0, n) => format!(", {n} not {format}"),
+        (n, 0) => format!(", {n} missing"),
+        (m, n) => format!(", {m} missing, {n} not {format}"),
+    };
+    /* A dash rather than a blank, so a folder earworm did not download reads
+       as an answered question in a script's output rather than as a column
+       that failed to print. */
+    format!(
+        "{:widest$}  {:>4} tracks{:<24}  {synced:<13}  {}",
+        shelf.name,
+        shelf.tracks,
+        note,
+        shelf.url.as_deref().unwrap_or("-")
+    )
 }
 
 /* Off means no thread and no answer, not a failed check; the receiver is
@@ -762,7 +781,7 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         /* Free here, unlike on the track list where it marks a row, and this
            is the screen that already says what cliamp is doing. */
         KeyCode::Char(' ') if app.can_browse() && app.can_play() => app.send(Cmd::Toggle),
-        KeyCode::Char('p') if app.can_browse() && app.can_play() => {
+        KeyCode::Char('p') if app.can_browse() && app.can_play_shelf() => {
             if let Some(folder) = app.selected_shelf().map(|s| s.path.clone()) {
                 app.send(Cmd::Play(folder));
             }
@@ -923,6 +942,55 @@ mod tests {
     use super::*;
     use crate::app::Confirm;
 
+    /* Three states, and the URL column is the one thing a folder cannot tell
+       you by its name. A blank there would read as a column that failed to
+       print rather than as an answer, which in something meant to be grepped
+       is the difference between a row and a bug report. */
+    #[test]
+    fn the_listing_says_which_folders_have_no_url() {
+        let synced = crate::app::Shelf {
+            name: "Focus".into(),
+            url: Some("https://youtube.com/playlist?list=PL1".into()),
+            tracks: 3,
+            synced: Some(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs()
+                    - 3 * 86_400,
+            ),
+            ..Default::default()
+        };
+        let waiting = crate::app::Shelf {
+            name: "New".into(),
+            url: Some("https://youtube.com/playlist?list=PL2".into()),
+            tracks: 0,
+            ..Default::default()
+        };
+        let copied = crate::app::Shelf {
+            name: "Copied".into(),
+            tracks: 7,
+            ..Default::default()
+        };
+
+        let line = list_line(&synced, "opus", 6);
+        assert!(line.contains("3d ago"), "{line}");
+        assert!(line.trim_end().ends_with("list=PL1"), "{line}");
+
+        let line = list_line(&waiting, "opus", 6);
+        assert!(line.contains("never synced"), "{line}");
+        assert!(line.trim_end().ends_with("list=PL2"), "{line}");
+
+        let line = list_line(&copied, "opus", 6);
+        assert!(line.contains("no url"), "{line}");
+        assert!(
+            line.trim_end().ends_with('-'),
+            "the URL column was left blank rather than answered: {line}"
+        );
+        // Still a real row: the tracks are what a script is counting.
+        assert!(line.contains("7 tracks"), "{line}");
+    }
+
     /* What the tab strip says while earworm is in a window nobody is
        looking at, which is most of a forty-minute sync. */
     #[test]
@@ -1029,11 +1097,9 @@ mod tests {
             shelves: vec![crate::app::Shelf {
                 path: std::path::PathBuf::from("/music/Focus"),
                 name: "Focus".into(),
-                url: "u".into(),
+                url: Some("u".into()),
                 tracks: 3,
-                missing: 0,
-                synced: None,
-                files: Vec::new(),
+                ..Default::default()
             }],
             show: true,
         });
@@ -1064,11 +1130,9 @@ mod tests {
             shelves: vec![crate::app::Shelf {
                 path: std::path::PathBuf::from("/music/Focus"),
                 name: "Focus".into(),
-                url: "u".into(),
+                url: Some("u".into()),
                 tracks: 3,
-                missing: 0,
-                synced: None,
-                files: Vec::new(),
+                ..Default::default()
             }],
             show: true,
         });
@@ -1216,11 +1280,10 @@ mod tests {
         crate::app::Shelf {
             path: std::path::PathBuf::from("/music").join(name),
             name: name.into(),
-            url: "u".into(),
+            url: Some("u".into()),
             tracks: files.len(),
-            missing: 0,
-            synced: None,
             files: files.iter().map(|f| ((*f).to_string(), true)).collect(),
+            ..Default::default()
         }
     }
 

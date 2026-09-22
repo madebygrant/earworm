@@ -20,6 +20,8 @@ const STATUS_WIDTH: usize = 8;
 const PREVIEW_FROM: u16 = 100;
 /// Width of `  NNN missing`, held open on rows with nothing missing.
 const MISSING_WIDTH: usize = 13;
+/// ` album ` plus the space that separates it from the name.
+const KIND_WIDTH: usize = 8;
 /// As much of cliamp's track title as the bar will spend on it. Long enough
 /// to recognise a song, short enough that it is not what pushed the counts
 /// off the row.
@@ -557,6 +559,40 @@ fn draw_found(frame: &mut Frame, app: &mut App, area: Rect) {
 /* One row per playlist folder, all of it from the manifests: the counts are
    what is on disk, and the sync time is the only thing that says whether that
    still matches the playlist upstream. */
+/// The album marker beside a folder's name, as a filled pill.
+/* Albums only. Silence is the playlist answer everywhere else in this feature
+   and a pill on every row would say nothing while costing the width.
+
+   `ink` on `accent` is the one filled pair the palettes are measured on, and
+   reversed without colour, exactly as `draw_band` does: a fill is the only
+   thing that reads as a pill, and this is the one fill that is legible on all
+   four themes. It punches through the gradient like the band does, which for
+   seven columns is the point rather than a cost. The word is what carries it,
+   so nothing here is told apart by colour alone. */
+fn kind_pill(kind: Option<manifest::Kind>, slot: bool, p: Palette) -> Vec<Span<'static>> {
+    if !slot {
+        return Vec::new();
+    }
+    if kind != Some(manifest::Kind::Album) {
+        return vec![Span::raw(" ".repeat(KIND_WIDTH))];
+    }
+    // The gap is outside the fill, or the pill is not one.
+    vec![Span::raw(" "), pill(" album ", p)]
+}
+
+/// A filled marker, in the one pair every palette is measured on.
+/* `ink` on `accent`, reversed without colour, which is `draw_band`'s rule and
+   the only fill these palettes have numbers for. The word inside is what
+   carries the state, so nothing a pill says is told apart by colour alone. */
+fn pill(text: &'static str, p: Palette) -> Span<'static> {
+    let fill = if theme::plain() {
+        Style::new().add_modifier(Modifier::REVERSED)
+    } else {
+        Style::new().fg(p.ink).bg(p.accent)
+    };
+    Span::styled(text, fill)
+}
+
 fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
     let p = app.theme;
     /* Only reachable by emptying --dir while the screen is open: a bare start
@@ -601,18 +637,34 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let width = area.width as usize;
     app.viewport = area.height as usize;
+    /* The pill is what says album, so a name that says it too says it twice.
+       Taken out for the album alone: a `[playlist]` marker has no pill beside
+       it and the name is the only place that answer is on screen. The folder
+       is not renamed and `e` still opens on the name it really has. */
+    let shown = |shelf: &Shelf| match shelf.kind {
+        Some(manifest::Kind::Album) => manifest::without_marker(&shelf.name, manifest::Kind::Album),
+        _ => shelf.name.clone(),
+    };
     let longest = rows
         .iter()
-        .map(|pos| cols(&app.library[*pos].name))
+        .map(|pos| cols(&shown(&app.library[*pos])))
         .max()
         .unwrap_or(0);
-    let name_width = longest.min(width.saturating_sub(40).max(12));
+    /* The slot costs its width on every row, so it is only there when some
+       row on screen needs it. A library with no albums in it draws exactly as
+       it did before, and the decision is per draw rather than per row, so the
+       columns after it still line up. */
+    let slot = rows
+        .iter()
+        .any(|pos| app.library[*pos].kind == Some(manifest::Kind::Album));
+    let fixed = 40 + if slot { KIND_WIDTH } else { 0 };
+    let name_width = longest.min(width.saturating_sub(fixed).max(12));
 
     let items: Vec<ListItem> = rows
         .iter()
         .map(|row| {
             let (row, shelf) = (*row, &app.library[*row]);
-            let name = truncate(&shelf.name, name_width);
+            let name = truncate(&shown(shelf), name_width);
             let pad = name_width.saturating_sub(cols(&name));
             let mut spans = vec![
                 Span::styled(
@@ -622,6 +674,9 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
                 // Bold as well as the marker: the bar alone is a thin signal
                 // for "this is the folder Enter opens".
                 Span::styled(format!(" {name}{:pad$}", ""), row_style(row == selected, p)),
+            ];
+            spans.extend(kind_pill(shelf.kind, slot, p));
+            spans.extend([
                 /* Two cells whether or not anything is playing, so the columns
                    after it do not step sideways as cliamp starts and stops. */
                 match (app.playback.on(&shelf.path), app.playback.playing) {
@@ -639,11 +694,25 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
                 } else {
                     Span::raw(" ".repeat(MISSING_WIDTH))
                 },
-            ];
-            spans.push(dim(match shelf.synced {
-                Some(at) => format!("  synced {}", manifest::ago(at)),
-                None => "  never synced".into(),
-            }, p));
+            ]);
+            /* Three answers, not two. A folder earworm did not download has
+               nothing to sync from, which is a different thing from one that
+               has a URL and has not been synced yet: `S` prompts on the first
+               and runs on the second. The word carries it, not a colour.
+
+               The third is a pill rather than dim text because it is the row
+               whose keys behave differently, and it was the quietest thing on
+               the screen: `R` walks past it and `S` asks a question instead of
+               running. In this column rather than beside the name, where it
+               would need a slot of its own and could land next to the album
+               pill on a folder that is both. */
+            match (&shelf.url, shelf.synced) {
+                (Some(_), Some(at)) => {
+                    spans.push(dim(format!("  synced {}", manifest::ago(at)), p));
+                }
+                (Some(_), None) => spans.push(dim("  never synced", p)),
+                (None, _) => spans.extend([Span::raw("  "), pill(" local ", p)]),
+            }
             ListItem::new(Line::from(spans))
         })
         .collect();
@@ -1321,9 +1390,14 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("", "t", "every matching track, across the library"),
             ("", "o", "order: name, last synced, most missing"),
         ]);
-        if app.can_play() {
+        /* `space` is about cliamp and `p` is about the row under the cursor,
+           so a folder with no playlist file to hand over loses one and keeps
+           the other. The group's label goes on whichever row is first. */
+        if app.can_play_shelf() {
             rows.push(("play", "p", "hand this playlist to cliamp"));
             rows.push(("", "space", "play/pause cliamp"));
+        } else if app.can_play() {
+            rows.push(("play", "space", "play/pause cliamp"));
         }
         rows.extend([
             ("sync", "R", "sync every playlist"),
@@ -1460,6 +1534,11 @@ fn draw_help(frame: &mut Frame, app: &App) {
         ("tags", vec![Status::Ok, Status::Manual], "confirmed"),
         ("", vec![Status::Kept, Status::Weak, Status::NoMatch], "a guess, worth a look"),
         ("", vec![Status::Have, Status::Skipped, Status::Gone], "not touched this run"),
+        /* Its own row rather than a fourth word on the one above, which is
+           three slots wide and would push every gloss nine columns right on
+           every terminal. A row costs only the height at which the legend
+           gives way, and it gives way whole. */
+        ("", vec![Status::Local], "yours, not from the playlist"),
         ("", vec![Status::Failed], "l has the reason"),
     ];
     let room = lines.len() + tail.len() + legend.len() + 1;
@@ -2192,18 +2271,20 @@ mod tests {
             Shelf {
                 path: std::path::PathBuf::from("/music/Focus"),
                 name: "Focus".into(),
-                url: "u1".into(),
+                url: Some("u1".into()),
                 tracks: 42,
                 missing: 0,
                 synced: Some(epoch() - 3 * 86_400),
                 files: (1..=42)
                     .map(|n| (format!("{n:02} Artist - Track {n}.opus"), true))
                     .collect(),
+                playlist: Some(std::path::PathBuf::from("/music/Focus/Focus.m3u8")),
+                kind: None,
             },
             Shelf {
                 path: std::path::PathBuf::from("/music/Road trip"),
                 name: "Road trip".into(),
-                url: "u2".into(),
+                url: Some("u2".into()),
                 tracks: 9,
                 missing: 2,
                 synced: None,
@@ -2212,6 +2293,8 @@ mod tests {
                     ("02 Neu! - Hallogallo.opus".into(), false),
                     ("03 Can - Vitamin C.opus".into(), true),
                 ],
+                playlist: None,
+                kind: None,
             },
         ]
     }
@@ -2392,7 +2475,12 @@ mod tests {
         /* The other three rows of the same block, taken by position: their
            glosses are words that also appear among the key descriptions. */
         let at = screen.iter().position(|r| r == row).unwrap();
-        for (n, gloss) in [(-1i32, "confirmed"), (1, "not touched this run"), (2, "l has the reason")]
+        for (n, gloss) in [
+            (-1i32, "confirmed"),
+            (1, "not touched this run"),
+            (2, "yours, not from the playlist"),
+            (3, "l has the reason"),
+        ]
         {
             let line = &screen[(at as i32 + n) as usize];
             let found = line.find(gloss).unwrap_or_else(|| panic!("{gloss}: {line:?}"));
@@ -2736,6 +2824,114 @@ mod tests {
         );
     }
 
+    fn library_of(shelves: Vec<Shelf>) -> ratatui::buffer::Buffer {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.apply(Msg::Library { shelves, show: true });
+        app.intro_done = true;
+        let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    fn row_text(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
+        (0..120).map(|x| buffer[(x, y)].symbol().to_string()).collect()
+    }
+
+    /* The column, not the byte: the selected row opens with `▌`, which is
+       three bytes and one cell, so `find` alone puts the two rows two apart
+       and the comparison below would fail on a screen that lines up. */
+    fn col_of(row: &str, needle: &str) -> Option<usize> {
+        row.find(needle).map(|at| super::cols(&row[..at]))
+    }
+
+    fn kinded(name: &str, kind: Option<crate::manifest::Kind>) -> Shelf {
+        Shelf {
+            path: std::path::PathBuf::from("/music").join(name),
+            name: name.into(),
+            url: Some("u".into()),
+            tracks: 12,
+            files: (1..=12).map(|n| (format!("{n:02} A - B.opus"), true)).collect(),
+            kind,
+            ..Shelf::default()
+        }
+    }
+
+    /* The pill is the only thing on the library screen that says an album is
+       an album, and the folder here is named without the word on purpose: a
+       detected album has nothing in its name, which is exactly the case the
+       row has to answer. */
+    #[test]
+    fn an_album_wears_a_pill_and_a_playlist_does_not() {
+        let buffer = library_of(vec![
+            kinded("Autobahn", Some(crate::manifest::Kind::Album)),
+            kinded("Chill Evenings", None),
+        ]);
+        let (album, playlist) = (row_text(&buffer, 2), row_text(&buffer, 3));
+        assert!(album.contains("Autobahn"), "{album:?}");
+        assert!(album.contains(" album "), "no pill on the album row: {album:?}");
+        assert!(
+            !playlist.contains("album"),
+            "the playlist row was marked too: {playlist:?}"
+        );
+        /* The slot is a fixed width, so the counts after it line up whether
+           or not the row carries a pill. */
+        assert_eq!(
+            col_of(&album, "tracks"),
+            col_of(&playlist, "tracks"),
+            "the pill moved the columns after it\n{album:?}\n{playlist:?}"
+        );
+        /* A fill, and the one pair the palettes are measured on. Named
+           rather than compared with a neighbour: the gradient gives every
+           cell its own background, so "different from the one beside it" is
+           true of plain text too. */
+        let at = col_of(&album, " album ").unwrap() as u16;
+        let pill = buffer[(at, 2)].style();
+        assert_eq!(pill.fg, Some(crate::theme::WARM.ink), "{pill:?}");
+        assert_eq!(pill.bg, Some(crate::theme::WARM.accent), "{pill:?}");
+    }
+
+    /* The pill says album, so a name that also says it says it twice, which
+       is what this is here to stop. The folder is not renamed: only this
+       column drops the word, and only for the kind the pill is showing. */
+    #[test]
+    fn a_marked_album_says_it_once_and_a_marked_playlist_keeps_its_word() {
+        let buffer = library_of(vec![
+            kinded("Autobahn [album]", Some(crate::manifest::Kind::Album)),
+            kinded("Chill [playlist]", Some(crate::manifest::Kind::Playlist)),
+        ]);
+        let (album, playlist) = (row_text(&buffer, 2), row_text(&buffer, 3));
+        assert!(album.contains("Autobahn"), "{album:?}");
+        assert!(
+            !album.contains("[album]"),
+            "the name said it as well as the pill: {album:?}"
+        );
+        assert!(album.contains(" album "), "the pill went with it: {album:?}");
+        /* No pill beside it, so the name is the only place this answer is on
+           screen and taking it out would lose it. */
+        assert!(
+            playlist.contains("[playlist]"),
+            "the marker was dropped with nothing saying it: {playlist:?}"
+        );
+    }
+
+    /* The slot costs eight columns of name on every row, so a library with no
+       album in it must draw exactly as it did before there was a pill. */
+    #[test]
+    fn a_library_with_no_album_keeps_its_columns() {
+        let plain = library_of(vec![kinded("Chill Evenings", None), kinded("Sleep", None)]);
+        let mixed = library_of(vec![
+            kinded("Chill Evenings", None),
+            kinded("Sleep", Some(crate::manifest::Kind::Album)),
+        ]);
+        let (without, with) = (row_text(&plain, 2), row_text(&mixed, 2));
+        assert_ne!(
+            col_of(&without, "tracks"),
+            col_of(&with, "tracks"),
+            "the slot was reserved with no album on screen"
+        );
+    }
+
     fn library_screen_at(width: u16, shelf: usize) -> Vec<String> {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(tx, "settings".into());
@@ -2860,6 +3056,64 @@ mod tests {
         assert!(rows[3].contains("never synced"), "{:?}", rows[3]);
         // A list of folders gives no clue that Enter opens one.
         assert!(rows[11].contains("enter open"), "{:?}", rows[11]);
+    }
+
+    /* Three answers, not two. "Never synced" is a folder earworm can sync and
+       has not; a folder earworm did not download has nothing to sync from at
+       all, and `S` asks for a URL rather than running. Collapsing them would
+       leave the reader pressing `R` and wondering why one row never moves. */
+    #[test]
+    fn a_folder_with_no_url_says_so_rather_than_reading_as_unsynced() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.apply(Msg::Library {
+            shelves: vec![
+                Shelf {
+                    path: std::path::PathBuf::from("/music/Copied"),
+                    name: "Copied".into(),
+                    url: None,
+                    tracks: 4,
+                    ..Default::default()
+                },
+                Shelf {
+                    path: std::path::PathBuf::from("/music/Waiting"),
+                    name: "Waiting".into(),
+                    url: Some("u".into()),
+                    tracks: 4,
+                    ..Default::default()
+                },
+            ],
+            show: true,
+        });
+        app.intro_done = true;
+        let mut terminal = Terminal::new(TestBackend::new(90, 12)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let rows: Vec<String> = (0..12)
+            .map(|y| {
+                (0..90)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect();
+        let copied = rows.iter().find(|r| r.contains("Copied")).expect("no row");
+        let waiting = rows.iter().find(|r| r.contains("Waiting")).expect("no row");
+
+        assert!(copied.contains("local"), "{copied}");
+        assert!(waiting.contains("never synced"), "{waiting}");
+        assert!(
+            !copied.contains("never synced"),
+            "a folder with no URL reads as one waiting for a sync: {copied}"
+        );
+        /* Filled, not dim: this is the row whose keys behave differently and
+           it was the quietest thing on the screen. Named rather than compared
+           with a neighbour, because the gradient gives every cell a
+           background of its own. */
+        let at = col_of(copied, " local ").unwrap() as u16;
+        let row = rows.iter().position(|r| r.contains("Copied")).unwrap() as u16;
+        let style = buffer[(at, row)].style();
+        assert_eq!(style.fg, Some(crate::theme::WARM.ink), "{style:?}");
+        assert_eq!(style.bg, Some(crate::theme::WARM.accent), "{style:?}");
     }
 
     /* A walk with j and k to answer a question whose options are right
