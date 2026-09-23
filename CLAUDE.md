@@ -613,6 +613,18 @@ than at the start of every session.
   name `WARM.ink` and `WARM.accent`. A row comparison has to count columns
   rather than bytes, too, since the selected row opens with a three-byte
   `▌`.
+- **`a` narrows the library by kind, and it is a predicate, not a query.**
+  Neither word is in a folder's name, and a folder with no kind is a
+  playlist, which no text in the box could say. So `App.only` sits beside the
+  filter as `review` does on the track list, `kind_shows` counts a missing
+  kind as a playlist, and `clear_filter` drops it with the rest. The library's
+  Esc asks `shelf_narrowed()`, not `narrowed()`: the latter is the track
+  list's and cannot see the kind, so Esc would answer "this is the top" with
+  the list still short. `found_rows` and the search band's total ask
+  `kind_shows` too, or `t` turns up tracks from folders the rows just hid,
+  and emptying the search box clears the query alone rather than calling
+  `clear_filter`, since the kind belongs to the library it returns to. The
+  empty pane names the kind, because "nothing matches" has no query to quote.
 - **The album tag fill was deliberately left alone.** `cfg.album` still writes
   the playlist's name into an empty album tag whatever the kind is. Gating it
   on `album` would be better tagging and is a silent change to the default path

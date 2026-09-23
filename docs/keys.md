@@ -59,6 +59,7 @@ touch, and failures](images/keys.png)
 | `/` | filter the folders by name, or by a track inside them |
 | `t` | every matching track across the library, flat |
 | `o` | order: name, last synced, most missing |
+| `a` | show every folder, albums only, or playlists only |
 | `p` | play the folder under the cursor in cliamp (needs a playlist file) |
 | `space` | play/pause cliamp |
 | `R` | sync every playlist |

@@ -314,22 +314,33 @@ fn draw_filter_bar(frame: &mut Frame, app: &App, area: Rect) {
         // tracks of whichever playlist happens to be open behind it.
         View::Found => (
             app.found_rows().len(),
-            app.library.iter().map(|s| s.files.len()).sum(),
+            app.library
+                .iter()
+                .filter(|s| app.kind_shows(s))
+                .map(|s| s.files.len())
+                .sum(),
         ),
         View::Tracks => (app.shown(), app.tracks.len()),
     };
     let caret = if app.typing_filter { "\u{2588}" } else { "" };
-    // The review has no text to show, so it names itself instead.
-    let left = if app.review && app.filter.is_empty() && !app.typing_filter {
+    let word = match (app.view, app.only, app.review) {
+        // Its own word, because the box is the list here rather than a
+        // narrowing of one: an empty query is an empty screen.
+        (View::Found, Some(manifest::Kind::Album), _) => "SEARCH ALBUMS",
+        (View::Found, Some(manifest::Kind::Playlist), _) => "SEARCH PLAYLISTS",
+        (View::Found, ..) => "SEARCH",
+        (View::Library, Some(manifest::Kind::Album), _) => "ALBUMS",
+        (View::Library, Some(manifest::Kind::Playlist), _) => "PLAYLISTS",
+        (_, _, true) => "REVIEW",
+        _ => "FILTER",
+    };
+    // A predicate has no text to show, so it says what it kept instead.
+    let quiet = app.filter.is_empty() && !app.typing_filter;
+    let left = if quiet && app.review {
         " REVIEW  tracks nothing confirmed".to_string()
+    } else if quiet && app.only.is_some() {
+        format!(" {word}  the rest of the library is hidden")
     } else {
-        let word = match (app.view, app.review) {
-            // Its own word, because the box is the list here rather than a
-            // narrowing of one: an empty query is an empty screen.
-            (View::Found, _) => "SEARCH",
-            (_, true) => "REVIEW",
-            (_, false) => "FILTER",
-        };
         format!(" {word}  /{}{}", app.filter, caret)
     };
     let right = if app.typing_filter {
@@ -607,11 +618,14 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
 
     let rows = app.shelf_rows();
     if rows.is_empty() {
+        // Built from what is narrowing, or a kind alone reads "nothing matches ".
+        let said = match (app.only, app.filter.is_empty()) {
+            (Some(kind), true) => format!("no {}s here", kind.label()),
+            (Some(kind), false) => format!("no {}s match {}", kind.label(), app.filter),
+            (None, _) => format!("nothing matches {}", app.filter),
+        };
         frame.render_widget(
-            Paragraph::new(Line::from(dim(format!(
-                " nothing matches {}   esc clears it",
-                app.filter
-            ), p))),
+            Paragraph::new(Line::from(dim(format!(" {said}   esc clears it"), p))),
             area,
         );
         return;
@@ -1389,6 +1403,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("find", "/", "filter by name or track"),
             ("", "t", "every matching track, across the library"),
             ("", "o", "order: name, last synced, most missing"),
+            ("", "a", "kind: every folder, albums, playlists"),
         ]);
         /* `space` is about cliamp and `p` is about the row under the cursor,
            so a folder with no playlist file to hand over loses one and keeps
@@ -2634,6 +2649,74 @@ mod tests {
         // 9 kept, 7 weak, 5 no match and 3 failed, out of 361.
         assert!(band.contains("24 of 361 shown"), "{band:?}");
         assert!(band.contains("esc clears"), "{band:?}");
+    }
+
+    /* The kind has no text in the box, so the band has to name it: a list
+       short by half with a blank `/` would read as a filter that broke. */
+    #[test]
+    fn the_band_names_the_kind_the_library_is_narrowed_to() {
+        use crate::manifest::Kind;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.apply(Msg::Library {
+            shelves: vec![
+                kinded("Autobahn", Some(Kind::Album)),
+                kinded("Road trip", None),
+                kinded("Sleep", Some(Kind::Playlist)),
+            ],
+            show: true,
+        });
+        app.intro_done = true;
+        let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
+        let mut band = |app: &mut App| {
+            terminal.draw(|f| super::draw(f, app)).unwrap();
+            row_text(terminal.backend().buffer(), 1)
+        };
+
+        app.only = Some(Kind::Album);
+        let shown = band(&mut app);
+        assert!(shown.contains("ALBUMS"), "{shown:?}");
+        assert!(shown.contains("1 of 3 shown"), "{shown:?}");
+
+        app.only = Some(Kind::Playlist);
+        app.filter = "ro".into();
+        let shown = band(&mut app);
+        // With a query as well, the word stays and the query follows it.
+        assert!(shown.contains("PLAYLISTS  /ro"), "{shown:?}");
+        assert!(shown.contains("1 of 3 shown"), "{shown:?}");
+
+        // The search says the kind as well, and counts only what it searched.
+        app.view = View::Found;
+        app.only = Some(Kind::Album);
+        app.filter = "a - b".into();
+        let shown = band(&mut app);
+        assert!(shown.contains("SEARCH ALBUMS  /a - b"), "{shown:?}");
+        assert!(shown.contains("12 of 12 shown"), "{shown:?}");
+    }
+
+    /* A kind with no query has no text for "nothing matches" to quote, so
+       the empty pane has to say what it was looking for instead. */
+    #[test]
+    fn an_empty_kind_says_which_kind_rather_than_quoting_a_blank_query() {
+        use crate::manifest::Kind;
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.apply(Msg::Library { shelves: vec![kinded("Road trip", None)], show: true });
+        app.intro_done = true;
+        let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
+        let mut pane = |app: &mut App| {
+            terminal.draw(|f| super::draw(f, app)).unwrap();
+            (0..12).map(|y| row_text(terminal.backend().buffer(), y)).collect::<String>()
+        };
+
+        app.only = Some(Kind::Album);
+        let all = pane(&mut app);
+        assert!(all.contains("no albums here"), "{all:?}");
+        assert!(!all.contains("nothing matches"), "{all:?}");
+
+        app.filter = "road".into();
+        let all = pane(&mut app);
+        assert!(all.contains("no albums match road"), "{all:?}");
     }
 
     fn library_screen(width: u16) -> Vec<String> {

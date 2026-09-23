@@ -703,10 +703,14 @@ fn handle_filter_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     match code {
         /* The search screen is its query, so clearing it leaves a list of
            nothing with the box still open: one Esc goes back to the library
-           the search was started from, which is what the empty pane says. */
+           the search was started from, which is what the empty pane says.
+           Only the query goes: the kind was set on that library and is still
+           what it should come back to. */
         KeyCode::Esc if app.view == View::Found => {
-            app.clear_filter();
+            app.filter.clear();
+            app.typing_filter = false;
             app.view = View::Library;
+            app.snap();
         }
         KeyCode::Esc => app.clear_filter(),
         KeyCode::Enter => app.typing_filter = false,
@@ -744,7 +748,7 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
         KeyCode::Char('q') => app.quit = true,
         // Unwinds the filter first, like it does on the track list.
-        KeyCode::Esc if app.narrowed() => app.clear_filter(),
+        KeyCode::Esc if app.shelf_narrowed() => app.clear_filter(),
         /* The library is the screen behind everything else, so Esc has nothing
            to go back to. It says so rather than quitting: Esc means the same
            thing on every screen or it means nothing anywhere. */
@@ -763,6 +767,13 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             app.sort = app.sort.next();
             let label = app.sort.label();
             app.say(format!("sorted by {label}"));
+        }
+        /* A predicate beside the filter rather than a word typed into it:
+           neither kind is in a folder's name, and a folder with no answer is
+           a playlist, which no query can say. */
+        KeyCode::Char('a') => {
+            let label = app.cycle_kind();
+            app.say(format!("showing {label}"));
         }
         KeyCode::Char('l') => app.show_logs = !app.show_logs,
         KeyCode::Char('j') | KeyCode::Down => app.shelf_step(true),
@@ -1117,6 +1128,38 @@ mod tests {
         handle_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE);
         assert!(cmds.try_recv().is_err(), "o sent a command as well as sorting");
         assert_eq!(app.sort, crate::app::Sort::Synced);
+    }
+
+    /* The library's Esc asks `shelf_narrowed()`: `narrowed()` is the track
+       list's and cannot see the kind, so Esc would say "this is the top". */
+    #[test]
+    fn the_kind_key_narrows_the_library_and_esc_takes_it_off() {
+        let (tx, cmds) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.view = View::Library;
+        app.intro_done = true;
+
+        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        assert!(cmds.try_recv().is_err(), "a sent a command as well as narrowing");
+        assert_eq!(app.only, Some(crate::manifest::Kind::Album));
+
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.only, None, "Esc left the kind on");
+    }
+
+    /* Emptying the search box goes back to the library, and the library it
+       goes back to is the narrowed one it left: only the query was the
+       search's to take. */
+    #[test]
+    fn leaving_the_search_box_keeps_the_kind_the_library_was_narrowed_to() {
+        let (mut app, _cmds) = browsing(vec![shelf("Focus", &["01 Neu! - Hallogallo.opus"])]);
+        app.only = Some(crate::manifest::Kind::Album);
+        handle_key(&mut app, KeyCode::Char('t'), KeyModifiers::NONE);
+        assert!(app.typing_filter, "an empty query should open the box");
+
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.view, View::Library);
+        assert_eq!(app.only, Some(crate::manifest::Kind::Album), "the search took the kind");
     }
 
     /* `D` removes the playlist under the cursor: the worker asks what goes

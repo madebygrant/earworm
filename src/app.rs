@@ -862,6 +862,10 @@ pub struct App {
     /// predicate rather than a filter string, because the four statuses it
     /// keeps share no word to match on.
     pub review: bool,
+    /// Narrows the library to one kind. The library's own predicate, as
+    /// `review` is the track list's: neither word is in a folder's name, and
+    /// a folder with no answer is a playlist, which no query can say.
+    pub only: Option<crate::manifest::Kind>,
     /// Which order the library is in. Not applied to `library` itself, which
     /// stays as the worker built it: `shelf` is a position in that, so a
     /// re-sorted vector would move the row out from under the cursor.
@@ -958,6 +962,7 @@ impl App {
             filter: String::new(),
             typing_filter: false,
             review: false,
+            only: None,
             sort: Sort::default(),
             marked: HashSet::new(),
             busy: false,
@@ -1543,13 +1548,55 @@ impl App {
     /// Whether a list is narrowed or about to be. The library shares the
     /// filter box; review is the track list's alone.
     pub fn filtering(&self) -> bool {
-        self.typing_filter || !self.filter.is_empty() || (self.view == View::Tracks && self.review)
+        self.typing_filter
+            || !self.filter.is_empty()
+            || (self.view == View::Tracks && self.review)
+            || (self.view == View::Library && self.only.is_some())
     }
 
     /// Whether anything is narrowing the track list, for the keys that clear
     /// it and for the word the empty pane uses.
     pub fn narrowed(&self) -> bool {
         !self.filter.is_empty() || self.review
+    }
+
+    /// The same question asked of the library, where the second narrowing is
+    /// the kind rather than the review.
+    pub fn shelf_narrowed(&self) -> bool {
+        !self.filter.is_empty() || self.only.is_some()
+    }
+
+    /* Silence is the playlist answer everywhere else in this feature, so a
+       folder with no kind is on the playlist list rather than on neither. */
+    pub fn kind_shows(&self, shelf: &Shelf) -> bool {
+        match self.only {
+            None => true,
+            Some(crate::manifest::Kind::Album) => shelf.kind == Some(crate::manifest::Kind::Album),
+            Some(crate::manifest::Kind::Playlist) => {
+                shelf.kind != Some(crate::manifest::Kind::Album)
+            }
+        }
+    }
+
+    /// Walks every folder, then albums, then playlists. Albums come first
+    /// because they are the ones the pill already points at.
+    pub fn cycle_kind(&mut self) -> &'static str {
+        use crate::manifest::Kind;
+        self.only = match self.only {
+            None => Some(Kind::Album),
+            Some(Kind::Album) => Some(Kind::Playlist),
+            Some(Kind::Playlist) => None,
+        };
+        self.snap();
+        self.kind_label()
+    }
+
+    fn kind_label(&self) -> &'static str {
+        match self.only {
+            None => "every folder",
+            Some(crate::manifest::Kind::Album) => "albums",
+            Some(crate::manifest::Kind::Playlist) => "playlists",
+        }
     }
 
     /// Both narrowings at once, with the needle already lowercased: review is
@@ -1600,7 +1647,7 @@ impl App {
             .library
             .iter()
             .enumerate()
-            .filter(|(_, s)| needle.is_empty() || shelf_matches(s, &needle))
+            .filter(|(_, s)| self.kind_shows(s) && (needle.is_empty() || shelf_matches(s, &needle)))
             .map(|(pos, _)| pos)
             .collect();
         match self.sort {
@@ -1628,9 +1675,11 @@ impl App {
         if needle.is_empty() {
             return Vec::new();
         }
+        // The kind too, or `t` answers a different question from the rows.
         self.library
             .iter()
             .enumerate()
+            .filter(|(_, s)| self.kind_shows(s))
             .flat_map(|(shelf, s)| {
                 s.files
                     .iter()
@@ -2066,13 +2115,14 @@ impl App {
         self.logs.iter().any(|l| l.contains("ERROR"))
     }
 
-    /// Esc on a narrowed list. Both narrowings go together: they are one
+    /// Esc on a narrowed list. Every narrowing goes together: they are one
     /// thing on screen, a band saying the list is not all of it, and leaving
     /// half of it on would make the key look like it had failed.
     pub fn clear_filter(&mut self) {
         self.filter.clear();
         self.typing_filter = false;
         self.review = false;
+        self.only = None;
         self.snap();
     }
 
@@ -2571,6 +2621,60 @@ mod tests {
         assert_eq!(app.library_totals(), (30, 0, None));
     }
 
+    /* The kind is a predicate and not a query, so it has to keep the folder
+       that answered nothing: silence is the playlist answer everywhere else
+       in this feature, and dropping it from both lists would leave rows no
+       setting of this key can reach. */
+    #[test]
+    fn the_kind_key_walks_albums_then_playlists_and_keeps_the_unmarked() {
+        use crate::manifest::Kind;
+        let kinded = |name: &str, kind: Option<Kind>| Shelf { kind, ..folder(name, 0, None) };
+        let mut app = library_app(vec![
+            kinded("Autobahn", Some(Kind::Album)),
+            kinded("Road trip", Some(Kind::Playlist)),
+            kinded("Sleep", None),
+        ]);
+
+        assert_eq!(app.shelf_rows(), vec![0, 1, 2]);
+        assert!(!app.filtering(), "the band is up with nothing narrowing");
+
+        assert_eq!(app.cycle_kind(), "albums");
+        assert_eq!(app.shelf_rows(), vec![0]);
+        assert!(app.filtering(), "the band would not say the list is narrowed");
+        assert!(app.shelf_narrowed(), "Esc would have nothing to clear");
+
+        assert_eq!(app.cycle_kind(), "playlists");
+        assert_eq!(app.shelf_rows(), vec![1, 2]);
+
+        assert_eq!(app.cycle_kind(), "every folder");
+        assert_eq!(app.shelf_rows(), vec![0, 1, 2]);
+        assert!(!app.shelf_narrowed());
+    }
+
+    /// Both narrowings at once, and one Esc for the pair: half of it left on
+    /// is a band saying the list is short with nothing to turn off.
+    #[test]
+    fn the_kind_composes_with_the_filter_and_esc_clears_the_pair() {
+        use crate::manifest::Kind;
+        let kinded = |name: &str, kind: Option<Kind>| Shelf { kind, ..folder(name, 0, None) };
+        let mut app = library_app(vec![
+            kinded("Autobahn", Some(Kind::Album)),
+            kinded("Radio-Activity", Some(Kind::Album)),
+            kinded("Road trip", None),
+        ]);
+        app.shelf = 2;
+        app.only = Some(Kind::Album);
+        app.filter = "ra".into();
+        app.snap();
+
+        assert_eq!(app.shelf_rows(), vec![1]);
+        assert_eq!(app.shelf, 1, "the cursor stayed on a row nobody can see");
+
+        app.clear_filter();
+        assert_eq!(app.only, None, "the kind survived the key that clears it");
+        assert_eq!(app.shelf_rows(), vec![0, 1, 2]);
+    }
+
     /* Sixty folders and no way to ask which one holds a track: the answer was
        opening them one at a time. The filenames are already in memory from
        the stat pass, so the box that narrows by folder name narrows by track
@@ -2635,6 +2739,24 @@ mod tests {
         assert_eq!(app.found, Some((2, 0)));
         app.found_jump(false);
         assert_eq!(app.found, Some((0, 0)));
+    }
+
+    /// Same box, same answer: with the kind on, `t` must not turn up tracks
+    /// from the folders the rows just hid.
+    #[test]
+    fn the_search_screen_honours_the_kind_the_rows_are_narrowed_to() {
+        use crate::manifest::Kind;
+        let mut app = library_app(vec![
+            Shelf { kind: Some(Kind::Album), ..stocked("Autobahn", &["01 Kraftwerk - Autobahn.opus"]) },
+            stocked("Road trip", &["01 Kraftwerk - Neonlicht.opus"]),
+        ]);
+        app.filter = "kraftwerk".into();
+        app.only = Some(Kind::Album);
+        assert_eq!(app.shelf_rows(), vec![0]);
+        assert_eq!(app.found_rows(), vec![(0, 0)]);
+
+        app.only = Some(Kind::Playlist);
+        assert_eq!(app.found_rows(), vec![(1, 0)]);
     }
 
     /* The cursor is the pair and not a row number, because a sync rebuilds

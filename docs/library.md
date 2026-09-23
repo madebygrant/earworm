@@ -119,6 +119,12 @@ A folder you marked `[album]` yourself shows the pill instead of the word, not
 both. Only that row is shortened: the folder keeps its name, `e` opens on the
 real one, and `/[album]` still finds it.
 
+`a` narrows the library to albums, then to playlists, then back to every
+folder. A folder nothing has decided about is on the playlist list, since
+playlist is the default. It works alongside `/`, so `a` then `/kraft` is the
+Kraftwerk albums alone, and Esc clears both. `t` searches only the folders
+the kind is showing, and coming back from it leaves the kind on.
+
 When a run decides, it says so and says where the answer came from:
 
 ```
