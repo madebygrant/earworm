@@ -490,7 +490,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     }
     // Dismissed by any key, and the key goes no further, like the help overlay.
     if app.celebrating().is_some() {
-        app.treasure = None;
+        app.reward = None;
         return;
     }
     /* Ahead of the prompts, because the URL prompt is where a locked link is
@@ -1121,7 +1121,7 @@ mod tests {
         assert_eq!(console.said.as_deref(), Some("nothing happens"));
         assert!(console.text.is_empty(), "the wrong code stayed in the box");
 
-        type_keys(&mut app, "TREASURE");
+        type_keys(&mut app, &cheats::TEST_CODE.to_uppercase());
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(app.console.is_none());
         assert!(app.unlocked.has(cheats::Feature::Music));
@@ -1139,7 +1139,7 @@ mod tests {
 
         // A repeat is said, not celebrated again.
         handle_key(&mut app, KeyCode::Char('g'), KeyModifiers::CONTROL);
-        type_keys(&mut app, "treasure");
+        type_keys(&mut app, cheats::TEST_CODE);
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(app.celebrating().is_none());
         let said = app.console.as_ref().and_then(|c| c.said.clone()).unwrap_or_default();

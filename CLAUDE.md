@@ -1009,6 +1009,13 @@ than at the start of every session.
 - **A cheat code unlocks a feature that is off by default, for one session.**
   `cheats.rs` holds the codes, the features they gate and `Unlocked`;
   nothing is written to disk.
+- **A code is stored as its FNV-1a hash, never as the word.** A plain string
+  shows up in `grep` and in `strings` on the binary, and so does any name
+  built from it, so the popup and its identifiers don't say it either. The
+  tests type a `cfg(test)`-only code instead, which means no test can notice
+  a wrong stored hash: check a new one by hand in the console. `digest` is
+  pinned to published vectors, because changing it breaks every code at once
+  while the suite stays green.
 - **A gated link is refused in `prompt_url`, the one place a URL is
   added.** One from the command line goes to that prompt already typed
   rather than failing, since a start that fails cannot be unlocked. Folders

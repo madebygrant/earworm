@@ -100,8 +100,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if let Some(console) = &app.console {
         draw_console(frame, console, p);
     }
-    if let Some((at, cheat)) = app.treasure.filter(|_| app.celebrating().is_some()) {
-        draw_treasure(frame, at.elapsed().as_millis() as u64, cheat.prize, p);
+    if let Some((at, cheat)) = app.reward.filter(|_| app.celebrating().is_some()) {
+        draw_reward(frame, at.elapsed().as_millis() as u64, cheat.prize, p);
     }
     recolour(frame);
 }
@@ -128,14 +128,14 @@ const CHEST: [&str; 5] = [
     "│                 │",
     "╰─────────────────╯",
 ];
-const TREASURE_WIDTH: u16 = 36;
+const REWARD_WIDTH: u16 = 36;
 /// The whole popup with the chest in it, borders included.
-const TREASURE_HEIGHT: u16 = 14;
+const REWARD_HEIGHT: u16 = 14;
 
 /* Drawn from the elapsed milliseconds like the intro, so the twinkle runs at
    one speed however busy the event loop is. */
-fn draw_treasure(frame: &mut Frame, ms: u64, prize: &str, p: Palette) {
-    let inner = TREASURE_WIDTH.min(frame.area().width).saturating_sub(2) as usize;
+fn draw_reward(frame: &mut Frame, ms: u64, prize: &str, p: Palette) {
+    let inner = REWARD_WIDTH.min(frame.area().width).saturating_sub(2) as usize;
     let centre = |text: &str| " ".repeat(inner.saturating_sub(cols(text)) / 2);
     let span = cols(CHEST[0]);
 
@@ -152,7 +152,7 @@ fn draw_treasure(frame: &mut Frame, ms: u64, prize: &str, p: Palette) {
     let pulse = 0.5 + 0.5 * (ms as f32 / 250.0).sin();
 
     // The words carry the news, so on a short terminal the chest is what goes.
-    let art = frame.area().height >= TREASURE_HEIGHT;
+    let art = frame.area().height >= REWARD_HEIGHT;
     let mut lines = vec![Line::default()];
     if art {
         lines.push(Line::from(vec![
@@ -191,7 +191,7 @@ fn draw_treasure(frame: &mut Frame, ms: u64, prize: &str, p: Palette) {
     lines.push(Line::from(vec![Span::raw(centre("for this session")), dim("for this session", p)]));
     lines.push(Line::default());
     lines.push(Line::from(vec![Span::raw(centre(hint)), dim(hint, p)]));
-    popup(frame, "✦ treasure found ✦", lines, TREASURE_WIDTH, p);
+    popup(frame, "✦ secret found ✦", lines, REWARD_WIDTH, p);
 }
 
 /* One pass over the finished buffer rather than three palettes: every colour
@@ -2546,15 +2546,15 @@ mod tests {
         let mut app = App::new(tx, "settings".into());
         app.intro_done = true;
         app.console = Some(crate::app::Console {
-            text: "treasure".into(),
+            text: crate::cheats::TEST_CODE.into(),
             said: None,
         });
         let screen = screen_of(&mut app, 80, 24);
-        assert!(screen.contains("> treasure"), "{screen}");
+        assert!(screen.contains(&format!("> {}", crate::cheats::TEST_CODE)), "{screen}");
 
         app.try_code();
         let screen = screen_of(&mut app, 80, 24);
-        assert!(screen.contains("treasure found"), "{screen}");
+        assert!(screen.contains("secret found"), "{screen}");
         assert!(screen.contains("YouTube Music links unlocked"), "{screen}");
         assert!(screen.contains("╞════════◆════════╡"), "{screen}");
 

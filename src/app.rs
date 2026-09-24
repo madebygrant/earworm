@@ -577,8 +577,8 @@ pub const LOG_ROWS: usize = 8;
 
 /// Long enough to read the word, short enough that nobody reaches for a key.
 pub const INTRO: Duration = Duration::from_millis(1900);
-/// How long the treasure popup stays up if no key dismisses it.
-pub const TREASURE: Duration = Duration::from_millis(3500);
+/// How long the reward popup stays up if no key dismisses it.
+pub const REWARD: Duration = Duration::from_millis(3500);
 /// Long enough for any code, short enough that the box never has to scroll.
 pub const CODE_MAX: usize = 24;
 
@@ -947,7 +947,7 @@ pub struct App {
     pub unlocked: Arc<Unlocked>,
     pub console: Option<Console>,
     /// The code just found and when, for the popup that celebrates it.
-    pub treasure: Option<(Instant, &'static Cheat)>,
+    pub reward: Option<(Instant, &'static Cheat)>,
     pub quit: bool,
 }
 
@@ -1011,14 +1011,14 @@ impl App {
             update: None,
             unlocked: Arc::default(),
             console: None,
-            treasure: None,
+            reward: None,
             quit: false,
         }
     }
 
     pub fn celebrating(&self) -> Option<&'static Cheat> {
-        self.treasure
-            .filter(|(at, _)| at.elapsed() < TREASURE)
+        self.reward
+            .filter(|(at, _)| at.elapsed() < REWARD)
             .map(|(_, cheat)| cheat)
     }
 
@@ -1029,7 +1029,7 @@ impl App {
         let said = match cheats::find(&console.text) {
             Some(cheat) if self.unlocked.grant(cheat.feature) => {
                 self.console = None;
-                self.treasure = Some((Instant::now(), cheat));
+                self.reward = Some((Instant::now(), cheat));
                 /* The worker only re-heads the prompt on the next answer, so
                    until then it would contradict the celebration. */
                 if let Some((Prompt::Input { header, .. }, _)) = &mut self.prompt
