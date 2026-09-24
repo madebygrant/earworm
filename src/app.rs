@@ -1,10 +1,12 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
+use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
 use ratatui::style::Color;
 
+use crate::cheats::{self, Cheat, Unlocked};
 use crate::theme::{Palette, Themes};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::Protocol;
@@ -575,6 +577,19 @@ pub const LOG_ROWS: usize = 8;
 
 /// Long enough to read the word, short enough that nobody reaches for a key.
 pub const INTRO: Duration = Duration::from_millis(1900);
+/// How long the treasure popup stays up if no key dismisses it.
+pub const TREASURE: Duration = Duration::from_millis(3500);
+/// Long enough for any code, short enough that the box never has to scroll.
+pub const CODE_MAX: usize = 24;
+
+/* The `^g` box. Its own text rather than a box in `fields`, because it opens
+   over a prompt whose answer has to be there when it closes. */
+#[derive(Debug, Default)]
+pub struct Console {
+    pub text: String,
+    /// The answer to the last code, cleared by the next keystroke.
+    pub said: Option<String>,
+}
 
 pub struct Asker {
     pub tx: Sender<Msg>,
@@ -928,6 +943,11 @@ pub struct App {
     /// A newer release, as the probe thread reported it. `None` until it
     /// lands, and forever when the probe was off or found nothing.
     pub update: Option<String>,
+    /// Shared with the worker, which asks it at the URL prompt.
+    pub unlocked: Arc<Unlocked>,
+    pub console: Option<Console>,
+    /// The code just found and when, for the popup that celebrates it.
+    pub treasure: Option<(Instant, &'static Cheat)>,
     pub quit: bool,
 }
 
@@ -989,8 +1009,41 @@ impl App {
             started: Instant::now(),
             intro_done: false,
             update: None,
+            unlocked: Arc::default(),
+            console: None,
+            treasure: None,
             quit: false,
         }
+    }
+
+    pub fn celebrating(&self) -> Option<&'static Cheat> {
+        self.treasure
+            .filter(|(at, _)| at.elapsed() < TREASURE)
+            .map(|(_, cheat)| cheat)
+    }
+
+    pub fn try_code(&mut self) {
+        let Some(console) = &mut self.console else {
+            return;
+        };
+        let said = match cheats::find(&console.text) {
+            Some(cheat) if self.unlocked.grant(cheat.feature) => {
+                self.console = None;
+                self.treasure = Some((Instant::now(), cheat));
+                /* The worker only re-heads the prompt on the next answer, so
+                   until then it would contradict the celebration. */
+                if let Some((Prompt::Input { header, .. }, _)) = &mut self.prompt
+                    && header == cheats::LOCKED
+                {
+                    *header = cheats::OPENED.into();
+                }
+                return;
+            }
+            Some(cheat) => format!("already found  ·  {} are open", cheat.prize),
+            None => "nothing happens".into(),
+        };
+        console.text.clear();
+        console.said = Some(said);
     }
 
     /* Holds its full window rather than yielding to the library, which on a

@@ -8,6 +8,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use anyhow::{Context, Result, bail};
 
 use crate::app::{Asker, Cmd, Escape, Msg, Reply, Shelf, Status, Track, Watch};
+use crate::cheats::{Feature, LOCKED, Unlocked};
 use crate::config::{self, Config, composed, decomposed};
 use crate::lookup;
 use crate::manifest;
@@ -55,8 +56,21 @@ enum Start {
    question: its rows are the playlists the URL question was going to be
    about, and one of them can be opened without downloading anything. */
 fn ask_start(cfg: &mut Config, tx: &Sender<Msg>) -> Start {
+    /* A locked link from the command line lands at the prompt, typed out,
+       rather than failing: the console can unlock it from there. */
     if !cfg.url.is_empty() {
-        return Start::Playlist;
+        if !locked(&cfg.url, &cfg.unlocked) {
+            return Start::Playlist;
+        }
+        let _ = tx.send(Msg::Stage("waiting for a playlist URL".into()));
+        let typed = cfg.url.clone();
+        return match prompt_url(tx, Escape::Quit, &cfg.unlocked, &typed) {
+            Some(url) => {
+                cfg.url = url;
+                Start::Playlist
+            }
+            None => Start::Cancelled,
+        };
     }
     let saved = library(&cfg.dir);
     if cfg.resync {
@@ -67,7 +81,7 @@ fn ask_start(cfg: &mut Config, tx: &Sender<Msg>) -> Start {
     }
 
     let _ = tx.send(Msg::Stage("waiting for a playlist URL".into()));
-    match prompt_url(tx, Escape::Quit) {
+    match prompt_url(tx, Escape::Quit, &cfg.unlocked, "") {
         Some(url) => {
             cfg.url = url;
             /* The only format question before the first download: the run
@@ -89,13 +103,17 @@ fn ask_start(cfg: &mut Config, tx: &Sender<Msg>) -> Start {
    handing back the text means fixing it instead of retyping it. `None` is a
    cancel, and `escape` is what the caller does with one: only the very first
    question has nothing to go back to. */
-fn prompt_url(tx: &Sender<Msg>, escape: Escape) -> Option<String> {
+fn prompt_url(tx: &Sender<Msg>, escape: Escape, unlocked: &Unlocked, typed: &str) -> Option<String> {
     let asker = Asker {
         tx: tx.clone(),
         enabled: true,
     };
-    let mut header = "YouTube playlist URL".to_string();
-    let mut typed = String::new();
+    let mut header = if locked(typed, unlocked) {
+        LOCKED.to_string()
+    } else {
+        "YouTube playlist URL".to_string()
+    };
+    let mut typed = typed.to_string();
     /* The first thing a new user is ever asked, on a screen with nothing else
        on it yet. Both facts they need before typing: that one video is a
        valid answer, and what the only other key does. */
@@ -105,13 +123,12 @@ fn prompt_url(tx: &Sender<Msg>, escape: Escape) -> Option<String> {
     };
     loop {
         let answer = asker.input_noted(&header, note, &typed, escape)?;
-        if let Some(url) = youtube_url(&answer) {
-            return Some(url);
-        }
-        header = if answer.trim().is_empty() {
-            "Paste a YouTube link".into()
-        } else {
-            "Not a YouTube link".into()
+        // Asked of the answer, not the opening: the console can unlock mid-prompt.
+        header = match youtube_url(&answer) {
+            Some(url) if !locked(&url, unlocked) => return Some(url),
+            Some(_) => LOCKED.into(),
+            None if answer.trim().is_empty() => "Paste a YouTube link".into(),
+            None => "Not a YouTube link".into(),
         };
         typed = answer;
     }
@@ -124,6 +141,27 @@ const HOSTS: [&str; 5] = [
     "music.youtube.com",
     "youtu.be",
 ];
+
+const MUSIC_HOST: &str = "music.youtube.com";
+
+/// A YouTube Music link, while the console has not unlocked them.
+fn locked(input: &str, unlocked: &Unlocked) -> bool {
+    !unlocked.has(Feature::Music)
+        && youtube_url(input).is_some_and(|url| split_url(&url).is_some_and(|(host, _)| host == MUSIC_HOST))
+}
+
+/// The lowercased host and the path after it, credentials and port dropped.
+fn split_url(full: &str) -> Option<(String, &str)> {
+    let rest = full.split_once("://")?.1;
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let host = authority
+        .rsplit('@')
+        .next()?
+        .split(':')
+        .next()?
+        .to_ascii_lowercase();
+    Some((host, path))
+}
 
 /// Normalises a pasted link, or `None` if it is not one earworm can download.
 /// The host is matched after the scheme and any credentials, so a lookalike
@@ -140,14 +178,7 @@ fn youtube_url(input: &str) -> Option<String> {
         format!("https://{trimmed}")
     };
 
-    let rest = full.split_once("://")?.1;
-    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
-    let host = authority
-        .rsplit('@')
-        .next()?
-        .split(':')
-        .next()?
-        .to_ascii_lowercase();
+    let (host, path) = split_url(&full)?;
     if !HOSTS.contains(&host.as_str()) {
         return None;
     }
@@ -262,7 +293,7 @@ fn finish(
             Some(Answer::Another) => {
                 // Cancelling the URL question goes back here, not out, and
                 // leaves the last run's outcome exactly as it was.
-                let Some(url) = prompt_url(tx, Escape::Keep) else {
+                let Some(url) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "") else {
                     continue;
                 };
                 let _ = tx.send(Msg::Restart);
@@ -2324,7 +2355,7 @@ fn start_url(
     tracks: &mut Vec<Track>,
     asker: &Asker,
 ) -> Option<Result<String>> {
-    let Some(url) = prompt_url(tx, Escape::Keep) else {
+    let Some(url) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "") else {
         let _ = tx.send(Msg::Flash("cancelled".into()));
         return None;
     };
@@ -2361,7 +2392,7 @@ fn sync_open(
     let folder = folder_of(tracks).context("no folder is open to sync")?;
     if attaching {
         let name = folder.file_name().unwrap_or_default().to_string_lossy().to_string();
-        let Some(url) = prompt_url(tx, Escape::Keep) else {
+        let Some(url) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "") else {
             bail!("cancelled  ·  nothing was downloaded");
         };
         cfg.url = url;
@@ -3673,6 +3704,82 @@ pub mod tests {
     use super::*;
     use std::sync::mpsc;
     use crate::app::Reply;
+
+    #[test]
+    fn a_youtube_music_link_is_locked_until_the_code_is_found() {
+        let unlocked = Unlocked::default();
+        for link in [
+            "https://music.youtube.com/playlist?list=OLAK5uy_x",
+            "music.youtube.com/watch?v=abc",
+            "https://MUSIC.youtube.com/playlist?list=PL1",
+        ] {
+            assert!(locked(link, &unlocked), "let through {link}");
+        }
+        for link in ["https://www.youtube.com/playlist?list=PL1", "https://youtu.be/abc", "hello"] {
+            assert!(!locked(link, &unlocked), "locked {link}");
+        }
+        unlocked.grant(Feature::Music);
+        assert!(!locked("https://music.youtube.com/playlist?list=PL1", &unlocked));
+    }
+
+    // The header under the prompt says what the tool is waiting on.
+    #[test]
+    fn a_locked_link_off_the_command_line_waits_at_the_prompt() {
+        let link = "https://music.youtube.com/playlist?list=PL1";
+        let mut cfg = config(true);
+        cfg.url = link.into();
+        let (tx, rx) = channel();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| matches!(ask_start(&mut cfg, &tx), Start::Cancelled));
+            let mut staged = false;
+            while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
+                match msg {
+                    Msg::Stage(s) => staged = s == "waiting for a playlist URL",
+                    Msg::Ask(crate::app::Prompt::Input { header, value, .. }, reply) => {
+                        assert!(staged, "the header never said it was waiting");
+                        assert_eq!((header.as_str(), value.as_str()), (LOCKED, link));
+                        reply.send(Reply::Cancel).unwrap();
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(worker.join().unwrap(), "Esc on the first prompt did not cancel");
+        });
+    }
+
+    /* The unlock is read off each answer, not once when the prompt opens:
+       the console is used while this question is still on screen. */
+    #[test]
+    fn the_url_prompt_refuses_a_locked_link_and_takes_it_once_unlocked() {
+        let link = "https://music.youtube.com/playlist?list=PL1";
+        let unlocked = Unlocked::default();
+        let (tx, rx) = channel();
+        std::thread::scope(|scope| {
+            // Typed already, as a link off the command line arrives.
+            let worker = scope.spawn(|| prompt_url(&tx, Escape::Quit, &unlocked, link));
+            let mut asked = Vec::new();
+            while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
+                let Msg::Ask(crate::app::Prompt::Input { header, value, .. }, reply) = msg else {
+                    continue;
+                };
+                asked.push((header, value));
+                if asked.len() == 2 {
+                    unlocked.grant(Feature::Music);
+                }
+                reply.send(Reply::Text(link.into())).unwrap();
+                if asked.len() == 2 {
+                    break;
+                }
+            }
+            assert_eq!(worker.join().unwrap().as_deref(), Some(link));
+            assert_eq!(
+                asked,
+                vec![(LOCKED.to_string(), link.to_string()), (LOCKED.to_string(), link.to_string())],
+                "opened unlocked, or refusing lost the text"
+            );
+        });
+    }
     use crate::lookup::Artwork;
 
     /* The exit status comes from the last `Msg::Done`, and rebuilding the
@@ -7005,6 +7112,7 @@ pub mod tests {
             folder: None,
             extra: Vec::new(),
             acoustid_key: None,
+            unlocked: Default::default(),
         }
     }
 

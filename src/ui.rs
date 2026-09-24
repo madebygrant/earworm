@@ -96,7 +96,102 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if let Some(what) = app.confirm {
         draw_confirm(frame, app, what);
     }
+    // Last, because `^g` opens over any of the popups above.
+    if let Some(console) = &app.console {
+        draw_console(frame, console, p);
+    }
+    if let Some((at, cheat)) = app.treasure.filter(|_| app.celebrating().is_some()) {
+        draw_treasure(frame, at.elapsed().as_millis() as u64, cheat.prize, p);
+    }
     recolour(frame);
+}
+
+fn draw_console(frame: &mut Frame, console: &app::Console, p: Palette) {
+    let mut lines = vec![Line::from(vec![
+        dim(" > ", p),
+        Span::styled(format!("{}\u{2588}", console.text), Style::new().fg(p.text)),
+    ])];
+    if let Some(said) = &console.said {
+        lines.push(Line::default());
+        lines.push(Line::from(Span::styled(format!(" {said}"), Style::new().fg(p.unsure))));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(dim(" enter try   ^u clear   esc close", p)));
+    let width = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0).max(30) + 3;
+    popup(frame, "enter a code", lines, width, p);
+}
+
+const CHEST: [&str; 5] = [
+    "╭─────────────────╮",
+    "│░░░░░░░░░░░░░░░░░│",
+    "╞════════◆════════╡",
+    "│                 │",
+    "╰─────────────────╯",
+];
+const TREASURE_WIDTH: u16 = 36;
+/// The whole popup with the chest in it, borders included.
+const TREASURE_HEIGHT: u16 = 14;
+
+/* Drawn from the elapsed milliseconds like the intro, so the twinkle runs at
+   one speed however busy the event loop is. */
+fn draw_treasure(frame: &mut Frame, ms: u64, prize: &str, p: Palette) {
+    let inner = TREASURE_WIDTH.min(frame.area().width).saturating_sub(2) as usize;
+    let centre = |text: &str| " ".repeat(inner.saturating_sub(cols(text)) / 2);
+    let span = cols(CHEST[0]);
+
+    // Every cell on its own phase, so the sparkles twinkle rather than march.
+    let beat = ms / 120;
+    let sparkles: String = (0..span as u64)
+        .map(|x| match (beat + x * x * 3 + x) % 9 {
+            0 => '✦',
+            1 => '✧',
+            2 => '·',
+            _ => ' ',
+        })
+        .collect();
+    let pulse = 0.5 + 0.5 * (ms as f32 / 250.0).sin();
+
+    // The words carry the news, so on a short terminal the chest is what goes.
+    let art = frame.area().height >= TREASURE_HEIGHT;
+    let mut lines = vec![Line::default()];
+    if art {
+        lines.push(Line::from(vec![
+            Span::raw(centre(&sparkles)),
+            Span::styled(sparkles.clone(), Style::new().fg(p.accent)),
+        ]));
+    }
+    for (row, art) in CHEST.iter().enumerate().filter(|_| art) {
+        let spans = match row {
+            1 => vec![
+                Span::styled("│", Style::new().fg(p.warn)),
+                Span::styled(&art[3..art.len() - 3], Style::new().fg(p.glow(pulse))),
+                Span::styled("│", Style::new().fg(p.warn)),
+            ],
+            2 => {
+                let (left, right) = art.split_once('◆').unwrap_or((art, ""));
+                vec![
+                    Span::styled(left, Style::new().fg(p.warn)),
+                    Span::styled("◆", Style::new().fg(p.accent)),
+                    Span::styled(right, Style::new().fg(p.warn)),
+                ]
+            }
+            _ => vec![Span::styled(*art, Style::new().fg(p.warn))],
+        };
+        lines.push(Line::from([vec![Span::raw(centre(art))], spans].concat()));
+    }
+    let unlocked = format!("{prize} unlocked");
+    let hint = "any key to carry on";
+    if art {
+        lines.push(Line::default());
+    }
+    lines.push(Line::from(vec![
+        Span::raw(centre(&unlocked)),
+        Span::styled(unlocked.clone(), Style::new().fg(p.text).add_modifier(Modifier::BOLD)),
+    ]));
+    lines.push(Line::from(vec![Span::raw(centre("for this session")), dim("for this session", p)]));
+    lines.push(Line::default());
+    lines.push(Line::from(vec![Span::raw(centre(hint)), dim(hint, p)]));
+    popup(frame, "✦ treasure found ✦", lines, TREASURE_WIDTH, p);
 }
 
 /* One pass over the finished buffer rather than three palettes: every colour
@@ -2433,6 +2528,43 @@ mod tests {
 
     /* The first question a new user is ever asked, on a screen with nothing
        else on it: both facts they need before typing anything. */
+    fn screen_of(app: &mut App, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| super::draw(f, app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..height)
+            .map(|y| (0..width).map(|x| buffer[(x, y)].symbol().to_string()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /* Says what was unlocked in words, not only with a glowing chest, and
+       survives a terminal narrower than the popup. */
+    #[test]
+    fn finding_a_code_says_what_it_unlocked() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.intro_done = true;
+        app.console = Some(crate::app::Console {
+            text: "treasure".into(),
+            said: None,
+        });
+        let screen = screen_of(&mut app, 80, 24);
+        assert!(screen.contains("> treasure"), "{screen}");
+
+        app.try_code();
+        let screen = screen_of(&mut app, 80, 24);
+        assert!(screen.contains("treasure found"), "{screen}");
+        assert!(screen.contains("YouTube Music links unlocked"), "{screen}");
+        assert!(screen.contains("╞════════◆════════╡"), "{screen}");
+
+        // Too short for the chest: the words are what stays.
+        let short = screen_of(&mut app, 80, 12);
+        assert!(short.contains("YouTube Music links unlocked"), "{short}");
+        assert!(!short.contains('◆'), "{short}");
+        screen_of(&mut app, 20, 8);
+    }
+
     #[test]
     fn the_url_prompt_says_what_an_answer_looks_like() {
         let (tx, _rx) = std::sync::mpsc::channel();

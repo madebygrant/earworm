@@ -612,6 +612,8 @@ pub struct Config {
     /// the walk moves the base palette and the table repaints whatever it
     /// lands on, so the name in the flash is not the whole story.
     pub theme_overridden: bool,
+    /// What the `^g` console has unlocked this session, shared with the UI.
+    pub unlocked: std::sync::Arc<crate::cheats::Unlocked>,
 }
 
 impl Config {
@@ -704,6 +706,7 @@ impl Config {
             themes,
             theme_warnings,
             theme_overridden,
+            unlocked: Default::default(),
             // The environment wins, so a key can be swapped for one run.
             acoustid_key: std::env::var("ACOUSTID_API_KEY")
                 .ok()

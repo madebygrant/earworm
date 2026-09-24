@@ -1,4 +1,5 @@
 mod app;
+mod cheats;
 mod config;
 mod deps;
 mod lookup;
@@ -53,6 +54,7 @@ fn main() -> Result<()> {
     let (theme_name, themes) = (cfg.theme_name.clone(), cfg.themes.clone());
     let theme_warnings = cfg.theme_warnings.clone();
     let config_file = cfg.config_file.clone();
+    let unlocked = Arc::clone(&cfg.unlocked);
     /* The update probe runs beside the worker, not through it: it answers to
        nobody on screen and the result is a one-line hint. A stale cache makes
        it a file read; a fresh one costs at most the probe timeout, which the
@@ -87,6 +89,7 @@ fn main() -> Result<()> {
     app.themes = themes;
     app.theme_overridden = overridden;
     app.config_file = config_file;
+    app.unlocked = unlocked;
     /* Switched off by saying it is already over, which is what every other
        thing that ends it does. A separate flag would be a second answer to
        the same question. */
@@ -421,7 +424,7 @@ fn run(
 
         /* The intro is the only thing on screen that moves between messages,
            so it is the only thing that needs frames faster than the idle poll. */
-        let wait = if app.intro() { 33 } else { 120 };
+        let wait = if app.intro() || app.celebrating().is_some() { 33 } else { 120 };
         if event::poll(Duration::from_millis(wait))?
             && let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
@@ -479,6 +482,21 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
        bare letter here would type into the filter box. */
     if matches!(code, KeyCode::Char('t')) && mods.contains(KeyModifiers::CONTROL) {
         app.cycle_theme();
+        return;
+    }
+    if app.console.is_some() {
+        handle_console_key(app, code, mods);
+        return;
+    }
+    // Dismissed by any key, and the key goes no further, like the help overlay.
+    if app.celebrating().is_some() {
+        app.treasure = None;
+        return;
+    }
+    /* Ahead of the prompts, because the URL prompt is where a locked link is
+       refused and the code has to be typable from there. `^g` for Game Genie. */
+    if matches!(code, KeyCode::Char('g')) && mods.contains(KeyModifiers::CONTROL) {
+        app.console = Some(app::Console::default());
         return;
     }
     if app.prompt.is_some() {
@@ -832,6 +850,31 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 
 /// Esc cancels the question rather than the run: the worker treats a cancel as
 /// "leave this track alone", which is the safe answer for every prompt here.
+fn handle_console_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    let Some(console) = &mut app.console else {
+        return;
+    };
+    match code {
+        KeyCode::Esc => app.console = None,
+        KeyCode::Enter => app.try_code(),
+        KeyCode::Char('c') if ctrl => app.quit = true,
+        KeyCode::Char('u') if ctrl => {
+            console.text.clear();
+            console.said = None;
+        }
+        KeyCode::Backspace => {
+            console.text.pop();
+            console.said = None;
+        }
+        KeyCode::Char(c) if !ctrl && console.text.chars().count() < app::CODE_MAX => {
+            console.text.push(c);
+            console.said = None;
+        }
+        _ => {}
+    }
+}
+
 fn handle_prompt_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let Some((prompt, _)) = &app.prompt else {
         return;
@@ -1044,6 +1087,89 @@ mod tests {
         // Every error a key can reach ends with the next step.
         assert!(note.contains("--check"), "nowhere to go for the list: {note}");
         assert!(!note.contains("slot0"), "it listed them after all: {note}");
+    }
+
+    fn type_keys(app: &mut App, text: &str) {
+        for c in text.chars() {
+            handle_key(app, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+    }
+
+    /* The URL prompt is where a locked link is refused, so the console has to
+       open over it, take the keys away from it and hand the prompt back with
+       the link still typed. */
+    #[test]
+    fn the_code_console_opens_over_the_url_prompt_and_leaves_it_intact() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        let (reply, answered) = std::sync::mpsc::channel();
+        app.apply(app::Msg::Ask(
+            Prompt::Input {
+                header: cheats::LOCKED.into(),
+                note: String::new(),
+                value: "music.youtube.com/playlist?list=PL1".into(),
+                escape: app::Escape::Quit,
+            },
+            reply,
+        ));
+
+        handle_key(&mut app, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        type_keys(&mut app, "nope");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        let console = app.console.as_ref().expect("a wrong code closed the console");
+        assert_eq!(console.said.as_deref(), Some("nothing happens"));
+        assert!(console.text.is_empty(), "the wrong code stayed in the box");
+
+        type_keys(&mut app, "TREASURE");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.console.is_none());
+        assert!(app.unlocked.has(cheats::Feature::Music));
+        assert!(app.celebrating().is_some(), "nothing celebrated the find");
+        let Some((Prompt::Input { header, .. }, _)) = &app.prompt else {
+            panic!("the prompt went away");
+        };
+        assert_eq!(header, cheats::OPENED, "the prompt still says locked");
+
+        // The key that dismisses the celebration goes no further.
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.celebrating().is_none());
+        assert!(answered.try_recv().is_err(), "a console key reached the prompt");
+        assert_eq!(app.input(), "music.youtube.com/playlist?list=PL1");
+
+        // A repeat is said, not celebrated again.
+        handle_key(&mut app, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        type_keys(&mut app, "treasure");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.celebrating().is_none());
+        let said = app.console.as_ref().and_then(|c| c.said.clone()).unwrap_or_default();
+        assert!(said.starts_with("already found"), "{said}");
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.console.is_none() && app.prompt.is_some(), "Esc reached the prompt");
+    }
+
+    /* Its place ahead of every screen's handler is the only thing making it
+       work on all of them, so a reorder has to fail here. */
+    #[test]
+    fn the_code_console_opens_on_every_screen() {
+        type Screen = (&'static str, fn(&mut App));
+        let screens: [Screen; 6] = [
+            ("tracks", |_| {}),
+            ("library", |app| app.view = View::Library),
+            ("search", |app| app.view = View::Found),
+            ("filter box", |app| app.typing_filter = true),
+            ("help", |app| app.show_help = true),
+            ("quit guard", |app| app.confirm = Some(Confirm::Quit)),
+        ];
+        for (screen, set_up) in screens {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(tx, String::new());
+            app.intro_done = true;
+            set_up(&mut app);
+            handle_key(&mut app, KeyCode::Char('g'), KeyModifiers::CONTROL);
+            assert!(app.console.is_some(), "^g was dead on {screen}");
+            assert!(app.filter.is_empty(), "^g typed into the filter on {screen}");
+        }
     }
 
     /* Ahead of every screen on purpose. The point of walking the palettes is

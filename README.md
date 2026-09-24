@@ -29,7 +29,7 @@ download from a music library:
 - **Cover art embedded at a sane size.** YouTube serves 2048² thumbnails for
   its auto-generated albums. earworm keeps them out of your files: what gets
   embedded is capped at 1000×1000.
-- **Albums get one sleeve, playlists get twelve.** A YouTube Music release is
+- **Albums get one sleeve, playlists get twelve.** An official album release is
   recognised on sight, and anything else you settle by putting `[album]` or
   `[playlist]` in the folder's name. earworm reads that marker and never
   writes one.

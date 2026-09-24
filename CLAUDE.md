@@ -33,6 +33,8 @@ in **Themes and colour depth**.
   agent
 - `player.rs` — the optional cliamp handoff: import the `.m3u8`, then `load`
 - `ui.rs` — every draw function
+- `cheats.rs` — the cheat console's codes and `Unlocked`, the session's
+  unlocks, shared by the UI and the worker
 - `theme.rs` — `Palette` and the four themes it ships, the WCAG measurements
   that keep them legible, `background()` (the diagonal gradient painted behind
   every frame) and the 256-colour quantiser
@@ -1001,6 +1003,35 @@ than at the start of every session.
 - **`log_color` exists because a clean run still warns.** Painting all of
   stderr red made every run look broken and hid the one ERROR in it, and the
   `l` hint burns amber only when `log_errors()` finds a real one.
+
+### Cheat codes
+
+- **A cheat code unlocks a feature that is off by default, for one session.**
+  `cheats.rs` holds the codes, the features they gate and `Unlocked`;
+  nothing is written to disk.
+- **A gated link is refused in `prompt_url`, the one place a URL is
+  added.** One from the command line goes to that prompt already typed
+  rather than failing, since a start that fails cannot be unlocked. Folders
+  that already carry such a URL keep syncing, because `resync` and `S` never
+  ask it.
+- **The unlock is read off each answer, not when the prompt opens.** The
+  console is used while the refusing prompt is still on screen, and a check
+  taken once would refuse the same link again straight after the unlock.
+- **`Unlocked` is atomics on an `Arc`, not a `Cmd`.** When the console is
+  used the worker is blocked on a prompt's reply and nothing reads the
+  command channel. It is shared state beside the two channels, like
+  `cancel`, and never blocks.
+- **The console key sits ahead of the prompts, and the console then takes
+  every key.** Its text is its own rather than a box in `App.fields`, which
+  the prompt underneath owns and must get back intact.
+- **An unlock re-heads the prompt behind it.** The worker only sets the
+  header on the next answer, so it would otherwise contradict the unlock.
+  The header string lives in `cheats.rs` because both threads need it.
+- **The celebration keeps its words over its art on a short terminal,**
+  since `popup` clips from the bottom and the words are what say something
+  changed.
+- **`grant` reports only the call that turned a feature on,** so a repeated
+  code is acknowledged rather than celebrated again.
 
 ### Questions, forms and quitting
 

@@ -80,8 +80,8 @@ already shows. Nothing moves, and the record is written.
 ## Albums and playlists
 
 A folder is a playlist unless earworm has reason to think otherwise, and the
-one reason it accepts by itself is the playlist id: YouTube Music gives a
-release an id starting `OLAK5uy_`, where a playlist you or anyone else made
+one reason it accepts by itself is the playlist id: YouTube gives an
+official album release an id starting `OLAK5uy_`, where a playlist you or anyone else made
 starts `PL`. That is the only automatic signal, and it only ever promotes.
 Calling an album a playlist costs nothing you can see; calling a playlist an
 album stamps one sleeve across a dozen unrelated records.

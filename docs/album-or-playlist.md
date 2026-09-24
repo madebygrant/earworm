@@ -44,7 +44,7 @@ should be one keypress to say so.
 Probed against a real playlist on 2026-09-22.
 
 **The playlist id, per track.** `%(playlist_id)s` is in the flat listing, so
-this costs nothing and needs no URL parsing. A YouTube Music release is
+this costs nothing and needs no URL parsing. An official album release is
 `OLAK5uy_…`; a hand-made playlist is `PL…`. This is the strongest signal and
 the cheapest, and it is known before a single byte is downloaded.
 
