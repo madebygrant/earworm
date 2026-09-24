@@ -24,7 +24,7 @@ pub const OPENED: &str = "YouTube Music links unlocked";
 /* Nothing in the suite types a real code, so a wrong hash here passes every
    test: check a new one by hand in the console. */
 pub const CHEATS: &[Cheat] = &[Cheat {
-    hash: 0x365a_2051_cfca_6664,
+    hash: 0x157c_9686_f3f7_0589,
     feature: Feature::Music,
     prize: "YouTube Music links",
 }];
