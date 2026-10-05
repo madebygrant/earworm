@@ -1028,8 +1028,12 @@ than at the start of every session.
   used the worker is blocked on a prompt's reply and nothing reads the
   command channel. It is shared state beside the two channels, like
   `cancel`, and never blocks.
-- **The console key sits ahead of the prompts, and the console then takes
-  every key.** Its text is its own rather than a box in `App.fields`, which
+- **The console opens on two keys in a row, never one.** Each key alone is
+  somebody's quit reflex, and a single key opened the console on exactly
+  the person trying to leave, showing them a secret. Any other key, or a
+  pause, disarms it.
+- **The console shortcut sits ahead of the prompts, and the console then
+  takes every key.** Its text is its own rather than a box in `App.fields`, which
   the prompt underneath owns and must get back intact.
 - **An unlock re-heads the prompt behind it.** The worker only sets the
   header on the next answer, so it would otherwise contradict the unlock.

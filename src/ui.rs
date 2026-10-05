@@ -96,7 +96,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if let Some(what) = app.confirm {
         draw_confirm(frame, app, what);
     }
-    // Last, because `^g` opens over any of the popups above.
+    // Last, because `^z ^x` opens over any of the popups above.
     if let Some(console) = &app.console {
         draw_console(frame, console, p);
     }

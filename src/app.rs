@@ -581,8 +581,10 @@ pub const INTRO: Duration = Duration::from_millis(1900);
 pub const REWARD: Duration = Duration::from_millis(3500);
 /// Long enough for any code, short enough that the box never has to scroll.
 pub const CODE_MAX: usize = 24;
+/// How soon `^x` has to follow `^z` to open the console.
+pub const CHORD: Duration = Duration::from_millis(1500);
 
-/* The `^g` box. Its own text rather than a box in `fields`, because it opens
+/* The `^z ^x` box. Its own text rather than a box in `fields`, because it opens
    over a prompt whose answer has to be there when it closes. */
 #[derive(Debug, Default)]
 pub struct Console {
@@ -948,6 +950,8 @@ pub struct App {
     pub console: Option<Console>,
     /// The code just found and when, for the popup that celebrates it.
     pub reward: Option<(Instant, &'static Cheat)>,
+    /// When `^z` was pressed, if the next key could still be `^x`.
+    pub armed: Option<Instant>,
     pub quit: bool,
 }
 
@@ -1012,6 +1016,7 @@ impl App {
             unlocked: Arc::default(),
             console: None,
             reward: None,
+            armed: None,
             quit: false,
         }
     }

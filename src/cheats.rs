@@ -1,4 +1,4 @@
-//! Codes typed into the `^g` console, and what each one turns on.
+//! Codes typed into the `^z ^x` console, and what each one turns on.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

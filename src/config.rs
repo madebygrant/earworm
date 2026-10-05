@@ -612,7 +612,7 @@ pub struct Config {
     /// the walk moves the base palette and the table repaints whatever it
     /// lands on, so the name in the flash is not the whole story.
     pub theme_overridden: bool,
-    /// What the `^g` console has unlocked this session, shared with the UI.
+    /// What the `^z ^x` console has unlocked this session, shared with the UI.
     pub unlocked: std::sync::Arc<crate::cheats::Unlocked>,
 }
 

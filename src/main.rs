@@ -493,11 +493,24 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         app.reward = None;
         return;
     }
-    /* Ahead of the prompts, because the URL prompt is where a locked link is
-       refused and the code has to be typable from there. `^g` for Game Genie. */
-    if matches!(code, KeyCode::Char('g')) && mods.contains(KeyModifiers::CONTROL) {
-        app.console = Some(app::Console::default());
-        return;
+    /* `^z` then `^x` opens the console, ahead of the prompts so it works over
+       the URL prompt that refuses a locked link. Two keys because each alone is
+       a quit reflex, and any key in between disarms it. */
+    let armed = app.armed.take();
+    if mods.contains(KeyModifiers::CONTROL) {
+        match code {
+            KeyCode::Char('z') => {
+                app.armed = Some(Instant::now());
+                return;
+            }
+            KeyCode::Char('x') => {
+                if armed.is_some_and(|at| at.elapsed() < app::CHORD) {
+                    app.console = Some(app::Console::default());
+                }
+                return;
+            }
+            _ => {}
+        }
     }
     if app.prompt.is_some() {
         handle_prompt_key(app, code, mods);
@@ -1089,6 +1102,39 @@ mod tests {
         assert!(!note.contains("slot0"), "it listed them after all: {note}");
     }
 
+    fn open_console(app: &mut App) {
+        handle_key(app, KeyCode::Char('z'), KeyModifiers::CONTROL);
+        handle_key(app, KeyCode::Char('x'), KeyModifiers::CONTROL);
+    }
+
+    // Each key alone is somebody trying to quit, so neither may open it.
+    #[test]
+    fn only_ctrl_z_then_ctrl_x_opens_the_console() {
+        let ctrl = |app: &mut App, c| handle_key(app, KeyCode::Char(c), KeyModifiers::CONTROL);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+
+        ctrl(&mut app, 'x');
+        ctrl(&mut app, 'x');
+        assert!(app.console.is_none(), "^x alone opened it");
+        ctrl(&mut app, 'z');
+        assert!(app.console.is_none(), "^z alone opened it");
+
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        ctrl(&mut app, 'x');
+        assert!(app.console.is_none(), "a key in between did not disarm it");
+
+        ctrl(&mut app, 'z');
+        app.armed = Instant::now().checked_sub(app::CHORD * 2);
+        ctrl(&mut app, 'x');
+        assert!(app.console.is_none(), "a slow ^x still opened it");
+
+        ctrl(&mut app, 'z');
+        ctrl(&mut app, 'x');
+        assert!(app.console.is_some());
+    }
+
     fn type_keys(app: &mut App, text: &str) {
         for c in text.chars() {
             handle_key(app, KeyCode::Char(c), KeyModifiers::NONE);
@@ -1114,7 +1160,7 @@ mod tests {
             reply,
         ));
 
-        handle_key(&mut app, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        open_console(&mut app);
         type_keys(&mut app, "nope");
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         let console = app.console.as_ref().expect("a wrong code closed the console");
@@ -1138,7 +1184,7 @@ mod tests {
         assert_eq!(app.input(), "music.youtube.com/playlist?list=PL1");
 
         // A repeat is said, not celebrated again.
-        handle_key(&mut app, KeyCode::Char('g'), KeyModifiers::CONTROL);
+        open_console(&mut app);
         type_keys(&mut app, cheats::TEST_CODE);
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(app.celebrating().is_none());
@@ -1166,9 +1212,9 @@ mod tests {
             let mut app = App::new(tx, String::new());
             app.intro_done = true;
             set_up(&mut app);
-            handle_key(&mut app, KeyCode::Char('g'), KeyModifiers::CONTROL);
-            assert!(app.console.is_some(), "^g was dead on {screen}");
-            assert!(app.filter.is_empty(), "^g typed into the filter on {screen}");
+            open_console(&mut app);
+            assert!(app.console.is_some(), "^z ^x was dead on {screen}");
+            assert!(app.filter.is_empty(), "^z ^x typed into the filter on {screen}");
         }
     }
 
