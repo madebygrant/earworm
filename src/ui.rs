@@ -1757,16 +1757,18 @@ fn draw_help(frame: &mut Frame, app: &App) {
     if !earned.is_empty() && theme_row && (app.view != View::Tracks || legend_shown) && tail_shown {
         let labels: Vec<&str> = earned.iter().map(|a| a.label()).collect();
         let count = format!("{} of {}", earned.len(), crate::achievements::TOTAL);
+        // The library's labels are shorter than this one, so `group` alone leaves no gap.
+        let head = group.max(cols("earned") + 2);
         let mut block = vec![
             Line::default(),
             Line::from(vec![
-                Span::styled(format!(" {:group$}", "earned"), Style::new().fg(p.muted)),
+                Span::styled(format!(" {:head$}", "earned"), Style::new().fg(p.muted)),
                 Span::styled(count, Style::new().fg(p.accent)),
             ]),
         ];
-        for piece in wrap(&labels.join("  ·  "), settings.max(20)) {
+        for piece in pack(&labels, "  ·  ", settings.max(20)) {
             block.push(Line::from(vec![
-                Span::styled(format!(" {:group$}", ""), Style::new().fg(p.muted)),
+                Span::styled(format!(" {:head$}", ""), Style::new().fg(p.muted)),
                 Span::styled(piece, Style::new().fg(p.text)),
             ]));
         }
@@ -1781,6 +1783,21 @@ fn draw_help(frame: &mut Frame, app: &App) {
         .max()
         .unwrap_or(0);
     popup(frame, "keys", lines, content + 3, p);
+}
+
+// Whole labels per line: `wrap` would split "front to back" at any of its spaces.
+fn pack(labels: &[&str], sep: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for label in labels {
+        match lines.last_mut() {
+            Some(line) if cols(line) + cols(sep) + cols(label) <= width => {
+                line.push_str(sep);
+                line.push_str(label);
+            }
+            _ => lines.push((*label).to_string()),
+        }
+    }
+    lines
 }
 
 fn draw_prompt(frame: &mut Frame, app: &App) {
@@ -2694,6 +2711,35 @@ mod tests {
         let short = popup_of(vec![crate::achievements::Achievement::OnAir], 10);
         assert!(short.contains("on air") && short.contains("★ achievement ★"), "{short}");
         assert!(!short.contains('▲'), "{short}");
+    }
+
+    // Break it by padding to `group` alone: the library's labels are shorter than "earned".
+    #[test]
+    fn the_earned_heading_keeps_a_gap_and_labels_wrap_whole() {
+        let all: Vec<&str> = crate::achievements::ALL.iter().map(|a| a.id()).collect();
+        for view in [View::Library, View::Tracks] {
+            let mut app = earned_app(&all);
+            app.view = view;
+            app.show_help = true;
+            let screen = screen_of(&mut app, 100, 70);
+            let line = screen.lines().find(|l| l.contains("earned")).expect("no earned heading");
+            let after = line.split("earned").nth(1).unwrap();
+            assert!(after.starts_with("  "), "no gap after the heading: {line:?}");
+            for a in crate::achievements::ALL {
+                assert!(
+                    screen.lines().any(|l| l.contains(a.label())),
+                    "{} was split across lines: {screen}",
+                    a.label()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn labels_are_packed_whole_into_the_width() {
+        assert_eq!(super::pack(&["aa", "bb", "cc"], " · ", 9), ["aa · bb", "cc"]);
+        assert_eq!(super::pack(&["front to back"], " · ", 4), ["front to back"], "a long one still gets a line");
+        assert!(super::pack(&[], " · ", 9).is_empty());
     }
 
     #[test]
