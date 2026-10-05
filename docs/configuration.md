@@ -22,6 +22,7 @@ pick = true        # stop to choose tracks before downloading
 intro = true       # the opening animation
 notify = true      # ring the bell when a long run finishes
 update_check = true # ask GitHub about a newer release, at most once a day
+achievements = true # announce achievements and remember the ones earned
 
 theme = "warm"     # a built-in, or one of your own below
 
@@ -56,6 +57,7 @@ acoustid_key = "..."                # or use ACOUSTID_API_KEY
 | `--no-intro` | skip the opening animation |
 | `--no-notify` | don't ring the bell when a long run finishes |
 | `--no-update-check` | never ask GitHub about a newer release |
+| `--no-achievements` | no achievement popups, and no file of earned ones |
 | `--resync` | sync every playlist already under `--dir` |
 | `--list` | print the playlists already under `--dir` and exit |
 | `--check` | check the tools, the key and the config, then exit |
@@ -94,3 +96,19 @@ Once a day earworm asks GitHub whether a newer version exists and says so on
 the intro and in `--check`. Equal versions, older ones, network failures and
 `--no-update-check` all say nothing. Updating is
 `git pull && cargo install --path .`.
+
+## Achievements
+
+earworm notices small things as you use it, such as a first synced playlist,
+an album kept as one, or a run with nothing left to review, and shows a short
+popup the first time each happens. Anything earned at the same moment arrives
+as one popup, and it waits until you are not typing into something. `h` lists
+what you have earned.
+
+They are remembered in `$XDG_STATE_HOME/earworm/achievements` (or
+`~/.local/state/earworm/achievements`), one id per line, so each is announced
+once, and only after the popup has been on screen long enough to read.
+Deleting the file announces them all again. Without a usable home directory
+(neither `XDG_STATE_HOME` nor `HOME` set to an absolute path) achievements are
+off, so nothing is written relative to where you started earworm. `achievements = false` or
+`--no-achievements` turns the popups off and leaves the file alone.

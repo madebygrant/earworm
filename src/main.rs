@@ -1,3 +1,4 @@
+mod achievements;
 mod app;
 mod cheats;
 mod config;
@@ -55,6 +56,14 @@ fn main() -> Result<()> {
     let theme_warnings = cfg.theme_warnings.clone();
     let config_file = cfg.config_file.clone();
     let unlocked = Arc::clone(&cfg.unlocked);
+    /* Read before the terminal is taken, like the config. No usable home, or a
+       file that exists and cannot be read, turns the feature off for the
+       session: announcements that cannot be recorded would only repeat. */
+    let achieved = cfg
+        .achievements
+        .then(achievements::state_path)
+        .flatten()
+        .and_then(|path| achievements::read_at(&path).ok().map(|known| (path, known)));
     /* The update probe runs beside the worker, not through it: it answers to
        nobody on screen and the result is a one-line hint. A stale cache makes
        it a file read; a fresh one costs at most the probe timeout, which the
@@ -90,6 +99,14 @@ fn main() -> Result<()> {
     app.theme_overridden = overridden;
     app.config_file = config_file;
     app.unlocked = unlocked;
+    let mut writer = None;
+    if let Some((path, known)) = achieved {
+        let (tx, handle) = achievements::writer(path);
+        app.known = known;
+        app.achieved_tx = Some(tx);
+        app.achieving = true;
+        writer = Some(handle);
+    }
     /* Switched off by saying it is already over, which is what every other
        thing that ends it does. A separate flag would be a second answer to
        the same question. */
@@ -104,6 +121,15 @@ fn main() -> Result<()> {
     lookup::stop();
     // Closes the command channel, which is what ends the worker's service loop.
     app.cmds.take();
+    // The same for the achievements writer, so one earned just before `q` still lands.
+    app.hide_reward();
+    app.achieved_tx.take();
+    if let Some(handle) = writer {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while !handle.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
     /* Exiting part-way through an in-place tag rewrite truncates the file, so
        give the worker a moment to finish one it had already started. */
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -393,6 +419,10 @@ fn run(
                 Err(TryRecvError::Disconnected) => update_taken = true,
             }
         }
+        if app.recheck {
+            app.achieve();
+        }
+        app.start_queued();
         app.expire_flash();
         terminal.draw(|frame| ui::draw(frame, app))?;
         app.tick = app.tick.wrapping_add(1);
@@ -488,9 +518,12 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         handle_console_key(app, code, mods);
         return;
     }
-    // Dismissed by any key, and the key goes no further, like the help overlay.
-    if app.celebrating().is_some() {
-        app.reward = None;
+    /* Dismissed by any key, and the key goes no further, like the help
+       overlay. `^c` is the exception: an achievement arrives unasked, so
+       somebody quitting as one appears must not have to ask twice. */
+    let quitting = matches!(code, KeyCode::Char('c')) && mods.contains(KeyModifiers::CONTROL);
+    if app.celebrating().is_some() && !quitting {
+        app.finish_reward();
         return;
     }
     /* `^z` then `^x` opens the console, ahead of the prompts so it works over
@@ -1133,6 +1166,116 @@ mod tests {
         ctrl(&mut app, 'z');
         ctrl(&mut app, 'x');
         assert!(app.console.is_some());
+    }
+
+    /* The theme joins the walk only once unlocked, is switched to at once, and
+       is never written to the config: a saved name would stop the next start. */
+    #[test]
+    fn the_secret_theme_joins_the_walk_but_never_the_config() {
+        let dir = std::env::temp_dir().join(format!("earworm-secret-theme-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("config.toml");
+        std::fs::write(&file, "theme = \"warm\"\n").unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        app.config_file = Some(file.clone());
+        for _ in 0..crate::theme::BUILT_INS.len() {
+            handle_key(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
+            assert_ne!(app.theme_name, "vaporwave", "reachable before the code");
+        }
+
+        open_console(&mut app);
+        type_keys(&mut app, cheats::TEST_THEME_CODE);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.theme_name, "vaporwave", "the unlock did not switch to it");
+        assert_eq!(app.theme, crate::theme::VAPORWAVE);
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+        // Walk all the way round and back onto it, which is the path that saves.
+        for _ in 0..crate::theme::BUILT_INS.len() + 1 {
+            handle_key(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
+        }
+        assert_eq!(app.theme_name, "vaporwave");
+        let saved = std::fs::read_to_string(&file).unwrap();
+        assert!(!saved.contains("vaporwave"), "the config now names it: {saved}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // Each secret theme is its own secret: one code must not hand over the other.
+    #[test]
+    fn each_secret_theme_has_its_own_code() {
+        let dir = std::env::temp_dir().join(format!("earworm-gameboy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("config.toml");
+        std::fs::write(&file, "theme = \"warm\"\n").unwrap();
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        app.config_file = Some(file.clone());
+        open_console(&mut app);
+        type_keys(&mut app, cheats::TEST_GAMEBOY_CODE);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.theme_name, "gameboy");
+        assert_eq!(app.theme, crate::theme::GAMEBOY);
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+
+        let mut seen = Vec::new();
+        for _ in 0..crate::theme::BUILT_INS.len() + 1 {
+            handle_key(&mut app, KeyCode::Char('t'), KeyModifiers::CONTROL);
+            seen.push(app.theme_name.clone());
+        }
+        assert!(!seen.iter().any(|n| n == "vaporwave"), "the other secret came with it: {seen:?}");
+        assert_eq!(app.theme_name, "gameboy", "the walk did not come back round to it");
+        let saved = std::fs::read_to_string(&file).unwrap();
+        assert!(!saved.contains("gameboy"), "the config now names it: {saved}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // The popup arrives unasked, so the key that dismisses it must not also move the list.
+    #[test]
+    fn the_key_that_dismisses_an_achievement_goes_no_further() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        app.tracks = (1..=3)
+            .map(|n| app::Track::new(n, format!("id{n}"), format!("t{n}"), std::path::PathBuf::new()))
+            .collect();
+        app.reward = Some((
+            Instant::now(),
+            app::Reward::Earned(vec![achievements::Achievement::OnAir]),
+        ));
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert!(app.celebrating().is_none(), "the key did not dismiss it");
+        assert_eq!(app.cursor, 0, "the dismissing key also moved the cursor");
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        assert_eq!(app.cursor, 1, "the next key was swallowed too");
+    }
+
+    // Quitting as one appears must not take two presses, and a dismissal records it as read.
+    #[test]
+    fn ctrl_c_quits_through_an_achievement_and_any_other_key_records_it() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        let (sender, written) = std::sync::mpsc::channel();
+        app.achieved_tx = Some(sender);
+        let popup = || {
+            Some((Instant::now(), app::Reward::Earned(vec![achievements::Achievement::OnAir])))
+        };
+        app.reward = popup();
+        handle_key(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(app.quit, "^c was swallowed by the popup");
+
+        app.quit = false;
+        app.reward = popup();
+        handle_key(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert!(app.reward.is_none() && !app.quit);
+        assert_eq!(written.try_recv().unwrap(), vec!["on-air"], "a dismissal did not record it");
     }
 
     fn type_keys(app: &mut App, text: &str) {

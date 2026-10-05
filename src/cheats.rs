@@ -6,14 +6,43 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub enum Feature {
     /// `music.youtube.com` links at the URL prompt.
     Music,
+    /// A secret palette from `theme::SECRETS`, each behind its own code.
+    Vaporwave,
+    GameBoy,
+}
+
+impl Feature {
+    /// What the celebration says was unlocked.
+    pub fn prize(self) -> &'static str {
+        match self {
+            Feature::Music => "YouTube Music links",
+            Feature::Vaporwave => "the vaporwave theme",
+            Feature::GameBoy => "the game boy theme",
+        }
+    }
+
+    /// The `theme::SECRETS` palette this unlocks, if it is a theme.
+    pub fn theme(self) -> Option<&'static str> {
+        match self {
+            Feature::Vaporwave => Some("vaporwave"),
+            Feature::GameBoy => Some("gameboy"),
+            Feature::Music => None,
+        }
+    }
+
+    /// The celebration's second line: how to find what was unlocked.
+    pub fn note(self) -> &'static str {
+        match self {
+            Feature::Music => "for this session",
+            Feature::Vaporwave | Feature::GameBoy => "^t walks to it  ·  this session",
+        }
+    }
 }
 
 pub struct Cheat {
     /// `digest` of the code, so the word is in neither the source nor the binary.
     pub hash: u64,
     pub feature: Feature,
-    /// What the celebration says was unlocked.
-    pub prize: &'static str,
 }
 
 /// The URL prompt's header while a music link is refused. Here rather than in
@@ -23,21 +52,43 @@ pub const OPENED: &str = "YouTube Music links unlocked";
 
 /* Nothing in the suite types a real code, so a wrong hash here passes every
    test: check a new one by hand in the console. */
-pub const CHEATS: &[Cheat] = &[Cheat {
-    hash: 0x157c_9686_f3f7_0589,
-    feature: Feature::Music,
-    prize: "YouTube Music links",
-}];
+pub const CHEATS: &[Cheat] = &[
+    Cheat {
+        hash: 0x6a0c_1f80_1823_83a7,
+        feature: Feature::Music,
+    },
+    Cheat {
+        hash: 0x7fa3_52d7_3529_40b9,
+        feature: Feature::Vaporwave,
+    },
+    Cheat {
+        hash: 0x21d4_b63f_4541_c1cb,
+        feature: Feature::GameBoy,
+    },
+];
 
-/// What the tests type instead of a real code.
+/// What the tests type instead of a real code, one per feature.
 #[cfg(test)]
 pub const TEST_CODE: &str = "opensesame";
 #[cfg(test)]
-const TEST_CHEATS: &[Cheat] = &[Cheat {
-    hash: 0x7a92_14a9_c2bf_1ce7,
-    feature: Feature::Music,
-    prize: "YouTube Music links",
-}];
+pub const TEST_THEME_CODE: &str = "hocuspocus";
+#[cfg(test)]
+pub const TEST_GAMEBOY_CODE: &str = "shazam";
+#[cfg(test)]
+const TEST_CHEATS: &[Cheat] = &[
+    Cheat {
+        hash: 0x7a92_14a9_c2bf_1ce7,
+        feature: Feature::Music,
+    },
+    Cheat {
+        hash: 0xf7d6_a145_f4c9_6f1d,
+        feature: Feature::Vaporwave,
+    },
+    Cheat {
+        hash: 0xc3a5_b36e_c15d_9f83,
+        feature: Feature::GameBoy,
+    },
+];
 
 /// FNV-1a, 64-bit. Written out because `DefaultHasher` is not stable between
 /// Rust releases, and a changed hash would silently kill every code.
@@ -64,17 +115,28 @@ pub fn find(typed: &str) -> Option<&'static Cheat> {
 #[derive(Debug, Default)]
 pub struct Unlocked {
     music: AtomicBool,
+    vaporwave: AtomicBool,
+    gameboy: AtomicBool,
 }
 
 impl Unlocked {
     fn slot(&self, feature: Feature) -> &AtomicBool {
         match feature {
             Feature::Music => &self.music,
+            Feature::Vaporwave => &self.vaporwave,
+            Feature::GameBoy => &self.gameboy,
         }
     }
 
     pub fn has(&self, feature: Feature) -> bool {
         self.slot(feature).load(Ordering::SeqCst)
+    }
+
+    pub fn count(&self) -> usize {
+        [&self.music, &self.vaporwave, &self.gameboy]
+            .iter()
+            .filter(|f| f.load(Ordering::SeqCst))
+            .count()
     }
 
     /// True only for the call that turned it on, so a repeat is not celebrated.
@@ -92,6 +154,8 @@ mod tests {
         for typed in ["opensesame", "OPENSESAME", "  OpenSesame "] {
             assert_eq!(find(typed).map(|c| c.feature), Some(Feature::Music), "{typed:?}");
         }
+        assert_eq!(find(TEST_THEME_CODE).map(|c| c.feature), Some(Feature::Vaporwave));
+        assert_eq!(find(TEST_GAMEBOY_CODE).map(|c| c.feature), Some(Feature::GameBoy));
         assert!(find("opensesam").is_none());
         assert!(find("").is_none());
     }

@@ -100,8 +100,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if let Some(console) = &app.console {
         draw_console(frame, console, p);
     }
-    if let Some((at, cheat)) = app.reward.filter(|_| app.celebrating().is_some()) {
-        draw_reward(frame, at.elapsed().as_millis() as u64, cheat.prize, p);
+    if let (Some((at, reward)), Some(_)) = (&app.reward, app.celebrating()) {
+        draw_reward(frame, at.elapsed().as_millis() as u64, &Pop::of(reward), p);
     }
     recolour(frame);
 }
@@ -128,16 +128,70 @@ const CHEST: [&str; 5] = [
     "│                 │",
     "╰─────────────────╯",
 ];
+const STAR: [&str; 5] = [
+    "        ▲        ",
+    "▁▁▁▁▁▁▁╱ ╲▁▁▁▁▁▁▁",
+    "  ╲           ╱  ",
+    "   ╲   ╱▔╲   ╱   ",
+    "    ╲╱     ╲╱    ",
+];
 const REWARD_WIDTH: u16 = 36;
-/// The whole popup with the chest in it, borders included.
-const REWARD_HEIGHT: u16 = 14;
+/// Labels shown in one achievement popup; the rest are counted.
+const SHOWN: usize = 3;
 
-/* Drawn from the elapsed milliseconds like the intro, so the twinkle runs at
-   one speed however busy the event loop is. */
-fn draw_reward(frame: &mut Frame, ms: u64, prize: &str, p: Palette) {
+// What a reward popup says, kept apart from how it is drawn so both kinds share the drawing.
+struct Pop {
+    chest: bool,
+    title: String,
+    bold: Vec<String>,
+    dim: Vec<String>,
+}
+
+impl Pop {
+    fn of(reward: &app::Reward) -> Pop {
+        match reward {
+            app::Reward::Secret(cheat) => Pop {
+                chest: true,
+                title: "✦ secret found ✦".into(),
+                bold: vec![format!("{} unlocked", cheat.feature.prize())],
+                dim: vec![cheat.feature.note().into()],
+            },
+            app::Reward::Earned(all) if all.len() == 1 => Pop {
+                chest: false,
+                title: "★ achievement ★".into(),
+                bold: vec![all[0].label().into()],
+                dim: vec![all[0].hint().into()],
+            },
+            app::Reward::Earned(all) => {
+                let more = all.len().saturating_sub(SHOWN);
+                let tail = if more > 0 {
+                    format!("+{more} more  ·  h lists them")
+                } else {
+                    "h lists them".into()
+                };
+                Pop {
+                    chest: false,
+                    title: format!("★ {} achievements ★", all.len()),
+                    bold: all.iter().take(SHOWN).map(|a| a.label().to_string()).collect(),
+                    dim: vec![tail],
+                }
+            }
+        }
+    }
+
+    // Borders, a blank, sparkles, five rows of art, a blank, the words, a blank and the hint.
+    fn height_with_art(&self) -> u16 {
+        (12 + self.bold.len() + self.dim.len()) as u16
+    }
+}
+
+// Drawn from the elapsed milliseconds like the intro, so the twinkle runs at one speed.
+fn draw_reward(frame: &mut Frame, ms: u64, pop: &Pop, p: Palette) {
     let inner = REWARD_WIDTH.min(frame.area().width).saturating_sub(2) as usize;
     let centre = |text: &str| " ".repeat(inner.saturating_sub(cols(text)) / 2);
-    let span = cols(CHEST[0]);
+    let fit = |text: &str| truncate(text, inner.saturating_sub(2));
+    let art_rows = if pop.chest { CHEST } else { STAR };
+    let span = cols(art_rows[0]);
 
     // Every cell on its own phase, so the sparkles twinkle rather than march.
     let beat = ms / 120;
@@ -151,8 +205,8 @@ fn draw_reward(frame: &mut Frame, ms: u64, prize: &str, p: Palette) {
         .collect();
     let pulse = 0.5 + 0.5 * (ms as f32 / 250.0).sin();
 
-    // The words carry the news, so on a short terminal the chest is what goes.
-    let art = frame.area().height >= REWARD_HEIGHT;
+    // The words carry the news, so on a short terminal the art is what goes.
+    let art = frame.area().height >= pop.height_with_art();
     let mut lines = vec![Line::default()];
     if art {
         lines.push(Line::from(vec![
@@ -160,38 +214,48 @@ fn draw_reward(frame: &mut Frame, ms: u64, prize: &str, p: Palette) {
             Span::styled(sparkles.clone(), Style::new().fg(p.accent)),
         ]));
     }
-    for (row, art) in CHEST.iter().enumerate().filter(|_| art) {
-        let spans = match row {
-            1 => vec![
+    for (row, rowart) in art_rows.iter().enumerate().filter(|_| art) {
+        let spans = match (pop.chest, row) {
+            (true, 1) => vec![
                 Span::styled("│", Style::new().fg(p.warn)),
-                Span::styled(&art[3..art.len() - 3], Style::new().fg(p.glow(pulse))),
+                Span::styled(&rowart[3..rowart.len() - 3], Style::new().fg(p.glow(pulse))),
                 Span::styled("│", Style::new().fg(p.warn)),
             ],
-            2 => {
-                let (left, right) = art.split_once('◆').unwrap_or((art, ""));
+            (true, 2) => {
+                let (left, right) = rowart.split_once('◆').unwrap_or((rowart, ""));
                 vec![
                     Span::styled(left, Style::new().fg(p.warn)),
                     Span::styled("◆", Style::new().fg(p.accent)),
                     Span::styled(right, Style::new().fg(p.warn)),
                 ]
             }
-            _ => vec![Span::styled(*art, Style::new().fg(p.warn))],
+            (true, _) => vec![Span::styled(*rowart, Style::new().fg(p.warn))],
+            // The star breathes between its two colours.
+            (false, _) => {
+                let lit = if pulse > 0.5 { p.accent } else { p.warn };
+                vec![Span::styled(*rowart, Style::new().fg(lit))]
+            }
         };
-        lines.push(Line::from([vec![Span::raw(centre(art))], spans].concat()));
+        lines.push(Line::from([vec![Span::raw(centre(rowart))], spans].concat()));
     }
-    let unlocked = format!("{prize} unlocked");
-    let hint = "any key to carry on";
     if art {
         lines.push(Line::default());
     }
-    lines.push(Line::from(vec![
-        Span::raw(centre(&unlocked)),
-        Span::styled(unlocked.clone(), Style::new().fg(p.text).add_modifier(Modifier::BOLD)),
-    ]));
-    lines.push(Line::from(vec![Span::raw(centre("for this session")), dim("for this session", p)]));
+    for text in &pop.bold {
+        let text = fit(text);
+        lines.push(Line::from(vec![
+            Span::raw(centre(&text)),
+            Span::styled(text.clone(), Style::new().fg(p.text).add_modifier(Modifier::BOLD)),
+        ]));
+    }
+    for text in &pop.dim {
+        let text = fit(text);
+        lines.push(Line::from(vec![Span::raw(centre(&text)), dim(text.clone(), p)]));
+    }
+    let hint = "any key to carry on";
     lines.push(Line::default());
     lines.push(Line::from(vec![Span::raw(centre(hint)), dim(hint, p)]));
-    popup(frame, "✦ secret found ✦", lines, REWARD_WIDTH, p);
+    popup(frame, &pop.title, lines, REWARD_WIDTH, p);
 }
 
 /* One pass over the finished buffer rather than three palettes: every colour
@@ -1591,7 +1655,8 @@ fn draw_help(frame: &mut Frame, app: &App) {
        changes colour, and `--check` and the settings tail both still name
        the theme, so nothing about it goes unsaid — where a key that acts on
        the music has nowhere else to be found. */
-    if fits(rows.len() + 1) {
+    let theme_row = fits(rows.len() + 1);
+    if theme_row {
         rows.insert(rows.len().saturating_sub(1), ("look", "^t", "next colour theme"));
     }
 
@@ -1652,7 +1717,8 @@ fn draw_help(frame: &mut Frame, app: &App) {
         ("", vec![Status::Failed], "l has the reason"),
     ];
     let room = lines.len() + tail.len() + legend.len() + 1;
-    if app.view == View::Tracks && fits(room) {
+    let legend_shown = app.view == View::Tracks && fits(room);
+    if legend_shown {
         lines.push(Line::default());
         // Three slots whether or not a row fills them, so the glosses line up.
         let slots = 3;
@@ -1678,8 +1744,35 @@ fn draw_help(frame: &mut Frame, app: &App) {
     /* Next to give way after the legend, and for the same reason: the keys
        are what the overlay is for, and `--check` prints these settings on a
        screen that is not fighting for rows. */
-    if fits(lines.len() + tail.len()) {
+    let tail_shown = fits(lines.len() + tail.len());
+    if tail_shown {
         lines.extend(tail);
+    }
+
+    /* Last to give way, so it needs every earlier decision to have gone the
+       generous way: a bare `fits` would show it after the legend had been
+       dropped, and a shorter block can fit where the longer one did not. Only
+       when something is earned, so a fresh run draws the help it always did. */
+    let earned = app.earned_known();
+    if !earned.is_empty() && theme_row && (app.view != View::Tracks || legend_shown) && tail_shown {
+        let labels: Vec<&str> = earned.iter().map(|a| a.label()).collect();
+        let count = format!("{} of {}", earned.len(), crate::achievements::TOTAL);
+        let mut block = vec![
+            Line::default(),
+            Line::from(vec![
+                Span::styled(format!(" {:group$}", "earned"), Style::new().fg(p.muted)),
+                Span::styled(count, Style::new().fg(p.accent)),
+            ]),
+        ];
+        for piece in wrap(&labels.join("  ·  "), settings.max(20)) {
+            block.push(Line::from(vec![
+                Span::styled(format!(" {:group$}", ""), Style::new().fg(p.muted)),
+                Span::styled(piece, Style::new().fg(p.text)),
+            ]));
+        }
+        if fits(lines.len() + block.len()) {
+            lines.extend(block);
+        }
     }
 
     let content = lines
@@ -2316,7 +2409,7 @@ mod tests {
         };
 
         let warm = glyphs(crate::theme::WARM);
-        for (name, palette) in crate::theme::BUILT_INS {
+        for (name, palette) in crate::theme::BUILT_INS.into_iter().chain(crate::theme::SECRETS) {
             let other = glyphs(palette);
             let shifted = warm
                 .iter()
@@ -2563,6 +2656,87 @@ mod tests {
         assert!(short.contains("YouTube Music links unlocked"), "{short}");
         assert!(!short.contains('◆'), "{short}");
         screen_of(&mut app, 20, 8);
+    }
+
+    fn earned_app(ids: &[&str]) -> App {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.intro_done = true;
+        app.known = ids.iter().map(|id| id.to_string()).collect();
+        app
+    }
+
+    fn popup_of(all: Vec<crate::achievements::Achievement>, height: u16) -> String {
+        let mut app = earned_app(&[]);
+        app.reward = Some((std::time::Instant::now(), crate::app::Reward::Earned(all)));
+        screen_of(&mut app, 80, height)
+    }
+
+    #[test]
+    fn an_achievement_is_a_star_with_its_label_and_what_you_did() {
+        use crate::achievements::Achievement::*;
+        let one = popup_of(vec![OnAir], 24);
+        for want in ["★ achievement ★", "on air", "played a folder in cliamp", "▲", "any key to carry on"] {
+            assert!(one.contains(want), "{want}: {one}");
+        }
+        assert!(!one.contains('◆'), "the chest is the cheat popup's: {one}");
+
+        let many = popup_of(vec![OnAir, AnAlbum, Adopted, CleanRun, Secret], 24);
+        for want in ["★ 5 achievements ★", "on air", "front to back", "house rules", "+2 more", "h lists them"] {
+            assert!(many.contains(want), "{want}: {many}");
+        }
+        assert!(!many.contains("clean sweep"), "a fourth label was listed: {many}");
+    }
+
+    // Break it by drawing the art unconditionally: the words would be clipped away.
+    #[test]
+    fn a_short_terminal_keeps_the_words_and_drops_the_star() {
+        let short = popup_of(vec![crate::achievements::Achievement::OnAir], 10);
+        assert!(short.contains("on air") && short.contains("★ achievement ★"), "{short}");
+        assert!(!short.contains('▲'), "{short}");
+    }
+
+    #[test]
+    fn the_help_counts_and_lists_what_is_earned() {
+        let mut app = earned_app(&["on-air", "an-album", "clean-run", "from-a-newer-build"]);
+        app.show_help = true;
+        let screen = screen_of(&mut app, 100, 60);
+        for want in ["earned", "3 of 11", "front to back", "on air", "clean sweep"] {
+            assert!(screen.contains(want), "{want}: {screen}");
+        }
+    }
+
+    // Break it by gating on `fits` alone: a block shorter than the legend
+    // would show on a screen that had already dropped the legend.
+    #[test]
+    fn the_earned_list_gives_way_before_the_legend_does() {
+        let draw = |ids: &[&str], height| {
+            let mut app = earned_app(ids);
+            app.show_help = true;
+            screen_of(&mut app, 100, height)
+        };
+        let mut shown_with_legend = false;
+        for height in 16..70 {
+            let with = draw(&["on-air"], height);
+            if with.contains("earned") {
+                // A legend-only phrase: "confirmed" is also in an ordinary key row.
+                assert!(with.contains("not touched this run"), "earned drew without the legend at {height}: {with}");
+                shown_with_legend = true;
+            }
+        }
+        assert!(shown_with_legend, "it never drew, even on a tall terminal");
+    }
+
+    #[test]
+    fn nothing_earned_draws_the_help_as_it_always_did() {
+        let draw = |ids: &[&str], height| {
+            let mut app = earned_app(ids);
+            app.show_help = true;
+            screen_of(&mut app, 100, height)
+        };
+        // A 24-row terminal has no room for it, so earning one must not move a row.
+        assert_eq!(draw(&[], 24), draw(&["on-air"], 24));
+        assert!(!draw(&[], 60).contains("earned"));
     }
 
     #[test]

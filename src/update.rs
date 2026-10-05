@@ -74,28 +74,15 @@ pub fn tag_of(json: &str) -> Option<String> {
     (!tag.is_empty()).then_some(tag)
 }
 
-fn cache_path() -> PathBuf {
-    /* XDG_CACHE_HOME is already the cache root; HOME is not, and needs the
-       `.cache` leg spelled out. Joining `.cache` onto both buries the file
-       one level deep in every configured XDG home. */
-    let base = std::env::var("XDG_CACHE_HOME")
-        .ok()
-        .filter(|v| !v.is_empty())
-        .map_or_else(
-            || {
-                let home = std::env::var("HOME").unwrap_or_default();
-                PathBuf::from(home).join(".cache")
-            },
-            PathBuf::from,
-        );
-    base.join("earworm").join("latest")
+fn cache_path() -> Option<PathBuf> {
+    crate::config::xdg_home("XDG_CACHE_HOME", ".cache").map(|base| base.join("earworm").join("latest"))
 }
 
 /* The cache holds the tag on line 1 and the unix seconds it was written on
    line 2. A file this small needs no serde and no lock: whoever wrote it
    wrote it in one `fs::write`, which is atomic enough for a hint. */
 fn read_cache() -> Option<Notice> {
-    read_cache_at(&cache_path())
+    read_cache_at(&cache_path()?)
 }
 
 /* Takes the path, so the decision is testable as a decision rather than as
@@ -119,7 +106,9 @@ fn read_cache_at(path: &std::path::Path) -> Option<Notice> {
 }
 
 fn write_cache(tag: &str) {
-    write_cache_at(&cache_path(), tag);
+    if let Some(path) = cache_path() {
+        write_cache_at(&path, tag);
+    }
 }
 
 fn write_cache_at(path: &std::path::Path, tag: &str) {

@@ -7109,6 +7109,7 @@ pub mod tests {
             intro: true,
             notify: true,
             update_check: true,
+            achievements: true,
             folder: None,
             extra: Vec::new(),
             acoustid_key: None,

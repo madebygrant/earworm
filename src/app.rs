@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use std::sync::Arc;
@@ -6,6 +6,7 @@ use std::sync::mpsc::Sender;
 
 use ratatui::style::Color;
 
+use crate::achievements::{self, Achievement, Facts};
 use crate::cheats::{self, Cheat, Unlocked};
 use crate::theme::{Palette, Themes};
 use ratatui_image::picker::Picker;
@@ -577,8 +578,30 @@ pub const LOG_ROWS: usize = 8;
 
 /// Long enough to read the word, short enough that nobody reaches for a key.
 pub const INTRO: Duration = Duration::from_millis(1900);
-/// How long the reward popup stays up if no key dismisses it.
+/// How long a cheat popup stays up if no key dismisses it.
 pub const REWARD: Duration = Duration::from_millis(3500);
+/// An achievement is shorter: it arrives unasked, so it should leave unasked.
+pub const ACHIEVED: Duration = Duration::from_millis(2500);
+/// Up this long and it counts as read; hidden sooner, it goes back in the queue.
+pub const SEEN: Duration = Duration::from_millis(1000);
+
+#[derive(Clone)]
+pub enum Reward {
+    Secret(&'static Cheat),
+    Earned(Vec<Achievement>),
+}
+
+impl Reward {
+    pub fn lasts(&self) -> Duration {
+        match self {
+            Reward::Secret(_) => REWARD,
+            // More to read earns more time, up to the cheat popup's.
+            Reward::Earned(all) => {
+                (ACHIEVED + Duration::from_millis(400) * all.len().saturating_sub(1) as u32).min(REWARD)
+            }
+        }
+    }
+}
 /// Long enough for any code, short enough that the box never has to scroll.
 pub const CODE_MAX: usize = 24;
 /// How soon `^x` has to follow `^z` to open the console.
@@ -949,7 +972,17 @@ pub struct App {
     pub unlocked: Arc<Unlocked>,
     pub console: Option<Console>,
     /// The code just found and when, for the popup that celebrates it.
-    pub reward: Option<(Instant, &'static Cheat)>,
+    pub reward: Option<(Instant, Reward)>,
+    // Off until `main` says so: a popup eating the first key would break every library test.
+    pub achieving: bool,
+    /// Ids already announced, as the state file held them plus this session's.
+    pub known: BTreeSet<String>,
+    /// Earned and not yet shown, waiting for a calm screen.
+    pub queue: Vec<Achievement>,
+    /// Set by the messages that can change an answer; `achieve` clears it.
+    pub recheck: bool,
+    /// Batches of ids for the writer thread, sent when shown rather than earned.
+    pub achieved_tx: Option<Sender<Vec<&'static str>>>,
     /// When `^z` was pressed, if the next key could still be `^x`.
     pub armed: Option<Instant>,
     pub quit: bool,
@@ -1016,15 +1049,143 @@ impl App {
             unlocked: Arc::default(),
             console: None,
             reward: None,
+            achieving: false,
+            known: BTreeSet::new(),
+            queue: Vec::new(),
+            recheck: false,
+            achieved_tx: None,
             armed: None,
             quit: false,
         }
     }
 
-    pub fn celebrating(&self) -> Option<&'static Cheat> {
+    // An earned popup yields to a question, since it was never asked for.
+    pub fn celebrating(&self) -> Option<&Reward> {
+        let asking = self.prompt.is_some() || self.confirm.is_some();
         self.reward
-            .filter(|(at, _)| at.elapsed() < REWARD)
-            .map(|(_, cheat)| cheat)
+            .as_ref()
+            .filter(|(at, r)| at.elapsed() < r.lasts() && !(asking && matches!(r, Reward::Earned(_))))
+            .map(|(_, r)| r)
+    }
+
+    fn facts(&self) -> Facts<'_> {
+        Facts {
+            shelves: &self.library,
+            tracks: &self.tracks,
+            // `resting` is the word `Msg::Done` set; `stage` is overwritten by every flash.
+            done: self.done.as_ref().map(|d| (d, self.resting.as_str())),
+            playback: &self.playback,
+            secrets: self.unlocked.count(),
+        }
+    }
+
+    pub fn achieve(&mut self) {
+        self.recheck = false;
+        if !self.achieving {
+            return;
+        }
+        let fresh: Vec<Achievement> = achievements::earned(&self.facts())
+            .into_iter()
+            .filter(|a| !self.known.contains(a.id()) && !self.queue.contains(a) && !self.showing(*a))
+            .collect();
+        self.queue.extend(fresh);
+    }
+
+    // Nothing the user is typing into or answering, and nothing already on show.
+    fn calm(&self) -> bool {
+        !self.intro()
+            && self.prompt.is_none()
+            && self.confirm.is_none()
+            && self.console.is_none()
+            && self.picking.is_none()
+            && !self.typing_filter
+            && !self.show_help
+            && self.reward.is_none()
+    }
+
+    fn showing(&self, a: Achievement) -> bool {
+        matches!(&self.reward, Some((_, Reward::Earned(all))) if all.contains(&a))
+    }
+
+    // Everything waiting becomes one popup. It is recorded when it ends having been
+    // seen, not when it starts: a question can hide it a frame later.
+    pub fn start_queued(&mut self) {
+        if let Some((at, reward)) = &self.reward {
+            let asking = self.prompt.is_some() || self.confirm.is_some();
+            if at.elapsed() >= reward.lasts() {
+                self.finish_reward();
+            } else if asking && matches!(reward, Reward::Earned(_)) {
+                self.hide_reward();
+            }
+        }
+        if self.queue.is_empty() || !self.calm() {
+            return;
+        }
+        let shown = std::mem::take(&mut self.queue);
+        self.reward = Some((Instant::now(), Reward::Earned(shown)));
+    }
+
+    // The popup ran its course or was dismissed: whoever pressed the key saw it.
+    pub fn finish_reward(&mut self) {
+        if let Some((_, Reward::Earned(all))) = self.reward.take() {
+            self.record(&all);
+        }
+    }
+
+    // Something else took the screen, or earworm is closing. Up long enough
+    // counts as read; otherwise it goes back to wait for another chance.
+    pub fn hide_reward(&mut self) {
+        let Some((at, reward)) = self.reward.take() else {
+            return;
+        };
+        if let Reward::Earned(all) = reward {
+            if at.elapsed() >= SEEN {
+                self.record(&all);
+            } else {
+                self.queue.splice(0..0, all);
+            }
+        }
+    }
+
+    fn record(&mut self, all: &[Achievement]) {
+        let ids: Vec<&'static str> = all.iter().map(|a| a.id()).collect();
+        self.known.extend(ids.iter().map(|id| id.to_string()));
+        if let Some(tx) = &self.achieved_tx {
+            let _ = tx.send(ids);
+        }
+    }
+
+    /// Announced achievements this build knows, in list order.
+    pub fn earned_known(&self) -> Vec<Achievement> {
+        achievements::ALL.into_iter().filter(|a| self.known.contains(a.id())).collect()
+    }
+
+    fn unlock(&mut self, feature: cheats::Feature) {
+        match feature {
+            /* The worker only re-heads the prompt on the next answer, so
+               until then it would contradict the celebration. */
+            cheats::Feature::Music => {
+                if let Some((Prompt::Input { header, .. }, _)) = &mut self.prompt
+                    && header == cheats::LOCKED
+                {
+                    *header = cheats::OPENED.into();
+                }
+            }
+            /* Switched to at once, so the celebration is drawn in it. A
+               `[themes.*]` already holding the name keeps it: it was there first. */
+            cheats::Feature::Vaporwave | cheats::Feature::GameBoy => {
+                let Some(name) = feature.theme() else { return };
+                if let Some((_, palette)) = crate::theme::SECRETS.iter().find(|(n, _)| *n == name)
+                    && !self.themes.has(name)
+                {
+                    self.themes.add(name.to_string(), *palette);
+                }
+                if let Some(palette) = self.themes.named(name) {
+                    self.theme = palette;
+                    self.theme_name = name.to_string();
+                }
+            }
+        }
     }
 
     pub fn try_code(&mut self) {
@@ -1034,17 +1195,12 @@ impl App {
         let said = match cheats::find(&console.text) {
             Some(cheat) if self.unlocked.grant(cheat.feature) => {
                 self.console = None;
-                self.reward = Some((Instant::now(), cheat));
-                /* The worker only re-heads the prompt on the next answer, so
-                   until then it would contradict the celebration. */
-                if let Some((Prompt::Input { header, .. }, _)) = &mut self.prompt
-                    && header == cheats::LOCKED
-                {
-                    *header = cheats::OPENED.into();
-                }
+                self.reward = Some((Instant::now(), Reward::Secret(cheat)));
+                self.recheck = true;
+                self.unlock(cheat.feature);
                 return;
             }
-            Some(cheat) => format!("already found  ·  {} are open", cheat.prize),
+            Some(cheat) => format!("already found  ·  {}", cheat.feature.prize()),
             None => "nothing happens".into(),
         };
         console.text.clear();
@@ -1083,7 +1239,10 @@ impl App {
             Msg::Flash(s) => self.say(s),
             Msg::Playlist(p) => self.playlist = p,
             Msg::Folder(f) => self.folder = Some(f),
-            Msg::Player(now) => self.playback = now,
+            Msg::Player(now) => {
+                self.playback = now;
+                self.recheck = true;
+            }
             Msg::Tracks(t) => {
                 // The scan is over and the work starts here, so this is when
                 // the clock behind the estimate starts.
@@ -1104,6 +1263,7 @@ impl App {
                 note,
                 name,
             } => {
+                self.recheck = true;
                 if let Some(t) = self.track_mut(index) {
                     t.status = status;
                     if let Some(s) = source {
@@ -1140,6 +1300,7 @@ impl App {
                 self.logs.push(line);
             }
             Msg::Library { shelves, show } => {
+                self.recheck = true;
                 self.library = shelves;
                 self.shelf = self.shelf.min(self.library.len().saturating_sub(1));
                 if show {
@@ -1174,6 +1335,7 @@ impl App {
                 self.prompt = Some((prompt, reply));
             }
             Msg::Done { result, stage } => {
+                self.recheck = true;
                 self.stage = if result.is_ok() { stage } else { "failed" }.into();
                 self.resting = self.stage.clone();
                 self.flash_until = None;
@@ -1216,6 +1378,8 @@ impl App {
             }
             Msg::Idle => self.busy = false,
             Msg::Restart => {
+                // Statuses are this run's alone: judge them before they are cleared.
+                self.achieve();
                 self.done = None;
                 self.run_started = None;
                 self.tracks.clear();
@@ -1572,6 +1736,12 @@ impl App {
         } else {
             ""
         };
+        /* Saved, the name would stop the next start: the config would name a
+           theme nothing has unlocked yet. */
+        if crate::theme::SECRETS.iter().any(|(secret, _)| *secret == name) {
+            self.say(format!("theme {name}  ·  secret, this session only{kept}"));
+            return;
+        }
         let Some(file) = self.config_file.clone() else {
             // --no-config asked for the file to stay out of the run.
             self.say(format!("theme {name}  ·  this session{kept}"));
@@ -3036,6 +3206,240 @@ mod tests {
     }
 
     /// Tracks with names to filter on, statuses in order Ok, Failed, Ok...
+    fn achiever() -> (App, std::sync::mpsc::Receiver<Vec<&'static str>>) {
+        let (tx, _cmds) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        app.achieving = true;
+        let (sender, written) = std::sync::mpsc::channel();
+        app.achieved_tx = Some(sender);
+        (app, written)
+    }
+
+    fn library_of(n: usize, tracks: usize) -> Msg {
+        let shelf = || Shelf {
+            tracks,
+            url: Some("u".into()),
+            ..Shelf::default()
+        };
+        Msg::Library {
+            shelves: (0..n).map(|_| shelf()).collect(),
+            show: false,
+        }
+    }
+
+    fn asking(app: &mut App) -> std::sync::mpsc::Receiver<Reply> {
+        let (reply, answers) = std::sync::mpsc::channel();
+        app.apply(Msg::Ask(
+            Prompt::Input {
+                header: "q".into(),
+                note: String::new(),
+                value: String::new(),
+                escape: Escape::Keep,
+            },
+            reply,
+        ));
+        answers
+    }
+
+    // Off by default: a popup eating the first key would break every library test.
+    #[test]
+    fn a_new_app_has_achievements_off() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.apply(library_of(12, 20));
+        app.achieve();
+        app.start_queued();
+        assert!(app.queue.is_empty() && app.reward.is_none());
+    }
+
+    #[test]
+    fn what_is_already_known_is_not_announced_again() {
+        let (mut app, written) = achiever();
+        app.known = ["first-playlist", "ten-playlists", "hundred-tracks"].map(String::from).into();
+        app.apply(library_of(10, 10));
+        app.achieve();
+        app.start_queued();
+        assert!(app.reward.is_none(), "an announced achievement came back");
+        assert!(written.try_recv().is_err());
+    }
+
+    // Break it by sending in `achieve`, or in `start_queued`: the batch would arrive before it was read.
+    #[test]
+    fn a_burst_is_one_popup_and_one_write_once_it_is_read() {
+        let (mut app, written) = achiever();
+        app.apply(library_of(10, 10));
+        app.achieve();
+        assert!(app.queue.len() >= 3, "{:?}", app.queue);
+        assert!(written.try_recv().is_err(), "written before it was shown");
+        app.start_queued();
+        let Some((_, Reward::Earned(all))) = &app.reward else {
+            panic!("no popup");
+        };
+        assert_eq!(all.len(), 3);
+        assert!(written.try_recv().is_err(), "recorded when it started, not when it was read");
+        assert!(app.queue.is_empty());
+        app.finish_reward();
+        let batch = written.try_recv().expect("nothing was recorded");
+        assert_eq!(batch.len(), 3);
+        assert!(written.try_recv().is_err(), "more than one write for one popup");
+        assert!(batch.iter().all(|id| app.known.contains(*id)));
+    }
+
+    // Nothing is recorded while something is being asked, so quitting then
+    // announces it next session instead of losing it.
+    #[test]
+    fn nothing_is_shown_or_written_over_a_question() {
+        let (mut app, written) = achiever();
+        let _answers = asking(&mut app);
+        app.apply(library_of(1, 1));
+        app.achieve();
+        app.start_queued();
+        assert!(app.reward.is_none() && written.try_recv().is_err());
+        assert!(!app.queue.is_empty(), "it was dropped rather than held");
+        app.prompt = None;
+        app.start_queued();
+        assert!(app.reward.is_some());
+        assert!(written.try_recv().is_err(), "recorded before it was read");
+        app.finish_reward();
+        assert!(written.try_recv().is_ok());
+    }
+
+    #[test]
+    fn it_waits_for_the_intro_the_help_and_the_filter_box() {
+        let (mut app, written) = achiever();
+        app.intro_done = false;
+        app.apply(library_of(1, 1));
+        app.achieve();
+        app.start_queued();
+        assert!(app.reward.is_none(), "it covered the intro");
+        app.intro_done = true;
+        for (name, set) in [
+            ("help", (|a: &mut App, on| a.show_help = on) as fn(&mut App, bool)),
+            ("filter", |a, on| a.typing_filter = on),
+            ("pick", |a, on| a.picking = on.then(|| std::sync::mpsc::channel().0)),
+            ("console", |a, on| a.console = on.then(Console::default)),
+        ] {
+            set(&mut app, true);
+            app.start_queued();
+            assert!(app.reward.is_none(), "it covered the {name}");
+            set(&mut app, false);
+        }
+        app.start_queued();
+        assert!(app.reward.is_some() && written.try_recv().is_err());
+    }
+
+    // An achievement arrives unasked, so it leaves unasked; a cheat popup was asked for.
+    #[test]
+    fn an_achievement_leaves_on_its_own_and_a_cheat_popup_does_not() {
+        let (mut app, _written) = achiever();
+        let aged = Instant::now().checked_sub(ACHIEVED + Duration::from_millis(1)).unwrap();
+        app.reward = Some((aged, Reward::Earned(vec![Achievement::OnAir])));
+        assert!(app.celebrating().is_none());
+        app.start_queued();
+        assert!(app.reward.is_none(), "an expired popup was kept");
+        assert_eq!(_written.try_recv().unwrap(), vec!["on-air"], "one that ran its course was not recorded");
+
+        app.reward = Some((aged, Reward::Secret(&cheats::CHEATS[0])));
+        assert!(app.celebrating().is_some(), "a cheat popup left early");
+    }
+
+    // Break it by recording on hide: a popup a question covered a frame later was never read.
+    #[test]
+    fn a_question_that_hides_an_unseen_achievement_gives_it_back() {
+        let (mut app, written) = achiever();
+        app.reward = Some((Instant::now(), Reward::Earned(vec![Achievement::OnAir])));
+        let _answers = asking(&mut app);
+        assert!(app.celebrating().is_none(), "it covered the question");
+        app.start_queued();
+        assert!(app.reward.is_none());
+        assert_eq!(app.queue, vec![Achievement::OnAir], "an unread achievement was lost");
+        assert!(written.try_recv().is_err() && app.known.is_empty(), "it was recorded unread");
+        app.prompt = None;
+        app.start_queued();
+        assert!(matches!(app.reward, Some((_, Reward::Earned(_)))), "it never came back");
+    }
+
+    #[test]
+    fn a_question_that_hides_a_read_achievement_records_it_and_it_stays_gone() {
+        let (mut app, written) = achiever();
+        let read = Instant::now().checked_sub(SEEN + Duration::from_millis(1)).unwrap();
+        app.reward = Some((read, Reward::Earned(vec![Achievement::OnAir])));
+        let _answers = asking(&mut app);
+        app.start_queued();
+        assert_eq!(written.try_recv().unwrap(), vec!["on-air"]);
+        assert!(app.queue.is_empty());
+        app.prompt = None;
+        app.achieve();
+        app.start_queued();
+        assert!(app.reward.is_none(), "it came back after the question");
+
+        // A cheat popup is the answer to something typed, so a question does not hide it.
+        app.reward = Some((Instant::now(), Reward::Secret(&cheats::CHEATS[0])));
+        let _answers = asking(&mut app);
+        assert!(app.celebrating().is_some());
+    }
+
+    #[test]
+    fn closing_records_what_was_read_and_drops_what_was_not() {
+        let (mut app, written) = achiever();
+        app.reward = Some((Instant::now(), Reward::Earned(vec![Achievement::OnAir])));
+        app.hide_reward();
+        assert!(written.try_recv().is_err(), "an unread one was recorded at exit");
+        let read = Instant::now().checked_sub(SEEN + Duration::from_millis(1)).unwrap();
+        app.reward = Some((read, Reward::Earned(vec![Achievement::AnAlbum])));
+        app.hide_reward();
+        assert_eq!(written.try_recv().unwrap(), vec!["an-album"]);
+    }
+
+    // What is on screen is already earned: a recheck must not queue it for a second popup.
+    #[test]
+    fn what_is_on_screen_is_not_queued_again() {
+        let (mut app, _written) = achiever();
+        app.apply(library_of(10, 10));
+        app.achieve();
+        app.start_queued();
+        assert!(app.queue.is_empty() && matches!(app.reward, Some((_, Reward::Earned(_)))));
+        app.achieve();
+        assert!(app.queue.is_empty(), "{:?}", app.queue);
+    }
+
+    // Break it by dropping the `achieve` at the top of the arm: a typed edit
+    // is a fact only this run's tracks hold, and `Restart` clears them.
+    #[test]
+    fn a_restart_does_not_lose_a_fact_the_run_held() {
+        let (mut app, _written) = achiever();
+        let mut tracks = named(&["One"]).tracks;
+        tracks[0].status = Status::Manual;
+        tracks[0].source = "typed".into();
+        app.tracks = tracks;
+        app.apply(Msg::Restart);
+        assert!(app.queue.contains(&Achievement::HandTagged), "{:?}", app.queue);
+    }
+
+    #[test]
+    fn only_achievements_this_build_knows_are_counted_as_earned() {
+        let (mut app, _written) = achiever();
+        app.known = ["on-air", "from-a-newer-build"].map(String::from).into();
+        assert_eq!(app.earned_known(), vec![Achievement::OnAir]);
+    }
+
+    // The cheat is remembered as an achievement once its own popup has gone.
+    #[test]
+    fn finding_a_cheat_earns_safecracker() {
+        let (mut app, _written) = achiever();
+        app.console = Some(Console {
+            text: cheats::TEST_CODE.into(),
+            said: None,
+        });
+        app.try_code();
+        assert!(app.recheck);
+        app.achieve();
+        assert!(app.queue.contains(&Achievement::Secret));
+        app.start_queued();
+        assert!(matches!(app.reward, Some((_, Reward::Secret(_)))), "it replaced the cheat popup");
+    }
+
     fn named(names: &[&str]) -> App {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(tx, String::new());

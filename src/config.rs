@@ -81,6 +81,10 @@ pub struct Cli {
     #[arg(long)]
     pub no_update_check: bool,
 
+    /// Don't announce achievements or remember the ones you have earned
+    #[arg(long)]
+    pub no_achievements: bool,
+
     /// Don't ring the terminal bell when a long run finishes
     #[arg(long)]
     pub no_notify: bool,
@@ -131,6 +135,7 @@ pub struct FileConfig {
     pub intro: Option<bool>,
     pub notify: Option<bool>,
     pub update_check: Option<bool>,
+    pub achievements: Option<bool>,
     pub extra: Option<Vec<String>>,
     pub acoustid_key: Option<String>,
     pub theme: Option<String>,
@@ -539,6 +544,28 @@ pub fn write_atomically(path: &std::path::Path, text: &str) -> Result<()> {
     Ok(())
 }
 
+// An XDG root is already the directory; HOME is not and needs its leg spelled out.
+// None when neither gives an absolute path: a relative one would land in whatever
+// directory earworm was started from, which may be somebody's music folder.
+pub fn xdg_home(var: &str, home_leg: &str) -> Option<PathBuf> {
+    resolve_home(
+        std::env::var(var).ok().as_deref(),
+        std::env::var("HOME").ok().as_deref(),
+        home_leg,
+    )
+}
+
+// Takes the values, so the decision is testable without setting a process-wide variable.
+fn resolve_home(xdg: Option<&str>, home: Option<&str>, home_leg: &str) -> Option<PathBuf> {
+    let absolute = |p: PathBuf| p.is_absolute().then_some(p);
+    xdg.filter(|v| !v.is_empty())
+        .and_then(|v| absolute(PathBuf::from(v)))
+        .or_else(|| {
+            home.filter(|v| !v.is_empty())
+                .and_then(|h| absolute(PathBuf::from(h).join(home_leg)))
+        })
+}
+
 pub fn config_path() -> PathBuf {
     let base = std::env::var("XDG_CONFIG_HOME")
         .ok()
@@ -589,6 +616,8 @@ pub struct Config {
     pub notify: bool,
     /// Ask GitHub about a newer release, at most once a day.
     pub update_check: bool,
+    /// Announce achievements and keep a file of the ones earned.
+    pub achievements: bool,
     pub extra: Vec<String>,
     pub acoustid_key: Option<String>,
     /// The palette every draw reads. Resolved here so a bad name or a bad
@@ -700,6 +729,7 @@ impl Config {
             intro: off("no_intro", file.intro),
             notify: off("no_notify", file.notify),
             update_check: off("no_update_check", file.update_check),
+            achievements: off("no_achievements", file.achievements),
             extra,
             theme: palette,
             theme_name,
@@ -1538,6 +1568,34 @@ mod tests {
     /* The update check phones home, so it is the one default worth a way to
     refuse: same negation shape as everything else — the command line can only
     switch it off, and the file is the only way to hold the choice. */
+    #[test]
+    fn an_xdg_root_wins_and_home_needs_its_leg() {
+        let at = |xdg, home| resolve_home(xdg, home, ".local/state");
+        assert_eq!(at(Some("/x/state"), Some("/h")), Some(PathBuf::from("/x/state")));
+        assert_eq!(at(None, Some("/h")), Some(PathBuf::from("/h/.local/state")));
+        assert_eq!(at(Some(""), Some("/h")), Some(PathBuf::from("/h/.local/state")));
+    }
+
+    // Break it by joining onto an empty HOME: the path becomes relative to the working directory.
+    #[test]
+    fn no_usable_home_means_no_path_rather_than_a_relative_one() {
+        let at = |xdg, home| resolve_home(xdg, home, ".local/state");
+        assert_eq!(at(None, None), None);
+        assert_eq!(at(None, Some("")), None);
+        assert_eq!(at(None, Some("relative/home")), None);
+        // The spec says a relative XDG value is ignored, not honoured.
+        assert_eq!(at(Some("rel/state"), Some("/h")), Some(PathBuf::from("/h/.local/state")));
+        assert_eq!(at(Some("rel/state"), None), None);
+    }
+
+    #[test]
+    fn achievements_are_on_unless_something_says_otherwise() {
+        assert!(build("", &[]).achievements, "a bare run lost them");
+        assert!(!build("", &["--no-achievements"]).achievements);
+        assert!(!build("achievements = false\n", &[]).achievements);
+        assert!(!build("achievements = true\n", &["--no-achievements"]).achievements);
+    }
+
     #[test]
     fn the_update_check_is_on_unless_something_says_otherwise() {
         assert!(build("", &[]).update_check, "a bare run lost the check");

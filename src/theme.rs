@@ -158,6 +158,47 @@ pub const NEON: Palette = Palette {
     stop: 0.76,
 };
 
+// Hot pink and cyan over a purple-to-teal ground; the teal is what keeps it apart from neon.
+pub const VAPORWAVE: Palette = Palette {
+    text: Color::Rgb(255, 236, 250),
+    accent: Color::Rgb(255, 113, 206),
+    cursor: Color::Rgb(1, 205, 254),
+    warn: Color::Rgb(255, 251, 150),
+    error: Color::Rgb(255, 104, 120),
+    muted: Color::Rgb(196, 168, 232),
+    rule: Color::Rgb(123, 44, 191),
+    surface: Color::Rgb(30, 14, 56),
+    unsure: Color::Rgb(150, 226, 200),
+    ink: Color::Rgb(26, 11, 46),
+    near: (44, 14, 76),
+    far: (4, 28, 38),
+    stop: 0.76,
+};
+
+/* The original handheld's olive greens, on its darkest shade. Four shades
+   cannot carry ten slots, so warn, error and unsure lean a little yellow or
+   pale while staying in the family; the status words carry the meaning. */
+pub const GAMEBOY: Palette = Palette {
+    text: Color::Rgb(202, 226, 170),
+    accent: Color::Rgb(155, 188, 15),
+    cursor: Color::Rgb(170, 222, 80),
+    warn: Color::Rgb(214, 214, 90),
+    error: Color::Rgb(236, 250, 206),
+    muted: Color::Rgb(150, 178, 90),
+    rule: Color::Rgb(62, 118, 56),
+    surface: Color::Rgb(22, 66, 22),
+    unsure: Color::Rgb(176, 196, 120),
+    ink: Color::Rgb(15, 56, 15),
+    near: (15, 56, 15),
+    far: (6, 28, 6),
+    stop: 0.76,
+};
+
+/* Palettes a cheat code adds to the walk. Never in `BUILT_INS`, so a config
+   naming one is refused at a start where the code has not been typed yet,
+   which is why `cycle_theme` never saves one. */
+pub const SECRETS: [(&str, Palette); 2] = [("vaporwave", VAPORWAVE), ("gameboy", GAMEBOY)];
+
 /* Every palette earworm ships. The list is what the contrast, quantise and
    NO_COLOR checks iterate, so a new theme is covered the moment it is added
    here and cannot be shipped unmeasured. */
@@ -642,7 +683,7 @@ mod tests {
        against the band and not against a gradient it never sits on. */
     #[test]
     fn every_palette_is_legible_on_its_own_ground() {
-        for (theme, palette) in BUILT_INS {
+        for (theme, palette) in BUILT_INS.into_iter().chain(SECRETS) {
             for (slot, color) in palette.slots() {
                 let Some(want) = wants(slot) else { continue };
                 for (ground, bg) in palette.grounds(slot) {
@@ -662,7 +703,7 @@ mod tests {
        palette somebody else's terminal has already approximated. */
     #[test]
     fn every_palette_stays_legible_after_quantising() {
-        for (theme, palette) in BUILT_INS {
+        for (theme, palette) in BUILT_INS.into_iter().chain(SECRETS) {
             for (slot, color) in palette.slots() {
                 if wants(slot).is_none() || slot == "rule" {
                     continue;
@@ -817,7 +858,7 @@ mod tests {
        which on `light` would have faded dark into dark. */
     #[test]
     fn the_intro_fades_between_the_palettes_own_rule_and_accent() {
-        for (theme, palette) in BUILT_INS {
+        for (theme, palette) in BUILT_INS.into_iter().chain(SECRETS) {
             assert_eq!(palette.glow(0.0), palette.rule, "{theme} starts elsewhere");
             assert_eq!(palette.glow(1.0), palette.accent, "{theme} lands elsewhere");
             // Out of range is clamped rather than extrapolated off the ramp.
@@ -829,7 +870,7 @@ mod tests {
     /// Every colour goes, so the words and the marks have to carry it.
     #[test]
     fn no_colour_leaves_nothing_for_a_terminal_to_render() {
-        for (theme, palette) in BUILT_INS {
+        for (theme, palette) in BUILT_INS.into_iter().chain(SECRETS) {
             for (slot, color) in palette.slots() {
                 assert_eq!(
                     shade_at(Depth::Plain, color),
