@@ -37,6 +37,15 @@ pub struct Cli {
     #[arg(long)]
     pub no_convert: bool,
 
+    /// Do not write ReplayGain/R128 loudness tags, whatever `loudness` says
+    /// in the config
+    #[arg(long)]
+    pub no_loudness: bool,
+
+    /// Do not fetch lyrics, whatever `lyrics` says in the config
+    #[arg(long)]
+    pub no_lyrics: bool,
+
     /// Keep YouTube's own artist/track, skip title parsing
     #[arg(short = 'P', long)]
     pub no_parse: bool,
@@ -123,6 +132,8 @@ pub struct FileConfig {
     pub dir: Option<String>,
     pub format: Option<String>,
     pub convert: Option<bool>,
+    pub loudness: Option<bool>,
+    pub lyrics: Option<bool>,
     pub parse: Option<bool>,
     pub m3u8: Option<bool>,
     pub cover: Option<bool>,
@@ -587,6 +598,9 @@ pub struct Config {
        Only a sync acts on it; opening a folder from the library converts
        nothing, because that path never touches the network or the encoder. */
     pub convert: bool,
+    // Both rewrite tags on files already on disk, so like `convert` they are off until the file says so.
+    pub loudness: bool,
+    pub lyrics: bool,
     /* The folder this run must write into, for a playlist somebody has
        renamed. `None` is every other run, where yt-dlp names the folder from
        the playlist's title. Not a setting and not in the file: it belongs to
@@ -712,6 +726,8 @@ impl Config {
             folder: None,
             format,
             convert: opt_in("no_convert", file.convert),
+            loudness: opt_in("no_loudness", file.loudness),
+            lyrics: opt_in("no_lyrics", file.lyrics),
             config_file,
             parse: off("no_parse", file.parse),
             m3u8: off("no_m3u8", file.m3u8),
@@ -750,8 +766,14 @@ impl Config {
     /// remembering which flags were passed.
     pub fn describe(&self) -> String {
         let on = |flag: bool| if flag { "on" } else { "off" };
+        // Named only when on: the header drops this string whole when it does not fit, and off is the default.
+        let extras: String = [("loudness", self.loudness), ("lyrics", self.lyrics)]
+            .iter()
+            .filter(|(_, enabled)| *enabled)
+            .map(|(name, _)| format!(" · {name} on"))
+            .collect();
         format!(
-            "format {} · convert {} · parse {} · lookup {} · apple {} · cover {} · m3u8 {} · prompts {} · rename {}",
+            "format {} · convert {}{extras} · parse {} · lookup {} · apple {} · cover {} · m3u8 {} · prompts {} · rename {}",
             self.format,
             on(self.convert),
             on(self.parse),
@@ -807,6 +829,25 @@ mod tests {
         let cfg = build("format = \"flac\"\n", &[]);
         assert_eq!(cfg.format, "flac");
         assert!(!cfg.convert, "picking a format turned conversion on");
+    }
+
+    #[test]
+    fn the_settings_line_names_loudness_and_lyrics_only_when_they_are_on() {
+        let plain = build("", &[]).describe();
+        assert!(!plain.contains("loudness") && !plain.contains("lyrics"), "{plain}");
+        let both = build("loudness = true\nlyrics = true\n", &[]).describe();
+        assert!(both.contains("convert off · loudness on · lyrics on · parse on"), "{both}");
+    }
+
+    #[test]
+    fn loudness_and_lyrics_are_off_unless_the_file_turns_them_on() {
+        let cfg = build("", &[]);
+        assert!(!cfg.loudness && !cfg.lyrics, "on with nothing asking for it");
+        let cfg = build("loudness = true\nlyrics = true\n", &[]);
+        assert!(cfg.loudness && cfg.lyrics);
+        let cfg = build("loudness = true\nlyrics = true\n", &["--no-loudness", "--no-lyrics"]);
+        assert!(!cfg.loudness && !cfg.lyrics, "the command line must be able to switch them off");
+        assert!(!build("lyrics = true\n", &[]).loudness, "one key turned on the other");
     }
 
     /// Written back the same way the format is, so the next start reads it.

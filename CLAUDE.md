@@ -636,6 +636,38 @@ than at the start of every session.
   `--no-album` is the control that already exists. Worth doing on its own, not
   smuggled in here.
 
+### Loudness tags
+
+- **`loudness` is off until the file turns it on.** It goes through `opt_in`
+  like `convert`, because the pass runs on tracks already on disk and rewrites
+  their tags: on by default, the next `--resync` would touch every file in
+  the library. The flag only ever switches it off.
+- **The two reference levels are different on purpose.** Opus is
+  `R128_TRACK_GAIN`, a Q7.8 integer against -23 LUFS, and nothing else.
+  Everything else is `REPLAYGAIN_TRACK_GAIN` in dB against -18 plus a peak.
+  Opus players ignore ReplayGain, and writing both would give them two
+  answers. `the_two_reference_levels_are_not_swapped` pins the numbers.
+- **`write_loudness` skips a file that already has the track tag.** A resync
+  then costs a tag read and no ffmpeg, and a value another tool wrote stays.
+  Album gain is the opposite: it is rewritten when the computed value differs,
+  because adding a track changes it for every file.
+- **Album gain is read back from the track tags, not measured again.**
+  `stored_loudness` inverts the gain, so the album pass decodes nothing. It
+  depends on the track pass having run first, which is why it sits after
+  `tag_tracks` in `pipeline` and only when the folder is an album.
+- **Opus albums have no peak.** R128 has no peak tag to write, and inventing
+  one in a ReplayGain tag would give opus players a second answer.
+- **`measure` writes ffmpeg's stderr to a file.** The summary is on stderr,
+  and `run_bounded` drains no pipe, for the reason `transcode` documents.
+  Silence prints `-inf`, which parses as a number, so `parse_loudness` refuses
+  non-finite values or a silent file would be written a gain of infinity.
+- **A measuring failure is a log line, never a status.** It costs one tag.
+  Marking the track `Failed` would report a downloaded, tagged file as broken.
+- **`Extra::key` picks the key from the tag type.** lofty has no `Lyrics`
+  mapping for ID3v2, only `UnsyncLyrics`, and `set_extra` reports a key the
+  container cannot hold instead of dropping it. The `lyrics` config key exists
+  and does nothing yet.
+
 ### Playing through cliamp
 
 - **`cliamp playlist import` refuses a name it already holds,** exit 1, without

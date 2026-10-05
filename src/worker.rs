@@ -912,6 +912,9 @@ fn pipeline(
         ..CoverState::default()
     };
     tag_tracks(cfg, tx, cancel, tracks, &playlist, &asker, &mut cover, None);
+    if album && cfg.loudness && !cancel.load(Ordering::SeqCst) {
+        album_loudness(tx, tracks);
+    }
 
     record_kind(tx, folder_of(tracks).as_deref(), kind);
     sync_manifest(cfg, tracks);
@@ -939,6 +942,23 @@ fn pipeline(
         summary = format!("{summary}   [{warning}]");
     }
     Ok(summary)
+}
+
+// Runs after the tagging pass, because it needs every track's own gain first.
+fn album_loudness(tx: &Sender<Msg>, tracks: &[Track]) {
+    let paths: Vec<&Path> = tracks
+        .iter()
+        .filter(|t| !matches!(t.status, Status::Gone | Status::Skipped | Status::Local))
+        .filter_map(|t| t.path.as_deref())
+        .filter(|p| p.is_file())
+        .collect();
+    let (changed, skipped) = tag::write_album_loudness(&paths);
+    if changed > 0 {
+        let _ = tx.send(Msg::Log(format!("loudness: album gain on {changed} tracks")));
+    }
+    if skipped > 0 {
+        let _ = tx.send(Msg::Log(format!("loudness: album: {skipped} tracks left out, tags unreadable")));
+    }
 }
 
 /// The prefix YouTube Music gives a release, which is the one automatic signal
@@ -1741,6 +1761,7 @@ fn tag_tracks(
                 });
                 offer_meta(tx, track);
             }
+            enrich(cfg, tx, track, &path);
             continue;
         }
 
@@ -1806,6 +1827,7 @@ fn tag_tracks(
                         let _ = tx.send(Msg::Log(format!("cover: track {}: {err}", track.index)));
                     }
                 }
+                enrich(cfg, tx, track, &path);
                 rename(cfg, tx, track);
             }
             Err(err) => {
@@ -1821,6 +1843,23 @@ fn tag_tracks(
         }
     }
 
+}
+
+// Per-track extras written after identification: loudness and lyrics. Runs for tracks already
+// on disk too, so a resync backfills old folders. Both are off by default.
+fn enrich(cfg: &Config, tx: &Sender<Msg>, track: &Track, path: &Path) {
+    if cfg.loudness {
+        match tag::write_loudness(path) {
+            Ok(true) => {
+                let _ = tx.send(Msg::Log(format!("loudness: track {} measured", track.index)));
+            }
+            Ok(false) => {}
+            // A failure here costs the gain tag and nothing else, so it is a log line and not a status.
+            Err(err) => {
+                let _ = tx.send(Msg::Log(format!("loudness: track {}: {err}", track.index)));
+            }
+        }
+    }
 }
 
 /// Serves edits and cover changes after the run, so the tracks stay editable
@@ -7099,6 +7138,8 @@ pub mod tests {
             format: config::DEFAULT_FORMAT.into(),
             // Off, so a test that does not ask for it converts nothing.
             convert: false,
+            loudness: false,
+            lyrics: false,
             config_file: None,
             resync: false,
             list: false,
@@ -8569,5 +8610,35 @@ mod purge_tests {
         assert!(dir.join("08 - Proven.opus").is_file());
         std::fs::remove_dir_all(&dir).unwrap();
         std::fs::remove_dir_all(elsewhere.parent().unwrap()).unwrap();
+    }
+
+    // Off by default, so a plain sync must leave a file's tags exactly as they were.
+    #[test]
+    fn enrich_writes_loudness_only_when_it_is_on() {
+        let dir = std::env::temp_dir().join(format!("earworm-enrich-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("01 - A.flac");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i", "sine=f=440:d=2", "-ac", "2", "-y"])
+            .arg(&file)
+            .status();
+        if !made.is_ok_and(|s| s.success()) {
+            eprintln!("skipped: ffmpeg could not make a fixture");
+            std::fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+        let track = Track::new(1, "a".into(), "01 - A.flac".into(), file.clone());
+        let (tx, rx) = mpsc::channel();
+        let mut cfg = super::tests::config(false);
+
+        super::enrich(&cfg, &tx, &track, &file);
+        assert!(tag::extra(&file, tag::Extra::TrackGain).unwrap().is_none(), "written with loudness off");
+
+        cfg.loudness = true;
+        super::enrich(&cfg, &tx, &track, &file);
+        assert!(tag::extra(&file, tag::Extra::TrackGain).unwrap().is_some(), "not written with loudness on");
+        assert!(rx.try_iter().any(|m| matches!(m, Msg::Log(l) if l.contains("loudness"))));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

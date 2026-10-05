@@ -7,7 +7,7 @@ use lofty::file::{AudioFile, TaggedFile, TaggedFileExt};
 use lofty::picture::{MimeType, Picture, PictureType};
 use lofty::probe::Probe;
 use lofty::tag::items::Timestamp;
-use lofty::tag::{Accessor, Tag, TagExt};
+use lofty::tag::{Accessor, ItemKey, Tag, TagExt, TagType};
 
 use std::time::Duration;
 
@@ -24,6 +24,8 @@ const COVER_RESIZE: Duration = Duration::from_secs(20);
    because the cost of being wrong is a conversion that fails for no reason
    the user can see. */
 const TRANSCODE: Duration = Duration::from_secs(300);
+
+const MEASURE: Duration = Duration::from_secs(120);
 
 static WRITING: AtomicBool = AtomicBool::new(false);
 
@@ -145,6 +147,227 @@ pub fn set_fields(path: &Path, fields: &Fields) -> Result<()> {
             }
         }
     })
+}
+
+/// A tag beyond the identity fields, mapped to each container's native frame by lofty.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[allow(dead_code)] // Only the lyrics pass, not built yet, writes `Lyrics` outside the tests.
+pub enum Extra {
+    TrackGain,
+    TrackPeak,
+    AlbumGain,
+    AlbumPeak,
+    // Opus players read these instead of the ReplayGain pair.
+    R128TrackGain,
+    R128AlbumGain,
+    Lyrics,
+}
+
+impl Extra {
+    fn key(self, kind: TagType) -> ItemKey {
+        match self {
+            Extra::TrackGain => ItemKey::ReplayGainTrackGain,
+            Extra::TrackPeak => ItemKey::ReplayGainTrackPeak,
+            Extra::AlbumGain => ItemKey::ReplayGainAlbumGain,
+            Extra::AlbumPeak => ItemKey::ReplayGainAlbumPeak,
+            Extra::R128TrackGain => ItemKey::R128TrackGain,
+            Extra::R128AlbumGain => ItemKey::R128AlbumGain,
+            // ID3v2 has no frame for `Lyrics`, only the unsynchronised one.
+            Extra::Lyrics if kind == TagType::Id3v2 => ItemKey::UnsyncLyrics,
+            Extra::Lyrics => ItemKey::Lyrics,
+        }
+    }
+}
+
+pub fn extra(path: &Path, which: Extra) -> Result<Option<String>> {
+    let file = open(path)?;
+    let tag = file.primary_tag().or_else(|| file.first_tag());
+    Ok(tag.and_then(|t| {
+        let found = t.get_string(which.key(t.tag_type()));
+        // Another tool may have written the Vorbis `UNSYNCEDLYRICS` spelling.
+        let found = found.or_else(|| {
+            (which == Extra::Lyrics).then(|| t.get_string(ItemKey::UnsyncLyrics)).flatten()
+        });
+        found.filter(|text| !text.is_empty()).map(str::to_string)
+    }))
+}
+
+/// An empty value removes the tag, for the reason `set_fields` removes an empty album.
+#[allow(dead_code)] // Lyrics will write through this.
+pub fn set_extra(path: &Path, which: Extra, value: &str) -> Result<()> {
+    set_extras(path, &[(which, value.to_string())])
+}
+
+// One save for the lot, since each write rewrites the file.
+pub fn set_extras(path: &Path, values: &[(Extra, String)]) -> Result<()> {
+    let mut refused = None;
+    with_tag(path, |tag| {
+        for (which, value) in values {
+            let key = which.key(tag.tag_type());
+            if value.is_empty() {
+                tag.remove_key(key);
+            } else if !tag.insert_text(key, value.clone()) {
+                refused = Some(*which);
+            }
+        }
+    })?;
+    // lofty drops a key the container has no frame for without saying so.
+    if let Some(which) = refused {
+        anyhow::bail!("this file's tag cannot hold {which:?}");
+    }
+    Ok(())
+}
+
+/// What ffmpeg's `ebur128` filter reports for a whole file.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Loudness {
+    pub lufs: f64,
+    pub peak_db: f64,
+}
+
+// Opus players compare against -23 LUFS and everything else against -18.
+const R128_TARGET: f64 = -23.0;
+const REPLAYGAIN_TARGET: f64 = -18.0;
+
+// Reads the two numbers out of ffmpeg's closing summary, ignoring the per-100ms lines before it.
+fn parse_loudness(log: &str) -> Option<Loudness> {
+    // The last one: a tag in the file's own metadata dump can say "Summary:" too.
+    let summary = log.rsplit("Summary:").next().filter(|_| log.contains("Summary:"))?;
+    let number = |label: &str, unit: &str| -> Option<f64> {
+        let line = summary.lines().map(str::trim).find(|l| l.starts_with(label))?;
+        line.strip_prefix(label)?.trim().strip_suffix(unit)?.trim().parse().ok()
+    };
+    let (lufs, peak_db) = (number("I:", "LUFS")?, number("Peak:", "dBFS")?);
+    // Silence reads "-inf", which parses as a number and means there is nothing to level.
+    (lufs.is_finite() && peak_db.is_finite()).then_some(Loudness { lufs, peak_db })
+}
+
+pub fn measure(path: &Path) -> Result<Loudness> {
+    // A file, not a pipe, for the reason `transcode` gives.
+    let log = std::env::temp_dir().join(format!(
+        "earworm-loudness-{}-{:?}.log",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let errors = std::fs::File::create(&log).context("cannot write a scratch log")?;
+    let mut cmd = std::process::Command::new("ffmpeg");
+    cmd.args(["-nostats", "-hide_banner", "-i"])
+        .arg(path)
+        .args(["-vn", "-af", "ebur128=peak=true:framelog=quiet", "-f", "null", "-"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(errors));
+    let outcome = lookup::run_bounded(&mut cmd, MEASURE);
+    let text = std::fs::read_to_string(&log).unwrap_or_default();
+    let _ = std::fs::remove_file(&log);
+    match outcome {
+        Some(out) if out.status.success() => {
+            parse_loudness(&text).context("no loudness in the file (silent, or too short to measure)")
+        }
+        Some(_) => anyhow::bail!("ffmpeg could not read the audio"),
+        None => anyhow::bail!("measuring did not finish within {}s", MEASURE.as_secs()),
+    }
+}
+
+// Opus keeps its gain in the R128 tags as a Q7.8 integer; every other format uses ReplayGain text.
+fn gain_tags(loud: Loudness, opus: bool) -> Vec<(Extra, String)> {
+    if opus {
+        let q78 = ((R128_TARGET - loud.lufs) * 256.0).round() as i32;
+        return vec![(Extra::R128TrackGain, q78.to_string())];
+    }
+    let peak = 10f64.powf(loud.peak_db / 20.0);
+    vec![
+        (Extra::TrackGain, format!("{:.2} dB", REPLAYGAIN_TARGET - loud.lufs)),
+        (Extra::TrackPeak, format!("{peak:.6}")),
+    ]
+}
+
+// Energy mean, weighted by length, of per-track integrated loudness: the closest an album can get without decoding it whole.
+fn album_lufs(tracks: &[(f64, f64)]) -> Option<f64> {
+    let total: f64 = tracks.iter().map(|(_, weight)| weight).sum();
+    if tracks.is_empty() || total <= 0.0 {
+        return None;
+    }
+    let energy: f64 = tracks.iter().map(|(lufs, weight)| weight * 10f64.powf(lufs / 10.0)).sum();
+    Some(10.0 * (energy / total).log10())
+}
+
+// A track's measurement read back out of its gain tags, so the album pass decodes nothing.
+fn stored_loudness(path: &Path) -> Result<Option<(f64, Option<f64>)>> {
+    if let Some(q78) = extra(path, Extra::R128TrackGain)? {
+        let q78: f64 = q78.parse().context("unreadable R128_TRACK_GAIN")?;
+        return Ok(Some((R128_TARGET - q78 / 256.0, None)));
+    }
+    let Some(gain) = extra(path, Extra::TrackGain)? else {
+        return Ok(None);
+    };
+    let gain: f64 = gain.trim_end_matches("dB").trim().parse().context("unreadable REPLAYGAIN_TRACK_GAIN")?;
+    let peak = extra(path, Extra::TrackPeak)?.and_then(|p| p.parse().ok());
+    Ok(Some((REPLAYGAIN_TARGET - gain, peak)))
+}
+
+/// Writes one album gain to every file that has a track gain. Returns how many
+/// files changed and how many were skipped as unreadable; a file already
+/// carrying the right value is left alone, so a rerun is tag reads only and a
+/// track added later moves the whole album.
+pub fn write_album_loudness(paths: &[&Path]) -> (usize, usize) {
+    let mut skipped = 0;
+    let mut measured = Vec::new();
+    for path in paths {
+        let found = stored_loudness(path).and_then(|found| match found {
+            // A zero-length file would carry no weight, and one second keeps it in the mean.
+            Some((lufs, peak)) => Ok(Some((*path, lufs, peak, (read(path)?.duration as f64).max(1.0)))),
+            None => Ok(None),
+        });
+        match found {
+            Ok(Some(track)) => measured.push(track),
+            Ok(None) => {}
+            Err(_) => skipped += 1,
+        }
+    }
+    let weighted: Vec<(f64, f64)> = measured.iter().map(|(_, l, _, w)| (*l, *w)).collect();
+    let Some(album) = album_lufs(&weighted) else {
+        return (0, skipped);
+    };
+    let peak = measured.iter().filter_map(|(_, _, p, _)| *p).fold(None, |a: Option<f64>, p| Some(a.map_or(p, |a| a.max(p))));
+    let mut changed = 0;
+    for (path, _, _, _) in measured {
+        let written = (|| -> Result<bool> {
+            let opus = extra(path, Extra::R128TrackGain)?.is_some();
+            let mut want = if opus {
+                vec![(Extra::R128AlbumGain, (((R128_TARGET - album) * 256.0).round() as i32).to_string())]
+            } else {
+                vec![(Extra::AlbumGain, format!("{:.2} dB", REPLAYGAIN_TARGET - album))]
+            };
+            if let (false, Some(peak)) = (opus, peak) {
+                want.push((Extra::AlbumPeak, format!("{peak:.6}")));
+            }
+            if want.iter().all(|(which, value)| extra(path, *which).ok().flatten().as_deref() == Some(value)) {
+                return Ok(false);
+            }
+            set_extras(path, &want)?;
+            Ok(true)
+        })();
+        match written {
+            Ok(true) => changed += 1,
+            Ok(false) => {}
+            Err(_) => skipped += 1,
+        }
+    }
+    (changed, skipped)
+}
+
+/// Measures the file and writes its track gain. `false` means it already had
+/// one, so a rerun costs a tag read and no ffmpeg, and another tool's value stays.
+pub fn write_loudness(path: &Path) -> Result<bool> {
+    use lofty::file::FileType;
+    let opus = open(path)?.file_type() == FileType::Opus;
+    let marker = if opus { Extra::R128TrackGain } else { Extra::TrackGain };
+    if extra(path, marker)?.is_some() {
+        return Ok(false);
+    }
+    set_extras(path, &gain_tags(measure(path)?, opus))?;
+    Ok(true)
 }
 
 /* `alac` and `m4a` both write `.m4a`, so the extension cannot say which one
@@ -798,6 +1021,199 @@ mod tests {
 
     use crate::lookup;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn extra_tags_round_trip_in_every_container_earworm_downloads() {
+        let dir = std::env::temp_dir().join(format!("earworm-extras-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let lyrics = "Fahren fahren fahren\nauf der Autobahn\n\n\u{1f697} caf\u{e9}";
+        let mut ran = 0;
+        for (format, ext, codecs) in crate::config::FORMATS {
+            let file = dir.join(format!("{format}.{ext}"));
+            if bare(&file, codecs).is_none() {
+                eprintln!("skipped {ext}: ffmpeg could not write it");
+                continue;
+            }
+            ran += 1;
+            let wrote = [
+                (Extra::TrackGain, "-6.20 dB"),
+                (Extra::TrackPeak, "0.977"),
+                (Extra::AlbumGain, "-5.10 dB"),
+                (Extra::AlbumPeak, "0.991"),
+                (Extra::Lyrics, lyrics),
+            ];
+            for (which, value) in wrote {
+                set_extra(&file, which, value).unwrap_or_else(|e| panic!("{ext} {which:?}: {e}"));
+            }
+            for (which, value) in wrote {
+                assert_eq!(extra(&file, which).unwrap().as_deref(), Some(value), "{ext} {which:?}");
+            }
+            // Writing one must not have disturbed the identity fields.
+            set_fields(&file, &Fields { artist: "A".into(), title: "T".into(), ..Fields::default() }).unwrap();
+            assert_eq!(extra(&file, Extra::Lyrics).unwrap().as_deref(), Some(lyrics), "{ext} lost lyrics to set_fields");
+
+            set_extra(&file, Extra::Lyrics, "").unwrap();
+            assert_eq!(extra(&file, Extra::Lyrics).unwrap(), None, "{ext} kept removed lyrics");
+            assert_eq!(extra(&file, Extra::TrackGain).unwrap().as_deref(), Some("-6.20 dB"), "{ext}");
+
+            if ext == "opus" {
+                set_extra(&file, Extra::R128TrackGain, "-1536").unwrap();
+                assert_eq!(extra(&file, Extra::R128TrackGain).unwrap().as_deref(), Some("-1536"));
+            }
+        }
+        assert!(ran > 0, "no encoder was available for any format");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn loudness_is_read_from_the_summary_and_not_the_running_lines() {
+        let log = "[Parsed_ebur128_0 @ 0x1] t: 2.9  I: -99.0 LUFS  TPK: -1.0 dBFS\n\
+                   [Parsed_ebur128_0 @ 0x1] Summary:\n\n  Integrated loudness:\n    I:         -21.8 LUFS\n\
+                   \n  True peak:\n    Peak:      -17.9 dBFS\n";
+        assert_eq!(parse_loudness(log), Some(Loudness { lufs: -21.8, peak_db: -17.9 }));
+        // Silence prints -inf, and a file shorter than a block prints no summary at all.
+        let silent = "Summary:\n    I:         -inf LUFS\n    Peak:      -inf dBFS\n";
+        assert_eq!(parse_loudness(silent), None);
+        assert_eq!(parse_loudness("no summary here"), None);
+    }
+
+    // Opus is against -23 LUFS in Q7.8 and the rest against -18 in dB. Swapping them is the likely mistake.
+    #[test]
+    fn the_two_reference_levels_are_not_swapped() {
+        let at = |lufs| Loudness { lufs, peak_db: -6.0206 };
+        assert_eq!(gain_tags(at(-23.0), true), vec![(Extra::R128TrackGain, "0".into())]);
+        assert_eq!(gain_tags(at(-29.0), true), vec![(Extra::R128TrackGain, "1536".into())]);
+        assert_eq!(gain_tags(at(-18.0), true), vec![(Extra::R128TrackGain, "-1280".into())]);
+        let plain = gain_tags(at(-18.0), false);
+        assert_eq!(plain[0], (Extra::TrackGain, "0.00 dB".into()));
+        assert_eq!(plain[1], (Extra::TrackPeak, "0.500000".into()));
+        assert_eq!(gain_tags(at(-23.0), false)[0].1, "5.00 dB");
+        assert_eq!(gain_tags(at(-14.5), false)[0].1, "-3.50 dB");
+    }
+
+    // A tone, so there is something to measure; the silent fixtures read -inf.
+    fn tone(at: &Path, codecs: &[&str]) -> bool {
+        quiet_tone(at, codecs, 0)
+    }
+
+    fn quiet_tone(at: &Path, codecs: &[&str], db: i32) -> bool {
+        codecs.iter().any(|codec| {
+            std::process::Command::new("ffmpeg")
+                .args(["-v", "error", "-f", "lavfi", "-i"])
+                .arg(format!("sine=f=440:d=3,volume={db}dB"))
+                .args(["-ac", "2", "-map_metadata", "-1", "-c:a", codec, "-strict", "-2", "-y"])
+                .arg(at)
+                .status()
+                .is_ok_and(|s| s.success())
+        })
+    }
+
+    #[test]
+    fn loudness_is_written_once_in_every_container_earworm_downloads() {
+        let dir = std::env::temp_dir().join(format!("earworm-loud-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ran = 0;
+        for (format, ext, codecs) in crate::config::FORMATS {
+            let file = dir.join(format!("{format}.{ext}"));
+            if !tone(&file, codecs) {
+                eprintln!("skipped {ext}: ffmpeg could not write it");
+                continue;
+            }
+            ran += 1;
+            let measured = measure(&file).unwrap_or_else(|e| panic!("{ext}: {e}"));
+            // A 440 Hz sine at ffmpeg's default amplitude, give or take the codec.
+            assert!((measured.lufs + 21.8).abs() < 1.0, "{ext}: {measured:?}");
+            assert!(write_loudness(&file).unwrap(), "{ext}: nothing written");
+            let (marker, want) = if format == "opus" {
+                (Extra::R128TrackGain, ((R128_TARGET - measured.lufs) * 256.0).round())
+            } else {
+                (Extra::TrackGain, REPLAYGAIN_TARGET - measured.lufs)
+            };
+            let got: f64 = extra(&file, marker).unwrap().unwrap_or_else(|| panic!("{ext}: no tag"))
+                .trim_end_matches(" dB").parse().unwrap();
+            let tolerance = if format == "opus" { 26.0 } else { 0.1 };
+            assert!((got - want).abs() <= tolerance, "{ext}: wrote {got}, measured {want}");
+            assert!(!write_loudness(&file).unwrap(), "{ext}: measured twice");
+        }
+        assert!(ran > 0, "no encoder was available for any format");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_album_is_the_energy_mean_weighted_by_length() {
+        assert_eq!(album_lufs(&[]), None);
+        let same = album_lufs(&[(-20.0, 200.0), (-20.0, 100.0)]).unwrap();
+        assert!((same + 20.0).abs() < 1e-9, "{same}");
+        // The louder track dominates an energy mean: -22.6, not the -25 an arithmetic mean gives.
+        let mixed = album_lufs(&[(-20.0, 100.0), (-30.0, 100.0)]).unwrap();
+        assert!((mixed + 22.596).abs() < 0.001, "{mixed}");
+        // Length counts: nine quiet minutes against one loud one.
+        let long = album_lufs(&[(-20.0, 60.0), (-30.0, 540.0)]).unwrap();
+        assert!(long < mixed - 3.0, "{long}");
+    }
+
+    #[test]
+    fn a_metadata_line_saying_summary_does_not_hide_the_real_one() {
+        let log = "    comment         : Summary: a note\n\
+                   [Parsed_ebur128_0 @ 0x1] Summary:\n    I:         -21.8 LUFS\n    Peak:      -17.9 dBFS\n";
+        assert_eq!(parse_loudness(log), Some(Loudness { lufs: -21.8, peak_db: -17.9 }));
+    }
+
+    #[test]
+    fn one_unreadable_track_does_not_cost_the_album_its_gain() {
+        let dir = std::env::temp_dir().join(format!("earworm-albumskip-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.flac"), dir.join("b.flac"));
+        let codecs = crate::config::encoders("flac");
+        if !tone(&a, codecs) || !tone(&b, codecs) {
+            eprintln!("skipped: ffmpeg could not write flac");
+            std::fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+        write_loudness(&a).unwrap();
+        // What another tool might leave behind: a gain no parser reads.
+        set_extra(&b, Extra::TrackGain, "-3,2 dB").unwrap();
+        assert_eq!(write_album_loudness(&[a.as_path(), b.as_path()]), (1, 1));
+        assert!(extra(&a, Extra::AlbumGain).unwrap().is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_album_gain_is_shared_by_every_track_and_written_once() {
+        let dir = std::env::temp_dir().join(format!("earworm-album-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ran = 0;
+        for (format, ext, codecs) in crate::config::FORMATS {
+            if format != "opus" && format != "flac" {
+                continue;
+            }
+            let (loud, quiet) = (dir.join(format!("loud.{ext}")), dir.join(format!("quiet.{ext}")));
+            if !quiet_tone(&loud, codecs, 0) || !quiet_tone(&quiet, codecs, -12) {
+                eprintln!("skipped {ext}: ffmpeg could not write it");
+                continue;
+            }
+            ran += 1;
+            let (a, b) = (loud.as_path(), quiet.as_path());
+            write_loudness(a).unwrap();
+            write_loudness(b).unwrap();
+            assert_eq!(write_album_loudness(&[a, b]), (2, 0), "{ext}");
+            let key = if format == "opus" { Extra::R128AlbumGain } else { Extra::AlbumGain };
+            let (one, two) = (extra(a, key).unwrap(), extra(b, key).unwrap());
+            assert!(one.is_some() && one == two, "{ext}: {one:?} vs {two:?}");
+            if format == "flac" {
+                // Both tracks share one peak: the louder one's.
+                assert_eq!(extra(a, Extra::AlbumPeak).unwrap(), extra(a, Extra::TrackPeak).unwrap());
+                assert_eq!(extra(b, Extra::AlbumPeak).unwrap(), extra(a, Extra::TrackPeak).unwrap());
+            }
+            assert_eq!(write_album_loudness(&[a, b]), (0, 0), "{ext}: rewrote an unchanged album");
+        }
+        assert!(ran > 0, "no encoder was available for any format");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     /* Silent, untagged and in whatever container the codec implies, which is
        the case `with_tag` has to insert a tag for. Several candidates per

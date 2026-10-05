@@ -77,6 +77,7 @@ turns out to be 361 tracks of seminar recordings.
 | [docs/configuration.md](docs/configuration.md) | the config file, every flag |
 | [docs/workflow.md](docs/workflow.md) | picks, filters, fixing tags, retry |
 | [docs/formats.md](docs/formats.md) | opus, mp3, flac, and what converts |
+| [docs/loudness.md](docs/loudness.md) | ReplayGain and R128 tags, so tracks play at one volume |
 | [docs/library.md](docs/library.md) | the library screen, search, `--resync` |
 | [docs/playback.md](docs/playback.md) | playing through cliamp |
 | [docs/themes.md](docs/themes.md) | the four palettes, `^t`, and defining your own |
