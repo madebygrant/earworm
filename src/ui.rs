@@ -1,8 +1,9 @@
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::buffer::Buffer;
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
+use ratatui::widgets::{Widget as _, 
     Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
     ScrollbarState,
 };
@@ -128,13 +129,47 @@ const CHEST: [&str; 5] = [
     "│                 │",
     "╰─────────────────╯",
 ];
-const STAR: [&str; 5] = [
-    "        ▲        ",
-    "▁▁▁▁▁▁▁╱ ╲▁▁▁▁▁▁▁",
-    "  ╲           ╱  ",
-    "   ╲   ╱▔╲   ╱   ",
-    "    ╲╱     ╲╱    ",
-];
+const STAR_COLS: u16 = 17;
+const STAR_ROWS: u16 = 5;
+
+// A filled five-point star on ratatui's braille canvas: two dots per column and four per row.
+fn star() -> Vec<String> {
+    use ratatui::widgets::canvas::{Canvas, Line};
+    let (w, h) = (f64::from(STAR_COLS) * 2.0, f64::from(STAR_ROWS) * 4.0);
+    let (cx, cy, outer, inner) = (w / 2.0, 8.0, 11.0, 4.4);
+    let point = |i: usize| {
+        let radius = if i % 2 == 0 { outer } else { inner };
+        let angle = std::f64::consts::FRAC_PI_2 + i as f64 * std::f64::consts::PI / 5.0;
+        (cx + radius * angle.cos(), cy + radius * angle.sin())
+    };
+    let corners: Vec<(f64, f64)> = (0..10).map(point).collect();
+    let canvas = Canvas::default()
+        .marker(ratatui::symbols::Marker::Braille)
+        .x_bounds([0.0, w])
+        .y_bounds([0.0, h])
+        .paint(|ctx| {
+            // Half-dot steps so no row of dots is skipped between scanlines.
+            let mut y = 0.0;
+            while y < h {
+                let mut xs: Vec<f64> = (0..10)
+                    .filter_map(|i| {
+                        let ((x1, y1), (x2, y2)) = (corners[i], corners[(i + 1) % 10]);
+                        ((y1 <= y) != (y2 <= y)).then(|| x1 + (y - y1) / (y2 - y1) * (x2 - x1))
+                    })
+                    .collect();
+                xs.sort_by(f64::total_cmp);
+                for pair in xs.chunks_exact(2) {
+                    let (x1, x2, color) = (pair[0], pair[1], Color::Reset);
+                    ctx.draw(&Line { x1, y1: y, x2, y2: y, color });
+                }
+                y += 0.5;
+            }
+        });
+    let area = Rect::new(0, 0, STAR_COLS, STAR_ROWS);
+    let mut buf = Buffer::empty(area);
+    canvas.render(area, &mut buf);
+    (0..STAR_ROWS).map(|y| (0..STAR_COLS).map(|x| buf[(x, y)].symbol()).collect()).collect()
+}
 const REWARD_WIDTH: u16 = 36;
 /// Labels shown in one achievement popup; the rest are counted.
 const SHOWN: usize = 3;
@@ -190,8 +225,12 @@ fn draw_reward(frame: &mut Frame, ms: u64, pop: &Pop, p: Palette) {
     let inner = REWARD_WIDTH.min(frame.area().width).saturating_sub(2) as usize;
     let centre = |text: &str| " ".repeat(inner.saturating_sub(cols(text)) / 2);
     let fit = |text: &str| truncate(text, inner.saturating_sub(2));
-    let art_rows = if pop.chest { CHEST } else { STAR };
-    let span = cols(art_rows[0]);
+    let art_rows: Vec<String> = if pop.chest {
+        CHEST.iter().map(|row| row.to_string()).collect()
+    } else {
+        star()
+    };
+    let span = cols(&art_rows[0]);
 
     // Every cell on its own phase, so the sparkles twinkle rather than march.
     let beat = ms / 120;
@@ -229,11 +268,11 @@ fn draw_reward(frame: &mut Frame, ms: u64, pop: &Pop, p: Palette) {
                     Span::styled(right, Style::new().fg(p.warn)),
                 ]
             }
-            (true, _) => vec![Span::styled(*rowart, Style::new().fg(p.warn))],
+            (true, _) => vec![Span::styled(rowart.as_str(), Style::new().fg(p.warn))],
             // The star breathes between its two colours.
             (false, _) => {
                 let lit = if pulse > 0.5 { p.accent } else { p.warn };
-                vec![Span::styled(*rowart, Style::new().fg(lit))]
+                vec![Span::styled(rowart.as_str(), Style::new().fg(lit))]
             }
         };
         lines.push(Line::from([vec![Span::raw(centre(rowart))], spans].concat()));
@@ -2693,7 +2732,7 @@ mod tests {
     fn an_achievement_is_a_star_with_its_label_and_what_you_did() {
         use crate::achievements::Achievement::*;
         let one = popup_of(vec![OnAir], 24);
-        for want in ["★ achievement ★", "on air", "played a folder in cliamp", "▲", "any key to carry on"] {
+        for want in ["★ achievement ★", "on air", "played a folder in cliamp", "⣿", "any key to carry on"] {
             assert!(one.contains(want), "{want}: {one}");
         }
         assert!(!one.contains('◆'), "the chest is the cheat popup's: {one}");
@@ -2710,7 +2749,7 @@ mod tests {
     fn a_short_terminal_keeps_the_words_and_drops_the_star() {
         let short = popup_of(vec![crate::achievements::Achievement::OnAir], 10);
         assert!(short.contains("on air") && short.contains("★ achievement ★"), "{short}");
-        assert!(!short.contains('▲'), "{short}");
+        assert!(!short.contains('⣿'), "{short}");
     }
 
     // Break it by padding to `group` alone: the library's labels are shorter than "earned".
