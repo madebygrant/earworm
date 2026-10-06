@@ -84,3 +84,16 @@ yet. It is what a design has to start from.
   tried.
 - ffmpeg warns "Referenced QT chapter track not found" on an m4a that carries
   chapter metadata. The cut still came out right.
+
+## Library icons
+
+- Not measured: the glyph table was chosen from the plan's candidates without
+  rendering them in a terminal. `●`, `▤` and `◆` are one cell wide by
+  `unicode-width`, which `every_glyph_is_one_cell_wide` checks, and that is
+  not the same as a font drawing them one cell wide.
+- Not measured: `tb-tui-common`'s `font_probe`, so there is no detection.
+- The `nerd` tier was added after `●▤◆` still drew small. Codepoints are
+  `md-album` f0025, `md-playlist_music` f0cb8 and `md-folder_music` f1359,
+  read from Nerd Fonts' glyphnames.json. Not yet looked at in a patched font.
+- `◉`, `≡` and `⌂` drew small in the first real terminal, so they became `●`,
+  `▤` and `◆`, bold. `☰` was tried and is two cells wide by `unicode-width`.

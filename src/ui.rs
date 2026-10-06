@@ -10,6 +10,7 @@ use ratatui::widgets::{Widget as _,
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{self, App, Confirm, Player, Prompt, Shelf, Status, View};
+use crate::icons::Icons;
 use crate::manifest;
 
 use crate::theme::{self, Palette};
@@ -778,7 +779,20 @@ fn draw_found(frame: &mut Frame, app: &mut App, area: Rect) {
    four themes. It punches through the gradient like the band does, which for
    seven columns is the point rather than a cost. The word is what carries it,
    so nothing here is told apart by colour alone. */
-fn kind_pill(kind: Option<manifest::Kind>, slot: bool, p: Palette) -> Vec<Span<'static>> {
+fn kind_pill(
+    icons: Icons,
+    kind: Option<manifest::Kind>,
+    slot: bool,
+    p: Palette,
+) -> Vec<Span<'static>> {
+    if let Some(glyph) = icons.kind(kind) {
+        // Every row, so the slot is the same width whatever the library holds.
+        let tail = if icons == Icons::Nerd { " " } else { "" };
+        return vec![Span::styled(
+            format!(" {glyph}{tail}"),
+            Style::new().fg(p.accent).add_modifier(Modifier::BOLD),
+        )];
+    }
     if !slot {
         return Vec::new();
     }
@@ -853,8 +867,14 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
        Taken out for the album alone: a `[playlist]` marker has no pill beside
        it and the name is the only place that answer is on screen. The folder
        is not renamed and `e` still opens on the name it really has. */
-    let shown = |shelf: &Shelf| match shelf.kind {
-        Some(manifest::Kind::Album) => manifest::without_marker(&shelf.name, manifest::Kind::Album),
+    let icons = app.icons;
+    let shown = |shelf: &Shelf| match (icons, shelf.kind) {
+        // An icon says the kind for both, so a `[playlist]` marker repeats it too.
+        (Icons::Symbols | Icons::Nerd, _) => {
+            let once = manifest::without_marker(&shelf.name, manifest::Kind::Album);
+            manifest::without_marker(&once, manifest::Kind::Playlist)
+        }
+        (_, Some(manifest::Kind::Album)) => manifest::without_marker(&shelf.name, manifest::Kind::Album),
         _ => shelf.name.clone(),
     };
     let longest = rows
@@ -869,7 +889,11 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
     let slot = rows
         .iter()
         .any(|pos| app.library[*pos].kind == Some(manifest::Kind::Album));
-    let fixed = 40 + if slot { KIND_WIDTH } else { 0 };
+    let kind_width = match icons {
+        Icons::Text if slot => KIND_WIDTH,
+        _ => icons.slot(),
+    };
+    let fixed = 40 + kind_width;
     let name_width = longest.min(width.saturating_sub(fixed).max(12));
 
     let items: Vec<ListItem> = rows
@@ -887,7 +911,7 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
                 // for "this is the folder Enter opens".
                 Span::styled(format!(" {name}{:pad$}", ""), row_style(row == selected, p)),
             ];
-            spans.extend(kind_pill(shelf.kind, slot, p));
+            spans.extend(kind_pill(icons, shelf.kind, slot, p));
             spans.extend([
                 /* Two cells whether or not anything is playing, so the columns
                    after it do not step sideways as cliamp starts and stops. */
@@ -923,7 +947,13 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
                     spans.push(dim(format!("  synced {}", manifest::ago(at)), p));
                 }
                 (Some(_), None) => spans.push(dim("  never synced", p)),
-                (None, _) => spans.extend([Span::raw("  "), pill(" local ", p)]),
+                (None, _) => match icons.local() {
+                    Some(glyph) => spans.extend([
+                        Span::raw("  "),
+                        Span::styled(glyph, Style::new().fg(p.accent).add_modifier(Modifier::BOLD)),
+                    ]),
+                    None => spans.extend([Span::raw("  "), pill(" local ", p)]),
+                },
             }
             ListItem::new(Line::from(spans))
         })
@@ -1778,6 +1808,18 @@ fn draw_help(frame: &mut Frame, app: &App) {
                 pad = (slots - statuses.len()) * 9 + 2
             ), p));
             lines.push(Line::from(spans));
+        }
+    }
+    // The library's counterpart of the status legend, and it gives way the same way.
+    let marks = app.icons.legend();
+    if app.view == View::Library && !marks.is_empty() && fits(lines.len() + tail.len() + marks.len() + 1) {
+        lines.push(Line::default());
+        for (n, (glyph, gloss)) in marks.iter().enumerate() {
+            lines.push(Line::from(vec![
+                Span::styled(format!(" {:group$}", if n == 0 { "icons" } else { "" }), Style::new().fg(p.muted)),
+                Span::styled(format!("{glyph:<3}"), Style::new().fg(p.accent)),
+                dim(*gloss, p),
+            ]));
         }
     }
     /* Next to give way after the legend, and for the same reason: the keys
@@ -3299,8 +3341,13 @@ mod tests {
     }
 
     fn library_of(shelves: Vec<Shelf>) -> ratatui::buffer::Buffer {
+        library_with(crate::icons::Icons::Text, shelves)
+    }
+
+    fn library_with(icons: crate::icons::Icons, shelves: Vec<Shelf>) -> ratatui::buffer::Buffer {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(tx, "settings".into());
+        app.icons = icons;
         app.apply(Msg::Library { shelves, show: true });
         app.intro_done = true;
         let mut terminal = Terminal::new(TestBackend::new(120, 12)).unwrap();
@@ -3403,6 +3450,58 @@ mod tests {
             col_of(&without, "tracks"),
             col_of(&with, "tracks"),
             "the slot was reserved with no album on screen"
+        );
+    }
+
+    // Break the slot width in `kind_pill` and the `tracks` columns stop matching.
+    #[test]
+    fn symbols_mark_every_row_and_keep_the_columns() {
+        let mut found = kinded("Found [playlist]", None);
+        found.url = None;
+        let buffer = library_with(
+            crate::icons::Icons::Symbols,
+            vec![
+                kinded("Autobahn [album]", Some(crate::manifest::Kind::Album)),
+                kinded("Chill Evenings", None),
+                found,
+            ],
+        );
+        let rows = [row_text(&buffer, 2), row_text(&buffer, 3), row_text(&buffer, 4)];
+        assert!(rows[0].contains('●'), "{:?}", rows[0]);
+        assert!(rows[1].contains('▤'), "a playlist went unmarked: {:?}", rows[1]);
+        assert!(rows[2].contains('▤') && rows[2].contains('◆'), "{:?}", rows[2]);
+        for row in &rows {
+            assert!(!row.contains("album") && !row.contains("[playlist]") && !row.contains("local"), "{row:?}");
+        }
+        let at = col_of(&rows[0], "●").unwrap() as u16;
+        assert_eq!(buffer[(at, 2)].style().fg, Some(crate::theme::WARM.accent));
+        let tracks = col_of(&rows[0], "tracks");
+        assert!(rows.iter().all(|r| col_of(r, "tracks") == tracks), "{rows:?}");
+    }
+
+    #[test]
+    fn nerd_icons_keep_the_columns_with_a_cell_to_spare() {
+        let buffer = library_with(
+            crate::icons::Icons::Nerd,
+            vec![
+                kinded("Autobahn", Some(crate::manifest::Kind::Album)),
+                kinded("Chill Evenings", None),
+            ],
+        );
+        let (album, playlist) = (row_text(&buffer, 2), row_text(&buffer, 3));
+        assert!(album.contains('\u{f0025}') && playlist.contains('\u{f0cb8}'), "{album:?}\n{playlist:?}");
+        assert_eq!(col_of(&album, "tracks"), col_of(&playlist, "tracks"), "{album:?}\n{playlist:?}");
+        // One more than symbols, for the trailing space.
+        let symbols = library_with(
+            crate::icons::Icons::Symbols,
+            vec![
+                kinded("Autobahn", Some(crate::manifest::Kind::Album)),
+                kinded("Chill Evenings", None),
+            ],
+        );
+        assert_eq!(
+            col_of(&album, "tracks").unwrap(),
+            col_of(&row_text(&symbols, 2), "tracks").unwrap() + 1
         );
     }
 

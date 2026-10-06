@@ -115,6 +115,15 @@ whichever way earworm arrived at the answer, so a release it recognised by its
 id is as visible as one you marked. A playlist wears nothing, and a library
 with no album in it draws exactly as it did before.
 
+With `icons = "symbols"`, the default, the library draws icons instead:
+`●` for an album, `▤` for a playlist and `◆` for a folder with no URL, and
+the library's `h` lists them. Every row gets a kind icon, so `[playlist]` is
+dropped from the name as `[album]` is. Set `icons = "nerd"` for larger Nerd Font glyphs, which need a patched
+terminal font and show as boxes without one. Set `icons = "text"` in the
+config for the pills and words above, which is the layout earworm had before icons. Your
+font needs those three glyphs; most have them, and `earworm --check` names the
+tier in use.
+
 A folder you marked `[album]` yourself shows the pill instead of the word, not
 both. Only that row is shortened: the folder keeps its name, `e` opens on the
 real one, and `/[album]` still finds it.

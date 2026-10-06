@@ -3,6 +3,7 @@ mod app;
 mod cheats;
 mod config;
 mod deps;
+mod icons;
 mod lookup;
 mod manifest;
 mod player;
@@ -52,6 +53,7 @@ fn main() -> Result<()> {
        draw, and `^t` is the one setting the UI writes back by itself, which
        is why the path it writes to comes across here too. */
     let (theme, overridden) = (cfg.theme, cfg.theme_overridden);
+    let icons = cfg.icons;
     let (theme_name, themes) = (cfg.theme_name.clone(), cfg.themes.clone());
     let theme_warnings = cfg.theme_warnings.clone();
     let config_file = cfg.config_file.clone();
@@ -94,6 +96,7 @@ fn main() -> Result<()> {
     // The worker owns the config by now, so this is read across before it goes.
     app.format = format;
     app.theme = theme;
+    app.icons = icons;
     app.theme_name = theme_name;
     app.themes = themes;
     app.theme_overridden = overridden;
@@ -242,6 +245,7 @@ fn check(cfg: &Config) -> Result<()> {
         format: &cfg.format,
         extension: config::extension(&cfg.format),
         theme: &theme_row,
+        icons: cfg.icons.name(),
         theme_warnings: &cfg.theme_warnings,
         graphics: &graphics,
         dir: &dir,

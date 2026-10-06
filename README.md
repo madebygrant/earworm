@@ -55,6 +55,9 @@ download from a music library:
   Every shipped colour clears WCAG 4.5:1 on its own background, including the
   light theme for terminals the other three are unreadable on, and a
   [palette of your own](docs/themes.md) gets the same numbers run over it.
+- **Icons for the library.** `●` marks an album, `▤` a playlist and `◆` a
+  folder earworm did not download. `icons = "nerd"` draws larger Nerd Font glyphs, and `icons = "text"` goes
+  back to words.
 - **Retries and undos.** `r` re-downloads whatever failed. `u` puts back the
   last tag edit.
 

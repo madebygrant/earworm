@@ -846,6 +846,8 @@ pub struct App {
        in the registry: the name is the base the overrides were painted on,
        which is both what `^t` walks from and what gets written back. */
     pub theme_name: String,
+    // Text until `main` sets it, so tests draw the layout that predates icons.
+    pub icons: crate::icons::Icons,
     /// Every palette `^t` can reach: the built-ins plus any `[themes.*]`.
     pub themes: Themes,
     /* How this terminal draws pictures, answered once at startup by the
@@ -995,6 +997,7 @@ impl App {
             settings,
             theme: Palette::default(),
             theme_name: crate::config::DEFAULT_THEME.to_string(),
+            icons: crate::icons::Icons::Text,
             themes: Themes::default(),
             picker: None,
             art: None,

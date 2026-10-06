@@ -7464,6 +7464,7 @@ pub mod tests {
             url: String::new(),
             dir: PathBuf::new(),
             theme: crate::theme::Palette::default(),
+            icons: crate::icons::Icons::Text,
             theme_name: crate::config::DEFAULT_THEME.to_string(),
             themes: crate::theme::Themes::default(),
             theme_warnings: Vec::new(),

@@ -617,6 +617,25 @@ than at the start of every session.
   name `WARM.ink` and `WARM.accent`. A row comparison has to count columns
   rather than bytes, too, since the selected row opens with a three-byte
   `▌`.
+- **`icons` picks how the library says a kind, and `text` is the layout above.**
+  `symbols` is the config default and draws `●` for an album, `▤` for a
+  playlist and `◆` for local, in `accent`, which every palette already
+  measures against the gradient. The kind slot is `icons::SLOT` cells on every
+  row, not per draw, so a `symbols` library with no album loses two columns of
+  name where a `text` one loses none: a playlist has an icon, and a slot that
+  came and went would move every column as albums were synced. `shown` strips
+  `[playlist]` as well as `[album]` under `symbols`, since the icon now says
+  both. The tier is a setting and not detected: a Private Use Area glyph is
+  a box in a font without it and nothing reports that. Emoji were rejected,
+  because colour emoji ignore the foreground, which breaks themes, `NO_COLOR`
+  and the 256-colour quantiser, and are two cells wide. `nerd` draws the Material Design album,
+  playlist_music and folder_music glyphs (codepoints checked against Nerd
+  Fonts' glyphnames.json) and is opt-in because it needs a patched font. Its
+  slot is a cell wider, `Icons::slot`, because those glyphs are drawn wider
+  than the one cell `unicode-width` gives them and would touch the next column. `App::new` starts on
+  `text` and only `main` sets the tier, so the pill tests are text-tier tests.
+  Tested by `symbols_mark_every_row_and_keep_the_columns`; the legend rows in
+  the library help are not.
 - **`a` narrows the library by kind, and it is a predicate, not a query.**
   Neither word is in a folder's name, and a folder with no kind is a
   playlist, which no text in the box could say. So `App.only` sits beside the
