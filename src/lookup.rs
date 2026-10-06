@@ -13,6 +13,7 @@ const DEEZER_URL: &str = "https://api.deezer.com/search";
 const ITUNES_URL: &str = "https://itunes.apple.com/search";
 const COVERART_URL: &str = "https://coverartarchive.org/release-group";
 const UA: &str = "earworm/0.1";
+const LRCLIB_URL: &str = "https://lrclib.net/api";
 
 // Below this the fingerprint is a guess, not an identification.
 const ACOUSTID_MIN_SCORE: f64 = 0.8;
@@ -22,6 +23,7 @@ const ACOUSTID_DELAY: Duration = Duration::from_millis(340);
 const DEEZER_DELAY: Duration = Duration::from_millis(200);
 const IMAGE_DELAY: Duration = Duration::from_millis(250);
 const ITUNES_DELAY: Duration = Duration::from_millis(200);
+const LRCLIB_DELAY: Duration = Duration::from_millis(250);
 
 /* What these services ask for is a gap between requests, and a request that
    took longer than the gap has already served it. Sleeping afterwards paid it
@@ -66,6 +68,10 @@ static DEEZER_RATE: Limiter = Limiter::new(DEEZER_DELAY);
    that can carry one, so in practice it costs a restore nothing. */
 static IMAGE_RATE: Limiter = Limiter::new(IMAGE_DELAY);
 static ITUNES_RATE: Limiter = Limiter::new(ITUNES_DELAY);
+static LRCLIB_RATE: Limiter = Limiter::new(LRCLIB_DELAY);
+
+// LRCLIB itself matches within two seconds, and a longer cut is a different recording.
+const LRCLIB_SLACK: f64 = 2.0;
 
 // ureq has no timeout by default, and a stalled lookup would hang the worker
 // with no way to skip the track.
@@ -602,6 +608,76 @@ pub fn downgrades(new: &str, old: &str) -> bool {
     parts.iter().any(|p| !got.contains(&normalise(p)))
 }
 
+/// Plain lyrics for a track, or `None` for no match, an instrumental or a failed
+/// request, which are the same answer to the caller: nothing gets written and
+/// the next sync asks again. LRCLIB's `get` wants an album and a duration, and
+/// most playlist tracks have no album, so a miss or a missing album falls
+/// through to `search`, which is held to the same duration.
+pub fn lyrics(artist: &str, title: &str, album: &str, duration: u64) -> Option<String> {
+    // Without a length there is no telling the studio cut from a live one.
+    if duration == 0 || artist.is_empty() || title.is_empty() {
+        return None;
+    }
+    let exact = (!album.is_empty()).then(|| {
+        LRCLIB_RATE.wait();
+        get_json(&format!(
+            "{LRCLIB_URL}/get?track_name={}&artist_name={}&album_name={}&duration={duration}",
+            encode(title),
+            encode(artist),
+            encode(album)
+        ))
+    });
+    if let Some(found) = exact.flatten().and_then(|hit| lyrics_of(&hit)) {
+        return Some(found);
+    }
+    LRCLIB_RATE.wait();
+    let results = get_json(&format!(
+        "{LRCLIB_URL}/search?track_name={}&artist_name={}",
+        encode(title),
+        encode(artist)
+    ))?;
+    let hit = pick(results.as_array()?, duration)?;
+    lyrics_of(hit)
+}
+
+// The first result within the slack of the track's length that has words to give.
+fn pick(results: &[Value], duration: u64) -> Option<&Value> {
+    results.iter().find(|hit| {
+        hit.get("duration")
+            .and_then(Value::as_f64)
+            .is_some_and(|d| (d - duration as f64).abs() <= LRCLIB_SLACK)
+            && lyrics_of(hit).is_some()
+    })
+}
+
+fn lyrics_of(hit: &Value) -> Option<String> {
+    if hit.get("instrumental").and_then(Value::as_bool) == Some(true) {
+        return None;
+    }
+    let text = |key: &str| hit.get(key).and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty());
+    // Synced text in a plain tag would show its timestamps in a player that does not read them.
+    text("plainLyrics")
+        .map(str::to_string)
+        .or_else(|| text("syncedLyrics").map(strip_timestamps))
+        .filter(|t| !t.is_empty())
+}
+
+// `[01:23.45] words` becomes `words`; a line with no timestamp is kept as it is.
+fn strip_timestamps(synced: &str) -> String {
+    let line = |line: &str| {
+        let mut rest = line.trim_start();
+        while let Some(inner) = rest.strip_prefix('[').and_then(|r| r.split_once(']')) {
+            let (stamp, after) = inner;
+            if !stamp.chars().all(|c| c.is_ascii_digit() || matches!(c, ':' | '.')) {
+                break;
+            }
+            rest = after.trim_start();
+        }
+        rest.to_string()
+    };
+    synced.lines().map(line).collect::<Vec<_>>().join("\n").trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -758,6 +834,46 @@ mod tests {
         };
         assert!(!plausible(&bad, "Boards of Canada", "Roygbiv"));
     }
+
+    #[test]
+    fn synced_lyrics_lose_their_timestamps_and_nothing_else() {
+        let synced = "[00:12.50] Fahren fahren fahren\n[00:15.00] auf der Autobahn\n[00:16.00]\n[01:02.3][01:30.1] twice\n[ar: Kraftwerk]";
+        assert_eq!(
+            strip_timestamps(synced),
+            "Fahren fahren fahren\nauf der Autobahn\n\ntwice\n[ar: Kraftwerk]"
+        );
+    }
+
+    #[test]
+    fn lyrics_prefer_plain_text_and_skip_an_instrumental() {
+        let both = serde_json::json!({"plainLyrics": "plain", "syncedLyrics": "[00:01.00] synced"});
+        assert_eq!(lyrics_of(&both).as_deref(), Some("plain"));
+        let synced = serde_json::json!({"plainLyrics": null, "syncedLyrics": "[00:01.00] synced"});
+        assert_eq!(lyrics_of(&synced).as_deref(), Some("synced"));
+        let instrumental = serde_json::json!({"instrumental": true, "plainLyrics": "words"});
+        assert_eq!(lyrics_of(&instrumental), None);
+        assert_eq!(lyrics_of(&serde_json::json!({"plainLyrics": "  "})), None);
+    }
+
+    // The length is what keeps a live cut or a radio edit's words off the studio track.
+    #[test]
+    fn a_search_result_has_to_match_the_length_and_have_words() {
+        let results = serde_json::json!([
+            {"duration": 330.0, "plainLyrics": "live"},
+            {"duration": 214.0, "plainLyrics": null, "syncedLyrics": null},
+            {"duration": 212.4, "plainLyrics": "studio"},
+        ]);
+        let results = results.as_array().unwrap();
+        assert_eq!(lyrics_of(pick(results, 213).unwrap()).as_deref(), Some("studio"));
+        assert!(pick(results, 100).is_none());
+        assert!(pick(&[], 213).is_none());
+    }
+
+    #[test]
+    fn no_lookup_is_made_without_a_length_or_a_name() {
+        // These return before the network, so they are safe to run anywhere.
+        assert_eq!(lyrics("Kraftwerk", "Autobahn", "Autobahn", 0), None);
+        assert_eq!(lyrics("", "Autobahn", "", 213), None);
+        assert_eq!(lyrics("Kraftwerk", "", "", 213), None);
+    }
 }
-
-

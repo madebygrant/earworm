@@ -911,7 +911,7 @@ fn pipeline(
         one_sleeve: album,
         ..CoverState::default()
     };
-    tag_tracks(cfg, tx, cancel, tracks, &playlist, &asker, &mut cover, None);
+    let extras = tag_tracks(cfg, tx, cancel, tracks, &playlist, &asker, &mut cover, None);
     if album && cfg.loudness && !cancel.load(Ordering::SeqCst) {
         album_loudness(tx, tracks);
     }
@@ -921,6 +921,9 @@ fn pipeline(
     let playlist_file = write_playlist(cfg, tracks)?;
     drop_folder_cover(tracks, &theirs, album);
     let mut summary = summarise(tracks, playlist_file.as_deref());
+    if let Some(line) = extras.said() {
+        summary = format!("{summary}, {line}");
+    }
     /* Said out loud, because the rows scroll off and a --resync's one line
        per folder is the only record anyone reads afterwards. */
     if converted > 0 {
@@ -1704,7 +1707,8 @@ fn tag_tracks(
     asker: &Asker,
     cover: &mut CoverState,
     wanted: Option<&HashSet<usize>>,
-) {
+) -> Extras {
+    let mut extras = Extras::default();
     for track in tracks.iter_mut() {
         if cancel.load(Ordering::SeqCst) {
             break;
@@ -1761,7 +1765,7 @@ fn tag_tracks(
                 });
                 offer_meta(tx, track);
             }
-            enrich(cfg, tx, track, &path);
+            extras.add(enrich(cfg, tx, track, &path));
             continue;
         }
 
@@ -1827,7 +1831,7 @@ fn tag_tracks(
                         let _ = tx.send(Msg::Log(format!("cover: track {}: {err}", track.index)));
                     }
                 }
-                enrich(cfg, tx, track, &path);
+                extras.add(enrich(cfg, tx, track, &path));
                 rename(cfg, tx, track);
             }
             Err(err) => {
@@ -1842,12 +1846,44 @@ fn tag_tracks(
             }
         }
     }
+    extras
+}
 
+// What the optional per-track passes managed, for the summary: a miss is not a failure, so it is counted and not flagged.
+#[derive(Default, Clone, Copy, Debug, PartialEq)]
+struct Extras {
+    lyrics_found: usize,
+    lyrics_missed: usize,
+}
+
+impl Extras {
+    fn add(&mut self, other: Extras) {
+        self.lyrics_found += other.lyrics_found;
+        self.lyrics_missed += other.lyrics_missed;
+    }
+
+    // Only tracks that were searched for count: one that already had words was never asked about.
+    fn said(&self) -> Option<String> {
+        let asked = self.lyrics_found + self.lyrics_missed;
+        (asked > 0).then(|| format!("lyrics found for {} of {asked} searched", self.lyrics_found))
+    }
 }
 
 // Per-track extras written after identification: loudness and lyrics. Runs for tracks already
 // on disk too, so a resync backfills old folders. Both are off by default.
-fn enrich(cfg: &Config, tx: &Sender<Msg>, track: &Track, path: &Path) {
+fn enrich(cfg: &Config, tx: &Sender<Msg>, track: &Track, path: &Path) -> Extras {
+    enrich_with(cfg, tx, track, path, lookup::lyrics)
+}
+
+// Takes the lyrics fetch so a test can count requests without a network.
+fn enrich_with(
+    cfg: &Config,
+    tx: &Sender<Msg>,
+    track: &Track,
+    path: &Path,
+    fetch: impl Fn(&str, &str, &str, u64) -> Option<String>,
+) -> Extras {
+    let mut extras = Extras::default();
     if cfg.loudness {
         match tag::write_loudness(path) {
             Ok(true) => {
@@ -1860,6 +1896,28 @@ fn enrich(cfg: &Config, tx: &Sender<Msg>, track: &Track, path: &Path) {
             }
         }
     }
+    if cfg.lyrics {
+        // Asked before the request: a track that has words never costs one, and a rerun is free.
+        match tag::extra(path, tag::Extra::Lyrics) {
+            Ok(Some(_)) => {}
+            Ok(None) => match fetch(&track.artist, &track.title, &track.album, track.duration) {
+                Some(text) => match tag::set_extra(path, tag::Extra::Lyrics, &text) {
+                    Ok(()) => {
+                        extras.lyrics_found += 1;
+                        let _ = tx.send(Msg::Log(format!("lyrics: track {} found", track.index)));
+                    }
+                    Err(err) => {
+                        let _ = tx.send(Msg::Log(format!("lyrics: track {}: {err}", track.index)));
+                    }
+                },
+                None => extras.lyrics_missed += 1,
+            },
+            Err(err) => {
+                let _ = tx.send(Msg::Log(format!("lyrics: track {}: {err}", track.index)));
+            }
+        }
+    }
+    extras
 }
 
 /// Serves edits and cover changes after the run, so the tracks stay editable
@@ -2518,7 +2576,7 @@ fn retry(
         one_sleeve: album,
         ..CoverState::default()
     };
-    tag_tracks(cfg, tx, cancel, tracks, &playlist, asker, &mut cover, Some(&failed));
+    let extras = tag_tracks(cfg, tx, cancel, tracks, &playlist, asker, &mut cover, Some(&failed));
 
     sync_manifest(cfg, tracks);
     let playlist_file = write_playlist(cfg, tracks)?;
@@ -2539,6 +2597,9 @@ fn retry(
         "{}   [{outcome}]",
         summarise(tracks, playlist_file.as_deref())
     );
+    if let Some(line) = extras.said() {
+        summary = format!("{summary}, {line}");
+    }
     if !warning.is_empty() {
         summary = format!("{summary}   [{warning}]");
     }
@@ -8640,5 +8701,71 @@ mod purge_tests {
         assert!(tag::extra(&file, tag::Extra::TrackGain).unwrap().is_some(), "not written with loudness on");
         assert!(rx.try_iter().any(|m| matches!(m, Msg::Log(l) if l.contains("loudness"))));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn enrich_asks_for_lyrics_only_for_a_track_without_them() {
+        let dir = std::env::temp_dir().join(format!("earworm-lyrics-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("01 - A.flac");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-t", "0.2", "-y"])
+            .arg(&file)
+            .status();
+        if !made.is_ok_and(|s| s.success()) {
+            eprintln!("skipped: ffmpeg could not make a fixture");
+            std::fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+        let mut track = Track::new(1, "a".into(), "01 - A.flac".into(), file.clone());
+        track.artist = "Kraftwerk".into();
+        track.title = "Autobahn".into();
+        track.duration = 213;
+        let (tx, _rx) = mpsc::channel();
+        let calls = std::cell::Cell::new(0);
+        let fetch = |artist: &str, title: &str, _album: &str, duration: u64| {
+            calls.set(calls.get() + 1);
+            assert_eq!((artist, title, duration), ("Kraftwerk", "Autobahn", 213));
+            Some("Fahren fahren fahren".to_string())
+        };
+        let mut cfg = super::tests::config(false);
+
+        super::enrich_with(&cfg, &tx, &track, &file, fetch);
+        assert_eq!(calls.get(), 0, "asked with lyrics off");
+
+        cfg.lyrics = true;
+        let found = super::enrich_with(&cfg, &tx, &track, &file, fetch);
+        assert_eq!(calls.get(), 1);
+        assert_eq!((found.lyrics_found, found.lyrics_missed), (1, 0));
+        assert_eq!(tag::extra(&file, tag::Extra::Lyrics).unwrap().as_deref(), Some("Fahren fahren fahren"));
+
+        // Already has them: a rerun is free, and what is there stays.
+        tag::set_extra(&file, tag::Extra::Lyrics, "mine").unwrap();
+        let had = super::enrich_with(&cfg, &tx, &track, &file, fetch);
+        assert_eq!(had, super::Extras::default(), "a track that had lyrics was counted");
+        assert_eq!(calls.get(), 1, "asked again for a track that had lyrics");
+        assert_eq!(tag::extra(&file, tag::Extra::Lyrics).unwrap().as_deref(), Some("mine"));
+
+        // No answer writes nothing.
+        tag::set_extra(&file, tag::Extra::Lyrics, "").unwrap();
+        let missed = super::enrich_with(&cfg, &tx, &track, &file, |_: &str, _: &str, _: &str, _: u64| None);
+        assert_eq!((missed.lyrics_found, missed.lyrics_missed), (0, 1));
+        assert_eq!(tag::extra(&file, tag::Extra::Lyrics).unwrap(), None);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_summary_counts_lyrics_only_for_tracks_that_were_searched() {
+        let none = super::Extras::default();
+        assert_eq!(none.said(), None, "said something when nothing was asked");
+        let mut sum = none;
+        sum.add(super::Extras { lyrics_found: 1, lyrics_missed: 0 });
+        sum.add(super::Extras { lyrics_found: 0, lyrics_missed: 2 });
+        sum.add(none);
+        assert_eq!(sum.said().as_deref(), Some("lyrics found for 1 of 3 searched"));
+        // Every track missing is still worth saying: it is the line that explains empty tags.
+        let all = super::Extras { lyrics_found: 0, lyrics_missed: 4 };
+        assert_eq!(all.said().as_deref(), Some("lyrics found for 0 of 4 searched"));
     }
 }

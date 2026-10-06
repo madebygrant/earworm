@@ -151,7 +151,6 @@ pub fn set_fields(path: &Path, fields: &Fields) -> Result<()> {
 
 /// A tag beyond the identity fields, mapped to each container's native frame by lofty.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[allow(dead_code)] // Only the lyrics pass, not built yet, writes `Lyrics` outside the tests.
 pub enum Extra {
     TrackGain,
     TrackPeak,
@@ -193,7 +192,6 @@ pub fn extra(path: &Path, which: Extra) -> Result<Option<String>> {
 }
 
 /// An empty value removes the tag, for the reason `set_fields` removes an empty album.
-#[allow(dead_code)] // Lyrics will write through this.
 pub fn set_extra(path: &Path, which: Extra, value: &str) -> Result<()> {
     set_extras(path, &[(which, value.to_string())])
 }

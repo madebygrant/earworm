@@ -10,6 +10,7 @@ dir = "~/Music/playlists"
 format = "opus"    # or m4a, mp3, flac, vorbis, alac
 convert = false    # bring tracks already on disk to `format` when they sync
 loudness = false   # write ReplayGain/R128 loudness tags, see docs/loudness.md
+lyrics = false     # fetch lyrics from LRCLIB and embed them, see docs/lyrics.md
 
 parse = true       # split artist and title out of the video title
 lookup = true      # confirm against AcoustID, Deezer and Apple
@@ -47,6 +48,7 @@ acoustid_key = "..."                # or use ACOUSTID_API_KEY
 | `--theme` | warm, light, cool, neon, or one you defined (default warm) |
 | `--no-convert` | leave tracks already on disk in the format they have |
 | `--no-loudness` | don't write loudness tags, whatever the config says |
+| `--no-lyrics` | don't fetch lyrics, whatever the config says |
 | `-P`, `--no-parse` | keep YouTube's own artist/track, skip title parsing |
 | `-L`, `--no-lookup` | skip AcoustID/Deezer/Apple, keep parsed tags |
 | `--no-apple` | skip the Apple Music fallback, Deezer only |

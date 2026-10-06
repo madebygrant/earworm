@@ -26,7 +26,7 @@ const TITLE_CLEANUP: &str = " *[\\(\\[][^)\\]]*(?i:official|lyric|audio|video|vi
 
 fn output_template(cfg: &Config, ext: &str) -> String {
     format!(
-        "{}/{}/%(playlist_index)02d - %(title)s.{ext}",
+        "{}/{}/%(playlist_index|01)02d - %(title)s.{ext}",
         cfg.dir.display(),
         folder_field(cfg)
     )
@@ -34,11 +34,13 @@ fn output_template(cfg: &Config, ext: &str) -> String {
 
 /* The playlist's own title, unless this run belongs to a folder somebody has
    named: then the name is a literal, and `%` in it has to be escaped or
-   yt-dlp reads it as the start of a field. */
+   yt-dlp reads it as the start of a field. A single video has no playlist, so
+   it falls back to the video's own title, where yt-dlp's own answer was a
+   folder called `NA`. */
 fn folder_field(cfg: &Config) -> String {
     match &cfg.folder {
         Some(name) => name.replace('%', "%%"),
-        None => "%(playlist)s".to_string(),
+        None => "%(playlist,title)s".to_string(),
     }
 }
 
@@ -289,9 +291,9 @@ fn run_with(
     ]);
     cmd.args(["--audio-format", &cfg.format]);
     cmd.arg("--progress-template")
-        .arg("download:@P\t%(info.playlist_index)s\t%(progress._percent_str)s");
+        .arg("download:@P\t%(info.playlist_index|1)s\t%(progress._percent_str)s");
     cmd.arg("--print")
-        .arg("after_move:@D\t%(playlist_index)s\t%(filepath)s");
+        .arg("after_move:@D\t%(playlist_index|1)s\t%(filepath)s");
 
     // Also rewrites the filename, since title feeds the output template.
     cmd.args(["--replace-in-metadata", "track,title", TITLE_CLEANUP, ""]);
@@ -411,14 +413,14 @@ mod tests {
         cfg.dir = PathBuf::from("/music");
 
         let upstream = output_template(&cfg, "opus");
-        assert!(upstream.contains("/%(playlist)s/"), "{upstream}");
+        assert!(upstream.contains("/%(playlist,title)s/"), "{upstream}");
 
         cfg.folder = Some("Morning".into());
         let pinned = output_template(&cfg, "opus");
         assert!(pinned.starts_with("/music/Morning/"), "{pinned}");
-        assert!(!pinned.contains("%(playlist)s"), "{pinned}");
+        assert!(!pinned.contains("%(playlist,title)"), "{pinned}");
         // The rest of the name is still yt-dlp's to fill in.
-        assert!(pinned.contains("%(playlist_index)02d - %(title)s.opus"), "{pinned}");
+        assert!(pinned.contains("%(playlist_index|01)02d - %(title)s.opus"), "{pinned}");
 
         /* A literal name goes into a template, where `%` opens a field: a
            playlist called "100% Hits" would otherwise take the folder
@@ -534,6 +536,46 @@ mod tests {
         assert!(!off.contains("--write-thumbnail"), "{off}");
         // The rest of the download is untouched by the flag.
         assert!(off.contains("--extract-audio"), "{off}");
+    }
+
+    /* A single video has no `playlist_index`, which yt-dlp prints as `NA`: the
+       `@D` line then failed to parse and was dropped, so the track never
+       reached `Downloaded`, and the folder and file were both named `NA`. The
+       stub answers the way yt-dlp does: only a template with a default for
+       the field gets a number back. */
+    #[test]
+    fn a_single_video_gets_an_index_and_a_folder_from_its_own_title() {
+        let dir = std::env::temp_dir().join(format!("earworm-single-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (bin, log, file) = (dir.join("yt-dlp"), dir.join("log"), dir.join("Me at the zoo.opus"));
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\nidx=NA\nfor a in \"$@\"; do echo \"$a\" >> \"{}\"; \
+                 case \"$a\" in *'@D'*'playlist_index|1'*) idx=1;; esac; done\n\
+                 printf '@D\\t%s\\t%s\\n' \"$idx\" \"{}\"\nexit 0\n",
+                log.display(),
+                file.display()
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut cfg = crate::worker::tests::config(true);
+        cfg.dir = dir.join("music");
+        let mut tracks = vec![Track::new(1, "vid".into(), "Me at the zoo".into(), dir.join("predicted.opus"))];
+        let (tx, _rx) = std::sync::mpsc::channel();
+        run_with(&bin.display().to_string(), &cfg, &mut tracks, &tx, &HashSet::new()).unwrap();
+
+        assert_eq!(tracks[0].status, Status::Downloaded, "the @D line was dropped");
+        assert_eq!(tracks[0].path.as_deref(), Some(file.as_path()));
+        let args = std::fs::read_to_string(&log).unwrap();
+        assert!(args.contains("/%(playlist,title)s/%(playlist_index|01)02d - %(title)s."), "{args}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /* The archive is what keeps yt-dlp off a track the run was not asked for,

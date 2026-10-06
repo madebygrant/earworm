@@ -665,8 +665,33 @@ than at the start of every session.
   Marking the track `Failed` would report a downloaded, tagged file as broken.
 - **`Extra::key` picks the key from the tag type.** lofty has no `Lyrics`
   mapping for ID3v2, only `UnsyncLyrics`, and `set_extra` reports a key the
-  container cannot hold instead of dropping it. The `lyrics` config key exists
-  and does nothing yet.
+  container cannot hold instead of dropping it.
+- **`lyrics` is off until the file turns it on,** for the reason `loudness`
+  is, and because it is the one setting that makes a request to a third party
+  for every track.
+- **`enrich_with` asks for lyrics only after reading the tag.** A track that
+  has words never costs a request, a rerun is free, and lyrics the user typed
+  or another tool wrote are never replaced. The fetch is a closure so the test
+  counts requests without a network, as `tag::sleeve` does.
+- **LRCLIB's `get` needs an album and a duration, and most playlist tracks
+  have no album.** `lookup::lyrics` tries `get` only when there is an album and
+  otherwise searches by artist and title. Either way a result has to be within
+  two seconds of the track's length, or a live cut's words land on the studio
+  track. No duration means no lookup at all.
+- **A failed request and a miss are the same answer.** `get_json` returns
+  `None` for both, so nothing is written either way and the next sync asks
+  again. Nothing records that a track was tried, deliberately: LRCLIB grows.
+- **A miss is counted, never flagged.** `tag_tracks` returns an `Extras` tally
+  and `pipeline` and `retry` append `said()` to the summary. A track with no
+  lyrics is a track LRCLIB lacks, so marking it `Failed` would report a good
+  file as broken. Tracks that already had words are not in the count, or "9 of
+  12" would claim searches that never happened. `retry` appends it too, since
+  it rebuilds the summary rather than adding to the run's. Nothing tests that
+  the two call sites append it: `pipeline` needs a live scan.
+- **Plain text only.** `lyrics_of` prefers `plainLyrics` and strips the
+  timestamps from `syncedLyrics` when that is all there is, because a plain
+  tag shows `[01:23.45]` as text in any player that does not read LRC. An
+  instrumental writes nothing.
 
 ### Playing through cliamp
 
@@ -1629,6 +1654,18 @@ than at the start of every session.
   only way a folder renamed in a file manager can be pinned, and it is the one
   answer to that prompt that is not a change. Already pinned says so rather
   than going quiet.
+- **Every template field a single video lacks carries a default.** yt-dlp
+  prints `NA` for `playlist` and `playlist_index` there, which named the
+  folder `NA` and the file `NA - Title`, and made the `@D` and `@P` lines
+  unparseable: `parse::<usize>()` failed on `NA`, so the track never reached
+  `Downloaded`. The folder is `%(playlist,title)s`, the number is
+  `%(playlist_index|01)02d` and the two print templates use `|1`. The default
+  is `01` and not `1` because yt-dlp substitutes it verbatim, without the
+  `02d` applied. `a_single_video_gets_an_index_and_a_folder_from_its_own_title`
+  answers like yt-dlp does, so reverting the `|1` fails it. The scan's own
+  print was left alone: its index already falls back to the track's position.
+  Measured on a real video; a folder already named `NA` keeps working because
+  the manifest still maps the id to its file.
 - **A recorded name goes into a yt-dlp template, where `%` opens a field.**
   `folder_field` escapes it, or a playlist called `100% Hits` writes somewhere
   nobody asked for.
