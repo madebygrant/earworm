@@ -612,17 +612,7 @@ pub fn transcode(from: &Path, to: &Path, format: &str, source: Option<&str>) -> 
             .stderr(errors.map_or_else(std::process::Stdio::null, std::process::Stdio::from));
 
         let outcome = lookup::run_bounded(&mut cmd, TRANSCODE);
-        let said = || {
-            std::fs::read_to_string(&log)
-                .ok()
-                .and_then(|text| {
-                    text.lines()
-                        .rev()
-                        .find(|l| !l.trim().is_empty())
-                        .map(|l| l.trim().to_string())
-                })
-                .unwrap_or_else(|| "ffmpeg said nothing".into())
-        };
+        let said = || last_line(&log);
         match outcome {
             Some(out) if out.status.success() => {
                 let _ = std::fs::remove_file(&log);
@@ -630,6 +620,74 @@ pub fn transcode(from: &Path, to: &Path, format: &str, source: Option<&str>) -> 
             }
             Some(_) => last = said(),
             None => last = format!("{encoder} did not finish within {}s", TRANSCODE.as_secs()),
+        }
+    }
+    let _ = std::fs::remove_file(&log);
+    let _ = std::fs::remove_file(to);
+    anyhow::bail!("{last}")
+}
+
+// What ffmpeg last wrote to a scratch log, which is the line that names the failure.
+fn last_line(log: &Path) -> String {
+    std::fs::read_to_string(log)
+        .ok()
+        .and_then(|text| {
+            text.lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())
+                .map(|l| l.trim().to_string())
+        })
+        .unwrap_or_else(|| "ffmpeg said nothing".into())
+}
+
+// One chapter is seconds to a few minutes of audio, so well inside what a whole transcode is allowed.
+const CUT: Duration = Duration::from_secs(120);
+
+/* One chapter's span of a downloaded video, in its own file and the same
+   format. A copy for everything lossy, which is exact to a frame and adds no
+   generation. Not for flac or alac: a file with no seek table ignores the
+   range under a copy and writes the whole thing out, so those re-encode, which
+   costs nothing there. The length is checked afterwards for that reason, since
+   ffmpeg exits 0 on the bad case. */
+pub fn cut(from: &Path, to: &Path, start: f64, end: f64, format: &str) -> Result<()> {
+    let log = std::env::temp_dir().join(format!(
+        "earworm-cut-{}-{:?}.log",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let encoders: Vec<Option<&str>> = if crate::config::lossless(format) {
+        crate::config::encoders(format).iter().map(|e| Some(*e)).collect()
+    } else {
+        vec![None]
+    };
+    let mut last = String::from("no encoder ran");
+    for encoder in encoders {
+        let _ = std::fs::remove_file(to);
+        let errors = std::fs::File::create(&log).ok();
+        let mut cmd = std::process::Command::new("ffmpeg");
+        cmd.args(["-v", "error", "-y"])
+            .args(["-ss", &format!("{start:.3}"), "-to", &format!("{end:.3}")])
+            .arg("-i")
+            .arg(from)
+            // The video's own tags are not this track's: lofty writes the real ones afterwards.
+            .args(["-vn", "-map_metadata", "-1"])
+            .args(["-c:a", encoder.unwrap_or("copy")])
+            .arg(to)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(errors.map_or_else(std::process::Stdio::null, std::process::Stdio::from));
+        match lookup::run_bounded(&mut cmd, CUT) {
+            Some(out) if out.status.success() => {
+                let got = read(to).map(|info| info.duration as f64).unwrap_or(0.0);
+                // The length reads in whole seconds, so a second is rounding; the rest is the codec's frame.
+                if (got - (end - start)).abs() <= 1.0 + (end - start) * 0.02 {
+                    let _ = std::fs::remove_file(&log);
+                    return Ok(());
+                }
+                last = format!("cut came out {got:.0}s long, not {:.0}s", end - start);
+            }
+            Some(_) => last = last_line(&log),
+            None => last = format!("cutting did not finish within {}s", CUT.as_secs()),
         }
     }
     let _ = std::fs::remove_file(&log);
@@ -1061,6 +1119,39 @@ mod tests {
             }
         }
         assert!(ran > 0, "no encoder was available for any format");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // Break it by cutting flac with a stream copy: that writes the whole file and exits 0.
+    #[test]
+    fn a_chapter_cut_is_the_right_length_in_every_container_earworm_downloads() {
+        let dir = std::env::temp_dir().join(format!("earworm-cut-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut ran = 0;
+        for (format, ext, codecs) in crate::config::FORMATS {
+            let whole = dir.join(format!("whole.{ext}"));
+            if !tone(&whole, codecs) {
+                eprintln!("skipped {ext}: ffmpeg could not write it");
+                continue;
+            }
+            ran += 1;
+            let part = dir.join(format!("part.{ext}"));
+            cut(&whole, &part, 1.0, 2.5, format).unwrap_or_else(|e| panic!("{ext}: {e}"));
+            let got = read(&part).unwrap().duration;
+            // `tone` is three seconds, so the whole file reads 3 and the cut reads 1 or 2.
+            assert!((1..=2).contains(&got), "{ext}: the cut is {got}s");
+            // Tags are lofty's to write, not the video's to carry over.
+            assert_eq!(read(&part).unwrap().title, "", "{ext} carried the video's title");
+        }
+        assert!(ran > 0, "no encoder was available for any format");
+        // A span past the end is an error and leaves no file, not a short one.
+        let whole = dir.join("whole.opus");
+        if whole.is_file() {
+            let past = dir.join("past.opus");
+            assert!(cut(&whole, &past, 100.0, 104.0, "opus").is_err());
+            assert!(!past.exists());
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

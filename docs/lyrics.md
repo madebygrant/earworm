@@ -33,11 +33,15 @@ plain version, the timestamps are stripped.
 
 LRCLIB's exact lookup needs an album, which most playlist tracks do not have,
 so a track with no album goes straight to a search by artist and title. A
-result counts only if its length is within two seconds of the track's. That is
-what keeps the words of a live version or a single edit off the studio track.
-A track whose length is unknown is skipped for the same reason.
+result counts only if its length is within two seconds of the track's and its
+artist and title match. The length keeps the words of a live version or a
+single edit off the studio track, and the names keep a cover of the same song
+from taking its place. A track whose length is unknown is skipped for the same
+reason. A result that fails the name check is treated as no match, so a track
+tagged in another script than LRCLIB's may come up empty.
 
-An instrumental gets nothing written.
+An instrumental gets nothing written, and an exact match that says instrumental
+ends the lookup.
 
 ## Reruns
 
@@ -53,5 +57,8 @@ and nothing is marked wrong.
 
 Every sync does this, including for tracks already on disk, so a folder
 downloaded before you turned it on is filled in the next time you sync it.
-A request that fails, for want of a connection or a track, writes nothing and
-is not reported as a failure.
+If LRCLIB stops answering, earworm gives up on it after three failed requests in
+a row and leaves the rest of the sync alone for five minutes, so a service
+outage costs a few seconds and not the whole run. The closing line says how many
+tracks were left for next time. A track LRCLIB simply has nothing for is a
+count, not a failure.

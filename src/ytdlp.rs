@@ -61,6 +61,59 @@ pub struct Listing {
     /// describes the playlist rather than the song, and every entry repeats
     /// it. `None` for a single video, which has no playlist to name.
     pub playlist_id: Option<String>,
+    /// The chapters a single video can be cut into: two or more that are
+    /// worth a track. Empty for a playlist, and for a video with fewer.
+    pub chapters: Vec<Chapter>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Chapter {
+    pub title: String,
+    pub start: f64,
+    pub end: f64,
+}
+
+// Shorter than this and an untitled chapter is yt-dlp filling a gap, not a track.
+const MIN_UNTITLED: f64 = 10.0;
+
+/* What yt-dlp prints for `%(chapters)j`: `NA` or `null` for a video with none,
+   otherwise a JSON array. yt-dlp invents `<Untitled Chapter N>` for any gap
+   before or between chapters, and a gap of a second or two at the start of an
+   album upload would become a track of its own, numbered ahead of the real
+   ones. Fewer than two left is a video with a table of contents, not an
+   album: the clip measured for this had three chapters in nineteen seconds. */
+fn usable_chapters(printed: &str) -> Vec<Chapter> {
+    let Ok(serde_json::Value::Array(all)) = serde_json::from_str::<serde_json::Value>(printed) else {
+        return Vec::new();
+    };
+    let chapters: Vec<Chapter> = all
+        .iter()
+        .filter_map(|c| {
+            let title = c.get("title")?.as_str()?.trim().to_string();
+            let (start, end) = (c.get("start_time")?.as_f64()?, c.get("end_time")?.as_f64()?);
+            let untitled = title.starts_with("<Untitled Chapter");
+            (end > start && !(untitled && end - start < MIN_UNTITLED)).then(|| Chapter {
+                // The brackets are yt-dlp's placeholder's, not part of a title somebody wrote: `<3` stays.
+                title: if untitled { title.trim_matches(['<', '>']).to_string() } else { title },
+                start,
+                end,
+            })
+        })
+        .collect();
+    if chapters.len() < 2 {
+        return Vec::new();
+    }
+    // An empty title would make `01 - .opus` and a blank row.
+    chapters
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut chapter)| {
+            if chapter.title.is_empty() {
+                chapter.title = format!("Chapter {}", i + 1);
+            }
+            chapter
+        })
+        .collect()
 }
 
 /// Resolves ids, titles and destination paths from the playlist listing alone.
@@ -97,8 +150,9 @@ pub(crate) fn scan_with(bin: &str, cfg: &Config) -> Result<Listing> {
            is three minutes. The playlist id is here for another: its prefix is
            what says whether this is an album. The filename stays last, because
            it is the one field that could hold a tab and `splitn` lets the last
-           one keep it. */
-        .arg("%(id)s\t%(playlist_index)s\t%(title)s\t%(duration)s\t%(playlist_id)s\t%(filename)s")
+           one keep it. The chapters are JSON, which holds neither tab nor
+           newline, and are only read for a single video. */
+        .arg("%(id)s\t%(playlist_index)s\t%(title)s\t%(duration)s\t%(playlist_id)s\t%(chapters)j\t%(filename)s")
         .args(&cfg.extra)
         .arg(&cfg.url)
         .output()
@@ -106,9 +160,11 @@ pub(crate) fn scan_with(bin: &str, cfg: &Config) -> Result<Listing> {
 
     let mut tracks = Vec::new();
     let mut playlist_id: Option<String> = None;
-    for line in String::from_utf8_lossy(&out.stdout).lines() {
-        let parts: Vec<&str> = line.splitn(6, '\t').collect();
-        if parts.len() != 6 {
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut printed_chapters = "";
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.splitn(7, '\t').collect();
+        if parts.len() != 7 {
             continue;
         }
         let index: usize = parts[1].parse().unwrap_or(tracks.len() + 1);
@@ -117,11 +173,12 @@ pub(crate) fn scan_with(bin: &str, cfg: &Config) -> Result<Listing> {
         if playlist_id.is_none() && parts[4] != "NA" && !parts[4].is_empty() {
             playlist_id = Some(parts[4].to_string());
         }
+        printed_chapters = parts[5];
         let mut track = Track::new(
             index,
             parts[0].to_string(),
             parts[2].to_string(),
-            PathBuf::from(parts[5]),
+            PathBuf::from(parts[6]),
         );
         // yt-dlp prints "NA" for a video whose duration it does not know,
         // and 0 is what the rest of the tool already means by "no duration".
@@ -174,10 +231,17 @@ pub(crate) fn scan_with(bin: &str, cfg: &Config) -> Result<Listing> {
             detail.trim()
         );
     }
+    // A playlist entry never carries them in a flat listing, but one video is the only case that is an album.
+    let chapters = if tracks.len() == 1 && playlist_id.is_none() {
+        usable_chapters(printed_chapters)
+    } else {
+        Vec::new()
+    };
     Ok(Listing {
         tracks,
         complete: out.status.success(),
         playlist_id,
+        chapters,
     })
 }
 
@@ -449,7 +513,7 @@ mod tests {
                 &bin,
                 format!(
                     "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\" >> \"{}\"; done\n\
-                     printf 'id1\t1\tTitle\t213\tPL1\t{}
+                     printf 'id1\t1\tTitle\t213\tPL1\tNA\t{}
 '\n",
                     log.display(),
                     dir.join("music").join("track").display()
@@ -633,5 +697,79 @@ mod tests {
         );
         assert!(body.contains("youtube fine"), "{body:?}");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // The listing measured for this: a leading gap yt-dlp filled with a chapter of its own.
+    const ALBUM_CHAPTERS: &str = r#"[{"start_time": 0, "end_time": 1, "title": "<Untitled Chapter 1>"}, {"start_time": 1, "title": "ABD", "end_time": 117}, {"start_time": 117, "title": "SUN KISS", "end_time": 296}, {"start_time": 296, "title": "Echo", "end_time": 435}]"#;
+
+    #[test]
+    fn a_gap_before_the_first_chapter_is_not_a_track() {
+        let chapters = usable_chapters(ALBUM_CHAPTERS);
+        let titles: Vec<&str> = chapters.iter().map(|c| c.title.as_str()).collect();
+        assert_eq!(titles, ["ABD", "SUN KISS", "Echo"]);
+        assert_eq!((chapters[0].start, chapters[0].end), (1.0, 117.0));
+        // A long untitled stretch is audio somebody put there: kept, and named without the brackets.
+        let long = r#"[{"start_time": 0, "end_time": 90, "title": "<Untitled Chapter 1>"}, {"start_time": 90, "end_time": 200, "title": "Song"}]"#;
+        assert_eq!(usable_chapters(long)[0].title, "Untitled Chapter 1");
+    }
+
+    // Only yt-dlp's placeholder loses its brackets, and a chapter with no name gets one.
+    #[test]
+    fn a_real_title_keeps_its_brackets_and_an_empty_one_is_named() {
+        let titles = r#"[{"start_time": 0, "end_time": 60, "title": "<3"}, {"start_time": 60, "end_time": 120, "title": ""}, {"start_time": 120, "end_time": 180, "title": "  "}]"#;
+        let got: Vec<String> = usable_chapters(titles).into_iter().map(|c| c.title).collect();
+        assert_eq!(got, ["<3", "Chapter 2", "Chapter 3"]);
+    }
+
+    // A table of contents is not an album, and neither is a video that has none.
+    #[test]
+    fn fewer_than_two_chapters_is_no_chapters() {
+        assert!(usable_chapters("NA").is_empty());
+        assert!(usable_chapters("null").is_empty());
+        assert!(usable_chapters("[]").is_empty());
+        assert!(usable_chapters("not json").is_empty());
+        let one = r#"[{"start_time": 0, "end_time": 300, "title": "Everything"}]"#;
+        assert!(usable_chapters(one).is_empty());
+        // One real chapter beside a one-second gap is still one.
+        let gap = r#"[{"start_time": 0, "end_time": 1, "title": "<Untitled Chapter 1>"}, {"start_time": 1, "end_time": 300, "title": "Song"}]"#;
+        assert!(usable_chapters(gap).is_empty());
+    }
+
+    /* The chapters ride in the scan's own print, so reading them is a matter
+       of the stub printing the field where yt-dlp does. Only one video is an
+       album: a playlist entry never has them in a flat listing, and a listing
+       that names a playlist is not a single video whatever its entries say. */
+    #[test]
+    fn the_scan_reads_chapters_for_a_single_video_only() {
+        let dir = std::env::temp_dir().join(format!("earworm-scanchap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let scan = |lines: &str| {
+            let bin = dir.join("yt-dlp");
+            std::fs::write(
+                &bin,
+                format!("#!/bin/sh\nCH='{ALBUM_CHAPTERS}'\n{lines}\n"),
+            )
+            .unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+            let mut cfg = crate::worker::tests::config(true);
+            cfg.dir = dir.join("music");
+            scan_with(&bin.display().to_string(), &cfg).unwrap()
+        };
+
+        let video = scan("printf 'vid\\tNA\\tAlbum\\t435\\tNA\\t%s\\t/x/Album/01 - Album.opus\\n' \"$CH\"");
+        assert_eq!(video.tracks.len(), 1);
+        assert_eq!(video.chapters.len(), 3);
+
+        let entry = "printf 'vid\\t1\\tAlbum\\t435\\tPL1\\t%s\\t/x/Album/01 - Album.opus\\n' \"$CH\"";
+        assert!(scan(entry).chapters.is_empty(), "a playlist entry was read as an album");
+
+        let two = "printf 'a\\tNA\\tA\\t9\\tNA\\t%s\\t/x/A/01 - A.opus\\nb\\tNA\\tB\\t9\\tNA\\t%s\\t/x/B/01 - B.opus\\n' \"$CH\" \"$CH\"";
+        assert!(scan(two).chapters.is_empty(), "two videos were read as one album");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
