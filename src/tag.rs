@@ -669,8 +669,8 @@ pub fn cut(from: &Path, to: &Path, start: f64, end: f64, format: &str) -> Result
             .args(["-ss", &format!("{start:.3}"), "-to", &format!("{end:.3}")])
             .arg("-i")
             .arg(from)
-            // The video's own tags are not this track's: lofty writes the real ones afterwards.
-            .args(["-vn", "-map_metadata", "-1"])
+            // The video's own tags and chapter list are not this track's: lofty writes the real tags afterwards.
+            .args(["-vn", "-map_metadata", "-1", "-map_chapters", "-1"])
             .args(["-c:a", encoder.unwrap_or("copy")])
             .arg(to)
             .stdin(std::process::Stdio::null())
@@ -1155,6 +1155,52 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    // Break it by taking `-map_chapters -1` out: the cut then carries the video's chapter list.
+    #[test]
+    fn a_cut_carries_none_of_the_videos_chapters() {
+        let dir = std::env::temp_dir().join(format!("earworm-nochap-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = dir.join("plain.opus");
+        if !tone(&plain, &["libopus"]) {
+            eprintln!("skipped: ffmpeg could not write opus");
+            return;
+        }
+        let meta = dir.join("meta.txt");
+        std::fs::write(
+            &meta,
+            ";FFMETADATA1\n[CHAPTER]\nTIMEBASE=1/1000\nSTART=0\nEND=1500\ntitle=One\n\
+             [CHAPTER]\nTIMEBASE=1/1000\nSTART=1500\nEND=3000\ntitle=Two\n",
+        )
+        .unwrap();
+        let whole = dir.join("whole.opus");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-y", "-i"])
+            .arg(&plain)
+            .arg("-i")
+            .arg(&meta)
+            .args(["-map", "0", "-map_chapters", "1", "-c", "copy"])
+            .arg(&whole)
+            .status()
+            .is_ok_and(|s| s.success());
+        let chapters = |file: &Path| {
+            let out = std::process::Command::new("ffprobe")
+                .args(["-v", "error", "-show_chapters", "-of", "csv"])
+                .arg(file)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).lines().count()
+        };
+        if !made || chapters(&whole) != 2 {
+            eprintln!("skipped: could not build a file with chapters");
+            return;
+        }
+        let part = dir.join("part.opus");
+        cut(&whole, &part, 0.0, 1.5, "opus").unwrap();
+        assert_eq!(chapters(&part), 0, "the cut kept the video's chapters");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn loudness_is_read_from_the_summary_and_not_the_running_lines() {
         let log = "[Parsed_ebur128_0 @ 0x1] t: 2.9  I: -99.0 LUFS  TPK: -1.0 dBFS\n\
@@ -1277,9 +1323,6 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let mut ran = 0;
         for (format, ext, codecs) in crate::config::FORMATS {
-            if format != "opus" && format != "flac" {
-                continue;
-            }
             let (loud, quiet) = (dir.join(format!("loud.{ext}")), dir.join(format!("quiet.{ext}")));
             if !quiet_tone(&loud, codecs, 0) || !quiet_tone(&quiet, codecs, -12) {
                 eprintln!("skipped {ext}: ffmpeg could not write it");
@@ -1293,7 +1336,7 @@ mod tests {
             let key = if format == "opus" { Extra::R128AlbumGain } else { Extra::AlbumGain };
             let (one, two) = (extra(a, key).unwrap(), extra(b, key).unwrap());
             assert!(one.is_some() && one == two, "{ext}: {one:?} vs {two:?}");
-            if format == "flac" {
+            if format != "opus" {
                 // Both tracks share one peak: the louder one's.
                 assert_eq!(extra(a, Extra::AlbumPeak).unwrap(), extra(a, Extra::TrackPeak).unwrap());
                 assert_eq!(extra(b, Extra::AlbumPeak).unwrap(), extra(a, Extra::TrackPeak).unwrap());
@@ -1301,6 +1344,33 @@ mod tests {
             assert_eq!(write_album_loudness(&[a, b]), (0, 0), "{ext}: rewrote an unchanged album");
         }
         assert!(ran > 0, "no encoder was available for any format");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // The numbers by hand: -20 and -30 LUFS at equal length average to -22.60 in energy, not -25.
+    #[test]
+    fn an_opus_album_gain_is_the_energy_mean_in_q78_and_follows_a_changed_track() {
+        let dir = std::env::temp_dir().join(format!("earworm-r128-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.opus"), dir.join("b.opus"));
+        if !tone(&a, &["libopus"]) || !tone(&b, &["libopus"]) {
+            eprintln!("skipped: ffmpeg could not write opus");
+            std::fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+        set_extra(&a, Extra::R128TrackGain, "-768").unwrap();
+        set_extra(&b, Extra::R128TrackGain, "1792").unwrap();
+        assert_eq!(write_album_loudness(&[a.as_path(), b.as_path()]), (2, 0));
+        for file in [&a, &b] {
+            assert_eq!(extra(file, Extra::R128AlbumGain).unwrap().as_deref(), Some("-103"));
+        }
+        // A track that changes moves the album for every file, which is why this one is rewritten.
+        set_extra(&b, Extra::R128TrackGain, "-768").unwrap();
+        assert_eq!(write_album_loudness(&[a.as_path(), b.as_path()]), (2, 0));
+        for file in [&a, &b] {
+            assert_eq!(extra(file, Extra::R128AlbumGain).unwrap().as_deref(), Some("-768"));
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

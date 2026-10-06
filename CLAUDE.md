@@ -684,6 +684,25 @@ than at the start of every session.
   disk and is not its cut, so the test is on `Failed` as well as on the file.
   A chapter whose name would equal the video's gets `(chapter)` added in
   `chapter_tracks`, because the cut reads the file it would write over.
+- **A split folder stays split when the chapters vanish upstream.**
+  `settle_split` reads `manifest::is_split` before it looks at the listing's
+  chapters: with none, it rebuilds the tracks from the sidecar's `vid#nn`
+  entries (`held_chapters`), so the video is not fetched again beside the cuts
+  and the `.m3u8` keeps every chapter. A folder never split with no chapters is
+  the plain video.
+- **A cut carries nothing of the video but audio and its picture.** `-map_metadata
+  -1` leaves the chapter list, so `tag::cut` also drops chapters, and
+  `fetch_split` copies the full file's picture onto each cut: it is the fallback
+  art for a chapter the lookup cannot place. A cut that fails keeps its reason:
+  `tag_tracks` leaves a `Failed` track with no file alone, or "no file" replaces
+  `cut: ...`, and the cut error also goes to the log.
+- **The kill window the sidecar cannot cover.** Stopped after the download and
+  before the first cut is recorded, the folder holds the whole video and no
+  chapter entry, so the next sync reads it as a video that was never split and
+  asks again. Nothing is lost.
+- **A split promotes the kind only when nothing has answered.** A `[playlist]`
+  name or an earlier header is somebody's choice, and the name wins on
+  reopening anyway, so overriding it made the run and the library disagree.
 - **The video is one row while it downloads.** yt-dlp reports progress and
   `@D` by the video's index, so on chapter rows it would mark chapter 1 as the
   whole download and hand it the full-length file's path. `fetch_split` sends

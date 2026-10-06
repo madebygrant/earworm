@@ -67,3 +67,12 @@ tags again, and says so in the log.
 If the uploader changes the chapters, the tracks already cut keep their names
 and any new ones are added. Chapters are matched by position, so a reordered
 list will not follow.
+
+If the uploader later removes the chapters, a folder already split stays split:
+the tracks on disk are kept as they are and the video is not downloaded again.
+
+If earworm is stopped after the download but before the first chapter is cut,
+the folder holds the whole video and the next sync asks the question again.
+
+Each chapter carries the video's cover picture until the lookup finds a better
+one. A folder you name `[playlist]` stays a playlist when you split it.

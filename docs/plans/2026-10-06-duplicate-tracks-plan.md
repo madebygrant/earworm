@@ -73,19 +73,51 @@ investigations, and the three decisions written down.
 Why here: this needs only the wave 1 decisions and data earworm already has,
 and it's the only wave that prevents a download rather than reporting one.
 
-- **Library-wide video id index (idea 1).** Build an id-to-file map from
-  every sidecar under `--dir`, reusing what `worker::library`
-  (`src/worker.rs:350`) already loads, once per run. For `--resync`, build it
-  once for all folders, not once per folder. Leave `~` ids out;
-  `manifest::is_local` already identifies them.
+Idea 1 is in progress (2026-10-06, uncommitted): `library_index` and
+`copy_known` in `src/worker.rs`, called from `pipeline` straight after the
+pick gate. Done so far: the code and the call. Still to do: the summary line,
+the tests below, the review, and the CLAUDE.md rule in wave 6. It needed none
+of wave 1's measurements, because an id match has no threshold.
+
+- **Library-wide video id index (idea 1).** Built from the sidecars of every
+  other folder under `--dir`, asked only about this pass's `Pending` ids.
+  Leaves out `~` and `#` ids (`manifest::is_local`, `manifest::is_chapter`).
+  - Changed from the original plan: built once per pass, not once per
+    `--resync`. A song added to two playlists arrives in the first folder's
+    pass, and the second folder's pass has to see it. The cost is one sidecar
+    read per folder per pass.
+  - A source counts only if `format_on_disk` matches `cfg.format`. Otherwise
+    the track downloads as before, rather than putting a second format in the
+    folder for `convert` to undo. Folders are walked in name order, so the
+    same video in three folders always copies from the same one.
 - **Copy on a hit.** For a `Pending` track whose id is in the index, copy the
-  file to the path the scan predicted, mark the track `Have`, and let the
-  existing `save_manifest` and `write_archive` handle the rest. Copy rather
-  than hardlink, so editing a tag in one folder doesn't change the other.
+  file into this folder, mark the track `Have` with source `copied` and note
+  `from <folder>`, and let `write_archive` and `sync_manifest` handle the
+  rest. Copy rather than hardlink, so editing a tag in one folder doesn't
+  change the other. On APFS, `std::fs::copy` clones, so the copy takes no
+  extra space until one side is edited.
+  - Changed from the original plan: the copy is named after the source file,
+    with this playlist's number in front (`strip_number` on the source stem),
+    not the path the scan predicted. The prediction is yt-dlp's raw title,
+    while the source already has the name its lookup or edit gave it, and a
+    `Have` track is never renamed.
+  - The copy goes through a `SCRATCH` name and is then renamed into place, so
+    a copy killed part-way can't leave a truncated file that the next scan
+    calls downloaded. `sweep_scratch` runs first.
+  - Skipped when the pass splits a video into chapters, and after the pick
+    gate, so an unpicked track isn't copied either.
   - Risk: this changes what a sync does. The copied file brings the other
-    folder's tags and sleeve, and that's now what this folder holds. Log
-    every copy. The `Have` branch of `tag_tracks` must not re-identify a
-    copied file, or it overwrites the tags the user kept.
+    folder's tags and sleeve. Each copy is logged. The `Have` branch of
+    `tag_tracks` reads the copy's tags and doesn't identify it again.
+  - Known gap: if the lookup found no album, the source's album tag holds
+    the other playlist's name (the `cfg.album` fill), and the copy keeps it.
+    Decide whether to rewrite it to this playlist's name, and how to tell
+    that fill apart from a real album with the same name as its folder.
+  - Not covered: `retry` doesn't copy. Its downloads are tracks that already
+    failed once, so this rarely matters.
+  - Untested, like the other load-bearing lines in `pipeline`: the
+    `copy_known` call and its position after `ask_which`. Reaching them
+    needs a live scan.
 - **Same-song warning at the pick gate (idea 2).** Flag two ids in one
   listing with the same `normalised(strip_number(…))` title and durations
   within 2 seconds, using the rules `reconcile` already uses
@@ -95,10 +127,14 @@ and it's the only wave that prevents a download rather than reporting one.
   - Risk: a live version and the studio version can share a title. This is
     a warning only, never a skip.
 
-Exit: an integration test with a stub yt-dlp, two folders sharing an id, and
-a run that copies instead of downloading (check the stub's argv: the shared
-id is in the archive). A second test where two listing rows with the same
-title show the flag at the pick gate. Break each fix and watch its test fail.
+Exit: a test with two folders sharing an id, where `copy_known` copies the
+file, marks the track `Have`, and `write_archive` then names the id, so
+yt-dlp skips it. `pipeline` calls `ytdlp::scan` with a fixed binary name, so
+the test drives `copy_known` and `write_archive` directly rather than through
+a stub yt-dlp. Separate cases for a source in the wrong format (not copied),
+a `~` id (not copied), and the current folder's own sidecar (not a source). A
+second test where two listing rows with the same title show the flag at the
+pick gate. Break each fix and watch its test fail.
 
 ## 3. Identity that persists
 

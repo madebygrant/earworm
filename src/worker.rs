@@ -858,7 +858,8 @@ fn pipeline(
     /* After the departures, which are read off the one video, and before the
        list is shown, so the screen only ever holds the chapters. */
     let split = settle_split(cfg, &asker, &pass, listing.chapters, tracks);
-    if split.is_some() && !matches!(kind, Some((manifest::Kind::Album, _))) {
+    // Only when nothing has answered: a `[playlist]` name is somebody's choice, and the name wins on reopening anyway.
+    if split.is_some() && kind.is_none() {
         kind = Some((manifest::Kind::Album, "its chapters"));
     }
     let album = matches!(kind, Some((manifest::Kind::Album, _)));
@@ -986,12 +987,19 @@ fn settle_split(
     chapters: Vec<ytdlp::Chapter>,
     tracks: &mut Vec<Track>,
 ) -> Option<Split> {
-    if chapters.is_empty() {
-        return None;
-    }
     let video = tracks.first()?.clone();
     let folder = video.path.as_deref()?.parent()?.to_path_buf();
-    if !manifest::is_split(&folder, &video.id) {
+    let split = manifest::is_split(&folder, &video.id);
+    if chapters.is_empty() {
+        // Upstream lost its chapters: the cuts on disk are still the folder, and fetching the video again would put it back beside them.
+        let held = held_chapters(&folder, &video.id);
+        if !split || held.is_empty() {
+            return None;
+        }
+        *tracks = held;
+        return Some(Split { chapters, video });
+    }
+    if !split {
         if video.status == Status::Have || !pass.gate {
             return None;
         }
@@ -1011,6 +1019,24 @@ fn settle_split(
     }
     *tracks = chapter_tracks(cfg, &video, &chapters, &folder);
     Some(Split { chapters, video })
+}
+
+fn held_chapters(folder: &Path, video: &str) -> Vec<Track> {
+    let prefix = format!("{video}#");
+    let mut held: Vec<(usize, PathBuf)> = manifest::entries(folder)
+        .into_iter()
+        .filter(|(_, file)| file.is_file())
+        .filter_map(|(id, file)| Some((id.strip_prefix(&prefix)?.parse().ok()?, file)))
+        .collect();
+    held.sort();
+    held.into_iter()
+        .map(|(number, file)| {
+            let stem = file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let mut track = Track::new(number, manifest::chapter_id(video, number), strip_number(&stem).to_string(), file);
+            track.status = Status::Have;
+            track
+        })
+        .collect()
 }
 
 // Numbered from one in listing order, and found again by the manifest on a later sync, which is what keeps a rename from costing the cut.
@@ -1081,6 +1107,8 @@ fn fetch_split(
         sweep_scratch(folder);
     }
     let artist = tag::read(&full).map(|info| info.artist).unwrap_or_default();
+    // The cut drops the picture, and the video's thumbnail is what a chapter the lookup cannot place falls back on.
+    let art = tag::read_cover(&full);
     // By position and not by iterator: the manifest write after each cut reads every track.
     for i in 0..tracks.len() {
         if tracks[i].status != Status::Pending {
@@ -1110,7 +1138,8 @@ fn fetch_split(
                         title: chapter.title.clone(),
                         ..tag::Fields::default()
                     };
-                    tag::set_fields(&scratch, &fields)
+                    tag::set_fields(&scratch, &fields)?;
+                    art.as_deref().map_or(Ok(()), |image| tag::set_cover(&scratch, image))
                 })
                 .and_then(|()| std::fs::rename(&scratch, &target).map_err(Into::into))
         };
@@ -1136,6 +1165,7 @@ fn fetch_split(
             }
             Err(err) => {
                 tracks[i].status = Status::Failed;
+                let _ = tx.send(Msg::Log(format!("cut: chapter {index}: {err}")));
                 let _ = tx.send(Msg::Update {
                     index,
                     status: Status::Failed,
@@ -1937,6 +1967,10 @@ fn tag_tracks(
             continue;
         };
         if !path.is_file() {
+            // Already failed with a reason of its own, such as a cut that went wrong, and "no file" would replace it.
+            if track.status == Status::Failed {
+                continue;
+            }
             track.status = Status::Failed;
             let _ = tx.send(Msg::Update {
                 index: track.index,
@@ -9177,6 +9211,16 @@ mod chapter_tests {
             return;
         }
         tag::set_fields(&whole, &tag::Fields { artist: "Band".into(), title: "Album".into(), ..Default::default() }).unwrap();
+        // The video's thumbnail, which the cuts have to carry or a chapter the lookup cannot place has no art.
+        let jpg = dir.join("thumb.jpg");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i", "testsrc=size=64x64:duration=1:rate=1", "-frames:v", "1", "-y"])
+            .arg(&jpg)
+            .status()
+            .is_ok_and(|s| s.success());
+        if made {
+            tag::set_cover(&whole, &std::fs::read(&jpg).unwrap()).unwrap();
+        }
         let cfg = super::tests::config(false);
         let mut tracks = chapter_tracks(&cfg, &video(&dir, true), &three(), &dir);
         let split = Split { chapters: three(), video: Track::new(1, "vid".into(), "Album".into(), whole.clone()) };
@@ -9193,6 +9237,7 @@ mod chapter_tests {
             let info = tag::read(path).unwrap();
             assert_eq!((info.title.as_str(), info.artist.as_str()), (title, "Band"));
             assert!((3..=5).contains(&info.duration), "{title} is {}s", info.duration);
+            assert_eq!(tag::read_cover(path).is_some(), made, "{title} lost the video's picture");
         }
         assert!(!whole.exists(), "the full-length file was left behind");
         assert!(rx.try_iter().any(|m| matches!(m, Msg::Path { index: 3, .. })));
@@ -9335,6 +9380,67 @@ mod chapter_tests {
         let (again, asked) = settle(Pass::plain(false), Reply::Cancel, &mut next);
         assert!(!asked && again.is_some(), "a stopped split read as a whole video");
         assert_eq!(next.iter().map(|t| t.status).collect::<Vec<_>>(), [Status::Have, Status::Pending, Status::Have]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    // Break it by moving the empty-chapters return back above the `is_split` check.
+    #[test]
+    fn a_folder_that_was_split_stays_split_when_upstream_loses_its_chapters() {
+        let dir = folder("splitgone");
+        let one = dir.join("01 - Intro.opus");
+        let two = dir.join("02 - Middle.opus");
+        std::fs::write(&one, "a").unwrap();
+        std::fs::write(&two, "b").unwrap();
+        manifest::write(
+            &dir,
+            "https://youtu.be/vid",
+            [("vid#01".to_string(), one), ("vid#02".to_string(), two)].into_iter(),
+        )
+        .unwrap();
+        // The scan sees the video, whose full file went after the split.
+        let mut tracks = vec![video(&dir, false)];
+        let (tx, _rx) = mpsc::channel();
+        let asker = Asker { tx, enabled: false };
+        let cfg = super::tests::config(false);
+        let split = settle_split(&cfg, &asker, &Pass::plain(false), Vec::new(), &mut tracks);
+        assert!(split.is_some());
+        let names: Vec<&str> = tracks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["Intro", "Middle"]);
+        assert!(tracks.iter().all(|t| t.status == Status::Have), "the video would be fetched again");
+
+        // A folder never split, with no chapters, is the plain video.
+        let other = folder("splitnever");
+        let mut plain = vec![video(&other, false)];
+        assert!(settle_split(&cfg, &asker, &Pass::plain(false), Vec::new(), &mut plain).is_none());
+        assert_eq!(plain.len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&other).unwrap();
+    }
+
+    // Break it by removing the `Failed` early exit in `tag_tracks`: the reason becomes "no file".
+    #[test]
+    fn a_failed_cut_keeps_its_reason_through_the_tagging_pass() {
+        let dir = folder("cutreason");
+        let mut track = Track::new(1, "vid#01".into(), "Intro".into(), dir.join("01 - Intro.opus"));
+        track.status = Status::Failed;
+        let (tx, rx) = mpsc::channel();
+        let asker = Asker { tx: tx.clone(), enabled: false };
+        let cfg = super::tests::config(false);
+        let mut tracks = vec![track];
+        tag_tracks(
+            &cfg,
+            &tx,
+            &AtomicBool::new(false),
+            &mut tracks,
+            "Album",
+            &asker,
+            &mut CoverState::default(),
+            None,
+        );
+        drop(tx);
+        assert!(
+            !rx.try_iter().any(|m| matches!(m, Msg::Update { note: Some(n), .. } if n == "no file")),
+            "the cut's reason was replaced"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
