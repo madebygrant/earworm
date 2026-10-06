@@ -208,6 +208,13 @@ pub struct Track {
        distinguishes the two `Gone`s, and this is what `D` is allowed to act
        on. */
     pub departure_proven: bool,
+    /// The recording's ISRC, from the lookup that tagged it. It is what lets a
+    /// second video of the same song be recognised after the fact.
+    pub isrc: Option<String>,
+    /// Another copy of this song that earworm has noticed, said in words for
+    /// the row. A field and not a `Status`: a duplicate is not a tagging
+    /// outcome, and a status has to pass `settled()` and `tally()`.
+    pub twin: Option<String>,
 }
 
 impl Track {
@@ -230,6 +237,8 @@ impl Track {
             mbid: None,
             listed: false,
             departure_proven: false,
+            isrc: None,
+            twin: None,
         }
     }
 }
@@ -483,6 +492,11 @@ pub enum Msg {
     Progress {
         index: usize,
         percent: u16,
+    },
+    /// Says a track has a twin, or clears it.
+    Twin {
+        index: usize,
+        twin: Option<String>,
     },
     Update {
         index: usize,
@@ -1288,6 +1302,11 @@ impl App {
                 }
             }
             Msg::Artwork => self.art = None,
+            Msg::Twin { index, twin } => {
+                if let Some(t) = self.track_mut(index) {
+                    t.twin = twin;
+                }
+            }
             Msg::Path { index, path } => {
                 if let Some(t) = self.track_mut(index) {
                     t.path = Some(path);

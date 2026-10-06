@@ -1365,8 +1365,15 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
             let name = truncate(&track.name, name_width);
             let pad = name_width.saturating_sub(cols(&name));
             spans.push(Span::styled(format!("  {name}"), row_style(selected, p)));
+            if !tail.is_empty() || track.twin.is_some() {
+                spans.push(dim(" ".repeat(pad), p));
+            }
+            // Amber and a word, so it reads without colour too, and ahead of the tail so it keeps one column.
+            if let Some(twin) = &track.twin {
+                spans.push(Span::styled(format!("  ≈ {twin}"), Style::new().fg(p.warn)));
+            }
             if !tail.is_empty() {
-                spans.push(dim(format!("{:pad$}  {tail}", ""), p));
+                spans.push(dim(format!("  {tail}"), p));
             }
             ListItem::new(Line::from(spans))
         })
@@ -3503,6 +3510,44 @@ mod tests {
             col_of(&album, "tracks").unwrap(),
             col_of(&row_text(&symbols, 2), "tracks").unwrap() + 1
         );
+    }
+
+    #[test]
+    fn a_twin_is_said_on_the_row_in_words() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.intro_done = true;
+        let track = crate::app::Track::new(1, "a".into(), "Song".into(), "/music/B/01 - Song.opus".into());
+        app.apply(Msg::Tracks(vec![track]));
+        assert!(!screen_of(&mut app, 100, 12).contains('≈'));
+        app.apply(Msg::Twin { index: 1, twin: Some("maybe in A".into()) });
+        let screen = screen_of(&mut app, 100, 12);
+        assert!(screen.contains("≈ maybe in A"), "{screen}");
+    }
+
+    // With no source or note the marker used to hug the name, so it sat in a different column on every row.
+    #[test]
+    fn a_twin_keeps_one_column_whether_or_not_the_row_has_a_tail() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.intro_done = true;
+        let mk = |n: usize, name: &str| {
+            crate::app::Track::new(n, format!("id{n}"), name.into(), format!("/m/{n:02}.opus").into())
+        };
+        let mut with_tail = mk(2, "A much longer track name");
+        with_tail.source = "deezer".into();
+        app.apply(Msg::Tracks(vec![mk(1, "Short"), with_tail]));
+        for index in [1, 2] {
+            app.apply(Msg::Twin { index, twin: Some("maybe in A".into()) });
+        }
+        let screen = screen_of(&mut app, 120, 14);
+        let at: Vec<usize> = screen
+            .lines()
+            .filter(|l| l.contains("≈ maybe in A"))
+            .map(|l| super::cols(&l[..l.find('≈').unwrap()]))
+            .collect();
+        assert_eq!(at.len(), 2, "{screen}");
+        assert_eq!(at[0], at[1], "{screen}");
     }
 
     fn library_screen_at(width: u16, shelf: usize) -> Vec<String> {

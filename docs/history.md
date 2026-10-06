@@ -97,3 +97,33 @@ yet. It is what a design has to start from.
   read from Nerd Fonts' glyphnames.json. Not yet looked at in a patched font.
 - `◉`, `≡` and `⌂` drew small in the first real terminal, so they became `●`,
   `▤` and `◆`, bold. `☰` was tried and is two cells wide by `unicode-width`.
+
+## Songs on more than one playlist
+
+- Deezer's `/search` hit carries `isrc`: `Autobahn (2009 Remaster)` by
+  Kraftwerk came back with `GB01A0900374`, on a live request on 2026-10-06. No
+  extra request is needed. iTunes and AcoustID were not checked and carry none.
+- A third column on a sidecar entry would be read by an older binary as part of
+  the filename, so per-track data went in `#isrc` lines, which `load` skips by
+  the `#` rule.
+- Not done: the Art Track versus video investigation, the `OLAK5uy_` album page
+  check and the `fpcalc` thresholds. The first two are only needed for the
+  Art Track preference, the last for the fingerprint comparison, and neither of
+  those was built.
+- Not tried in a live sync: `copy_known` has only run against fixtures.
+
+## Art Track versus music video
+
+Measured 2026-10-06 on `Kraftwerk Autobahn` search results, against
+`vkOZNJYAZ7c` (the Art Track, channel `Kraftwerk`) and `iukUMRlaBBE` (a
+fan upload of the video).
+
+- The flat listing tells them apart by nothing. `media_type` and `availability`
+  print `NA` for both, and the channel is the bare artist name on one and an
+  ordinary channel on the other, which is what CLAUDE.md already says of the
+  uploader.
+- A full per-video extraction does. The Art Track has `track`, `album` and
+  `artist` set and a description opening `Provided to YouTube by Parlophone UK`;
+  the video has all of them null. That is one request per video, so it is only
+  affordable for the rows `mark_twins` has already flagged, never for a
+  whole playlist.

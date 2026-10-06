@@ -73,11 +73,9 @@ investigations, and the three decisions written down.
 Why here: this needs only the wave 1 decisions and data earworm already has,
 and it's the only wave that prevents a download rather than reporting one.
 
-Idea 1 is in progress (2026-10-06, uncommitted): `library_index` and
-`copy_known` in `src/worker.rs`, called from `pipeline` straight after the
-pick gate. Done so far: the code and the call. Still to do: the summary line,
-the tests below, the review, and the CLAUDE.md rule in wave 6. It needed none
-of wave 1's measurements, because an id match has no threshold.
+Status 2026-10-06: ideas 1 and 2 are built and merged into the working tree
+(`library_index`, `copy_known`, `mark_twins` in `src/worker.rs`), with tests.
+Still open from this wave: a live check on a real library.
 
 - **Library-wide video id index (idea 1).** Built from the sidecars of every
   other folder under `--dir`, asked only about this pass's `Pending` ids.
@@ -109,10 +107,10 @@ of wave 1's measurements, because an id match has no threshold.
   - Risk: this changes what a sync does. The copied file brings the other
     folder's tags and sleeve. Each copy is logged. The `Have` branch of
     `tag_tracks` reads the copy's tags and doesn't identify it again.
-  - Known gap: if the lookup found no album, the source's album tag holds
-    the other playlist's name (the `cfg.album` fill), and the copy keeps it.
-    Decide whether to rewrite it to this playlist's name, and how to tell
-    that fill apart from a real album with the same name as its folder.
+  - Decided 2026-10-06: if the lookup found no album, the source's album tag
+    holds the other playlist's name (the `cfg.album` fill), and the copy keeps
+    it. Rewriting it would need a way to tell that fill apart from a real album
+    with the same name as its folder, and a wrong guess overwrites a real tag.
   - Not covered: `retry` doesn't copy. Its downloads are tracks that already
     failed once, so this rarely matters.
   - Untested, like the other load-bearing lines in `pipeline`: the
@@ -138,6 +136,10 @@ pick gate. Break each fix and watch its test fail.
 
 ## 3. Identity that persists
 
+Status 2026-10-06: built. ISRC is read from Deezer, written to the tag and to
+`#isrc` lines, and compared across folders after tagging and when a folder is
+reopened.
+
 Why here: this builds on the display from wave 2 and gives wave 4 something
 cheaper to try before decoding audio.
 
@@ -160,6 +162,9 @@ old-format entry.
 
 ## 4. Local audio comparison
 
+Status 2026-10-06: not built, and not planned until the live runs show
+duplicates that ISRC and title matching miss.
+
 Why here: this covers only what waves 2 and 3 miss, and it's the most code,
 so build it once you can see how many duplicates are actually left.
 
@@ -180,6 +185,11 @@ measurements, and a test that a second pass reads the cache and starts no
 `fpcalc` (count spawns with a stub, as the lyrics tests count requests).
 
 ## 5. Acting on a detected pair
+
+Status 2026-10-06: not built. The investigation is done (docs/history.md): the
+flat listing has no field that tells an Art Track from a video, so the item as
+written, pre-unmarking at the gate, cannot be done from the listing. A full
+fetch per flagged pair can, at one request each.
 
 Why here: preferring one copy of a song decides what lands on disk, so it
 waits until detection has been in use and trusted. It also depends on the

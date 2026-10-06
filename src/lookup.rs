@@ -92,6 +92,8 @@ pub struct Match {
     pub mbid: Option<String>,
     pub cover_url: Option<String>,
     pub score: Option<f64>,
+    /// The recording's identity, which two different videos of one song share.
+    pub isrc: Option<String>,
     pub source: &'static str,
 }
 
@@ -286,6 +288,7 @@ pub fn acoustid(path: &Path, key: &str) -> Option<Match> {
                     .map(str::to_string),
                 cover_url: None,
                 score: Some(score),
+                isrc: None,
                 source: "acoustid",
             });
         }
@@ -326,6 +329,11 @@ pub fn deezer(artist: &str, title: &str) -> Option<Match> {
             .map(str::to_string),
         mbid: None,
         score: None,
+        isrc: hit
+            .get("isrc")
+            .and_then(Value::as_str)
+            .filter(|isrc| !isrc.is_empty())
+            .map(str::to_string),
         source: "deezer",
     })
 }
@@ -350,6 +358,7 @@ fn itunes_match(hit: &Value) -> Option<Match> {
             .map(upscale_artwork),
         mbid: None,
         score: None,
+        isrc: None,
         source: "apple",
     })
 }
@@ -944,6 +953,7 @@ mod tests {
             mbid: None,
             cover_url: None,
             score: None,
+            isrc: None,
             source: "apple",
         };
         assert!(plausible(&good, "Boards of Canada", "Roygbiv"));
@@ -954,6 +964,7 @@ mod tests {
             mbid: None,
             cover_url: None,
             score: None,
+            isrc: None,
             source: "apple",
         };
         assert!(!plausible(&bad, "Boards of Canada", "Roygbiv"));

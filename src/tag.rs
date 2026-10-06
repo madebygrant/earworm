@@ -58,6 +58,7 @@ pub struct Info {
     /// zero: one is unknown and the other is a claim.
     pub year: Option<u16>,
     pub duration: u64,
+    pub isrc: Option<String>,
 }
 
 /* What an edit writes. Album and year travel beside artist and title because
@@ -89,6 +90,10 @@ pub fn read(path: &Path) -> Result<Info> {
            year, which is the only one of the two earworm ever writes. */
         year: tag.and_then(|t| t.date()).map(|d| d.year),
         duration: file.properties().duration().as_secs(),
+        isrc: tag
+            .and_then(|t| t.get_string(ItemKey::Isrc))
+            .filter(|isrc| !isrc.is_empty())
+            .map(str::to_string),
     })
 }
 
@@ -99,6 +104,7 @@ pub struct Outcome {
     pub artist: String,
     pub title: String,
     pub mbid: Option<String>,
+    pub isrc: Option<String>,
 }
 
 fn with_tag<F: FnOnce(&mut Tag)>(path: &Path, edit: F) -> Result<()> {
@@ -759,6 +765,7 @@ pub fn identify(
         artist: info.artist.clone(),
         title: info.title.clone(),
         mbid: None,
+        isrc: None,
     };
 
     let mut found: Option<Match> = None;
@@ -800,6 +807,7 @@ pub fn identify(
         out.status = Status::Ok;
         out.source = m.source.into();
         out.mbid = m.mbid.clone();
+        out.isrc = m.isrc.clone();
         if let Some(score) = m.score {
             out.note = format!("score {score:.2}");
         }
@@ -825,6 +833,7 @@ pub fn identify(
         out.status = Status::Manual;
         out.source = "typed".into();
         out.note.clear();
+        out.isrc = typed.isrc.clone();
         let (artist, title, _) = apply(path, &typed, cfg, cover, asker, index, "")?;
         out.artist = artist;
         out.title = title;
@@ -886,6 +895,7 @@ fn manual(
         cover_url: extra.as_ref().and_then(|m| m.cover_url.clone()),
         mbid: None,
         score: None,
+        isrc: extra.as_ref().and_then(|m| m.isrc.clone()),
         source: "manual",
     })
 }
@@ -923,6 +933,13 @@ pub fn apply(
         tag.set_artist(artist.clone());
         if let Some(album) = &album {
             tag.set_album(album.clone());
+        }
+        // The title and artist above are this hit's, so an ISRC left from another recording would be a wrong claim about this one.
+        match &m.isrc {
+            Some(isrc) => {
+                tag.insert_text(ItemKey::Isrc, isrc.clone());
+            }
+            None => tag.remove_key(ItemKey::Isrc),
         }
         if let Some(data) = &jpeg {
             tag.remove_picture_type(PictureType::CoverFront);

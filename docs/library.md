@@ -41,6 +41,24 @@ has no URL, earworm rewrites only a playlist it wrote itself. Giving it a URL
 changes that: from the first sync the playlist upstream is what the folder
 holds, in that order, and earworm writes `<folder>.m3u8` to say so.
 
+## The same song on two playlists
+
+When a playlist wants a video that another folder under `--dir` already holds,
+earworm copies the file instead of downloading it again. The copy keeps the
+other folder's tags, album included, and its cover, takes this playlist's number, and the log says
+`copied track 3 from Focus`. It only copies a file that is already in the
+format you have chosen, so changing the format never leaves two in a folder.
+`--resync` copies too. If the other folder's album tag was only its playlist
+name, the copy has that name too; `A` sets the album you want.
+
+Two things are only marked, never skipped. At the pick screen a row ends in
+`≈ same as track 4` when the same listing holds a track with the same title and
+nearly the same length, and `≈ maybe in Focus` when a file of that title is
+already in another folder. A live version can share a title with the studio
+one, so you decide. After tagging, `≈ same recording in Focus` means Deezer gave
+two different videos the same ISRC, the recording's own id, which is also
+written into the file's tag.
+
 ## Giving one a URL
 
 `S` on a folder with no URL asks for one, then syncs. That sync is different

@@ -58,6 +58,9 @@ download from a music library:
 - **Icons for the library.** `●` marks an album, `▤` a playlist and `◆` a
   folder earworm did not download. `icons = "nerd"` draws larger Nerd Font glyphs, and `icons = "text"` goes
   back to words.
+- **A song on two playlists downloads once.** A video another folder already
+  holds is copied across instead of fetched again, and the pick screen marks a
+  likely duplicate with `≈`.
 - **Retries and undos.** `r` re-downloads whatever failed. `u` puts back the
   last tag edit.
 
