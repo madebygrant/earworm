@@ -10129,4 +10129,113 @@ mod duplicate_tests {
         assert_eq!(changed, [(1, None)]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
+    // The whole reopen path on real files: tag, sidecar, `open_shelf`, then the screen.
+    #[test]
+    fn a_reopened_folder_shows_the_twin_marker_on_screen() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let dir = library_dir("screen");
+        let (tx, rx) = channel();
+        let asker = Asker { tx: tx.clone(), enabled: false };
+        let mut cfg = cfg_for(&dir);
+        cfg.cover = false;
+        let tagged = |file: &Path| {
+            if tiny_opus(file).is_none() {
+                return false;
+            }
+            let m = crate::lookup::Match {
+                title: "Creep".into(),
+                artist: "Radiohead".into(),
+                album: None,
+                mbid: None,
+                cover_url: None,
+                score: None,
+                isrc: Some("GBAYE9200070".into()),
+                source: "test",
+            };
+            tag::apply(file, &m, &cfg, &mut CoverState::default(), &asker, 1, "").unwrap();
+            true
+        };
+        let (a, c) = (dir.join("A"), dir.join("C"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&c).unwrap();
+        let (fa, fc) = (a.join("01 - Creep.opus"), c.join("01 - Creep.opus"));
+        if !tagged(&fa) || !tagged(&fc) {
+            eprintln!("no ffmpeg, skipping");
+            return;
+        }
+        manifest::write(&a, "u", [("old".to_string(), fa)].into_iter()).unwrap();
+        manifest::set_isrcs(&a, &[("old".into(), "GBAYE9200070".into())]).unwrap();
+        manifest::write(&c, "u", [("new".to_string(), fc)].into_iter()).unwrap();
+
+        let shelf = library(&dir).into_iter().find(|s| s.name == "C").unwrap();
+        let mut tracks = Vec::new();
+        open_shelf(&mut cfg, &tx, &mut tracks, &shelf).unwrap();
+
+        let (ui_tx, _ui_rx) = channel();
+        let mut app = crate::app::App::new(ui_tx, "settings".into());
+        app.intro_done = true;
+        for msg in rx.try_iter() {
+            app.apply(msg);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 10)).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let screen: String = (0..10)
+            .map(|y| (0..120).map(|x| buffer[(x, y)].symbol().to_string()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("≈ same recording in A"), "{screen}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    // Two folders holding one video are what a copy makes, so reopening either shows no marker.
+    #[test]
+    fn a_reopened_folder_whose_video_is_also_elsewhere_shows_no_marker() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let dir = library_dir("screen-control");
+        let (tx, rx) = channel();
+        let asker = Asker { tx: tx.clone(), enabled: false };
+        let mut cfg = cfg_for(&dir);
+        cfg.cover = false;
+        let (a, b) = (dir.join("A"), dir.join("B"));
+        for folder in [&a, &b] {
+            std::fs::create_dir_all(folder).unwrap();
+            let file = folder.join("01 - Creep.opus");
+            if tiny_opus(&file).is_none() {
+                eprintln!("no ffmpeg, skipping");
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+            let m = crate::lookup::Match {
+                title: "Creep".into(),
+                artist: "Radiohead".into(),
+                album: None,
+                mbid: None,
+                cover_url: None,
+                score: None,
+                isrc: Some("GBAYE9200070".into()),
+                source: "test",
+            };
+            tag::apply(&file, &m, &cfg, &mut CoverState::default(), &asker, 1, "").unwrap();
+            manifest::write(folder, "u", [("same".to_string(), file)].into_iter()).unwrap();
+            manifest::set_isrcs(folder, &[("same".into(), "GBAYE9200070".into())]).unwrap();
+        }
+        let shelf = library(&dir).into_iter().find(|s| s.name == "A").unwrap();
+        let mut tracks = Vec::new();
+        open_shelf(&mut cfg, &tx, &mut tracks, &shelf).unwrap();
+        let (ui_tx, _ui_rx) = channel();
+        let mut app = crate::app::App::new(ui_tx, "settings".into());
+        app.intro_done = true;
+        for msg in rx.try_iter() {
+            app.apply(msg);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 10)).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let screen: String = (0..10)
+            .map(|y| (0..120).map(|x| buffer[(x, y)].symbol().to_string()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("Creep") && !screen.contains('≈'), "{screen}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

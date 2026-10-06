@@ -691,9 +691,11 @@ than at the start of every session.
 - **A duplicate is `Track.twin`, not a `Status`.** A status has to pass
   `settled()` and `tally()`, and it would replace the word that says how the
   tagging went, which a duplicate is not. `Msg::Twin` sets or clears it and the
-  row says `≈` and the words in `warn`, so nothing rests on colour. It sits
-  after the tail, which is padded to the widest on screen so every marker
-  keeps one column without moving the tail on rows that have one. A row the sync will copy says `≈ copy from Focus`, because
+  row says `≈` and the words in `warn`, so nothing rests on colour. It has
+  a column of its own ahead of the tail, reserved on every row while any row has
+  one and capped at `TWIN_MAX`, so the tail is what clips on a narrow screen and
+  the marker never leaves it: after the tail it disappeared at 70, 90 and 120
+  columns on a long title. The detail pane carries it whole. A row the sync will copy says `≈ copy from Focus`, because
   unpicking it saves a copy and not a download, and `copy_known` clears it. It is a
   warning only, never a skip: a live version and the studio one share a title.
 - **The pick gate compares titles with `reconcile`'s rules, and the library

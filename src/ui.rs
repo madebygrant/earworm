@@ -28,6 +28,8 @@ const KIND_WIDTH: usize = 8;
 /// to recognise a song, short enough that it is not what pushed the counts
 /// off the row.
 const NOW_PLAYING: usize = 28;
+/// The widest the twin column grows, so a long folder name cannot push the tail off.
+const TWIN_MAX: usize = 30;
 
 /* Columns, not characters. A Korean or Japanese glyph takes two cells and a
    combining mark takes none, so a column padded to a character count is as
@@ -1227,10 +1229,14 @@ fn draw_detail(
     if track.duration > 0 {
         lines.extend(detail_rows("length", &clock(track.duration), faint, width, p));
     }
+    // Whole here, since the row has to cut it to fit.
     for (label, value) in [("source", &track.source), ("note", &track.note)] {
         if !value.is_empty() {
             lines.extend(detail_rows(label, value, faint, width, p));
         }
+    }
+    if let Some(twin) = &track.twin {
+        lines.extend(detail_rows("twin", twin, faint, width, p));
     }
     // The whole of it: truncating this is what the pane exists to undo.
     if track.was != track.name {
@@ -1330,9 +1336,15 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
         .map(|pos| cols(&app.tracks[*pos].name))
         .max()
         .unwrap_or(0);
-    let name_width = longest.min(width.saturating_sub(STATUS_WIDTH + 9).max(12));
+    // A column of its own, ahead of the tail, only while some row has a twin: the tail is what clips.
+    let twin_width = rows
+        .iter()
+        .filter_map(|pos| app.tracks[*pos].twin.as_ref())
+        .map(|twin| cols(twin) + 4)
+        .max()
+        .map_or(0, |w| w.min(TWIN_MAX));
+    let name_width = longest.min(width.saturating_sub(STATUS_WIDTH + 9 + twin_width).max(12));
 
-    let tail_width = rows.iter().map(|pos| cols(&tail_of(&app.tracks[*pos]))).max().unwrap_or(0);
     let items: Vec<ListItem> = rows
         .iter()
         .map(|pos| {
@@ -1370,13 +1382,17 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
             let name = truncate(&track.name, name_width);
             let pad = name_width.saturating_sub(cols(&name));
             spans.push(Span::styled(format!("  {name}"), row_style(selected, p)));
-            if !tail.is_empty() || track.twin.is_some() {
-                spans.push(dim(format!("{:pad$}  {tail}", ""), p));
+            if !tail.is_empty() || twin_width > 0 {
+                spans.push(Span::raw(" ".repeat(pad)));
             }
-            // Amber and a word, after the tail padded to the widest, so it keeps one column.
-            if let Some(twin) = &track.twin {
-                let gap = tail_width.saturating_sub(cols(&tail));
-                spans.push(Span::styled(format!("{:gap$}  ≈ {twin}", ""), Style::new().fg(p.warn)));
+            // Amber and a word, so it reads without colour; the detail pane has it whole.
+            if twin_width > 0 {
+                let text = truncate(&track.twin.as_ref().map_or_else(String::new, |t| format!("  ≈ {t}")), twin_width);
+                let gap = twin_width.saturating_sub(cols(&text));
+                spans.push(Span::styled(format!("{text}{:gap$}", ""), Style::new().fg(p.warn)));
+            }
+            if !tail.is_empty() {
+                spans.push(dim(format!("  {tail}"), p));
             }
             ListItem::new(Line::from(spans))
         })
@@ -3558,6 +3574,28 @@ mod tests {
             .collect();
         assert_eq!(at.len(), 2, "{screen}");
         assert_eq!(at[0], at[1], "{screen}");
+    }
+
+    // A long title and a long folder name used to push the marker off every width tried, 120 included.
+    #[test]
+    fn the_twin_marker_survives_a_long_title_at_any_width() {
+        for width in [70u16, 90, 120] {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(tx, "settings".into());
+            app.intro_done = true;
+            let name = "Radiohead - Creep (Official Music Video, Remastered)";
+            let mut track = crate::app::Track::new(1, "a".into(), name.into(), "/m/01.opus".into());
+            track.source = "deezer".into();
+            track.note = "score 0.91".into();
+            app.apply(Msg::Tracks(vec![track]));
+            app.apply(Msg::Twin { index: 1, twin: Some("same recording in A Very Long Playlist Folder Name".into()) });
+            let screen = screen_of(&mut app, width, 16);
+            assert!(screen.contains('≈'), "gone at width {width}:\n{screen}");
+            if width >= 100 {
+                assert!(screen.contains("twin"), "the detail pane does not say it:\n{screen}");
+                assert!(screen.contains("Playlist Folder Name"), "{screen}");
+            }
+        }
     }
 
     fn library_screen_at(width: u16, shelf: usize) -> Vec<String> {
