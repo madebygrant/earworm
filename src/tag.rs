@@ -929,17 +929,21 @@ pub fn apply(
     });
     let album = album_name(cover, m.album.clone());
     with_tag(path, |tag| {
+        let same_song = tag
+            .title()
+            .is_some_and(|had| had.trim().to_lowercase() == m.title.trim().to_lowercase());
         tag.set_title(m.title.clone());
         tag.set_artist(artist.clone());
         if let Some(album) = &album {
             tag.set_album(album.clone());
         }
-        // The title and artist above are this hit's, so an ISRC left from another recording would be a wrong claim about this one.
+        // Acoustid and Apple hits carry none, so absence only clears it when the song changed.
         match &m.isrc {
             Some(isrc) => {
                 tag.insert_text(ItemKey::Isrc, isrc.clone());
             }
-            None => tag.remove_key(ItemKey::Isrc),
+            None if !same_song => tag.remove_key(ItemKey::Isrc),
+            None => {}
         }
         if let Some(data) = &jpeg {
             tag.remove_picture_type(PictureType::CoverFront);

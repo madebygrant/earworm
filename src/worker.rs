@@ -866,8 +866,8 @@ fn pipeline(
         kind = Some((manifest::Kind::Album, "its chapters"));
     }
     let album = matches!(kind, Some((manifest::Kind::Album, _)));
-    /* Chapters are cut from one video and have no id of their own to look up,
-       so a split pass neither copies nor compares titles. */
+    // Chapters are cut from one video and have no id to look up,
+    // so a split pass neither copies nor compares titles.
     let here = folder_of(tracks);
     let others = Others::new(cfg, here.as_deref().unwrap_or(Path::new("")));
     let known = match here.as_deref().filter(|_| split.is_none()) {
@@ -878,8 +878,8 @@ fn pipeline(
                 .map(|t| t.id.as_str())
                 .collect();
             let known = library_index(&others, &cfg.format, &wanted);
-            /* `library` stats every file in the library, so it is only asked
-               when some row is a download the id index could not account for. */
+            // `library` stats every file, so ask it only when a row
+            // is a download the id index could not account for.
             let unplaced = tracks
                 .iter()
                 .any(|t| t.status == Status::Pending && !known.contains_key(&t.id));
@@ -959,7 +959,7 @@ fn pipeline(
     }
 
     for (index, twin) in flag_isrc_twins(&others, tracks) {
-        let _ = tx.send(Msg::Twin { index, twin: Some(twin) });
+        let _ = tx.send(Msg::Twin { index, twin });
     }
     record_kind(tx, folder_of(tracks).as_deref(), kind);
     sync_manifest(cfg, tracks);
@@ -1426,6 +1426,13 @@ fn reconcile(tx: &Sender<Msg>, tracks: &mut Vec<Track>) {
     )));
 }
 
+// The pick gate's `copy from` is no longer true once the copy is done or has failed.
+fn unmark(tx: &Sender<Msg>, track: &mut Track) {
+    if track.twin.take().is_some() {
+        let _ = tx.send(Msg::Twin { index: track.index, twin: None });
+    }
+}
+
 /// A copy of a video that another folder already holds.
 struct Held {
     file: PathBuf,
@@ -1439,15 +1446,9 @@ struct Other {
 }
 
 /// The other playlist folders under `--dir`, read at most once per pass.
-/* Three questions want these sidecars: which file to copy, which title a
-   folder already holds, and which ISRC. Each reading them again was a walk of
-   the whole library per question, and a `--resync` repeats that per folder, so
-   the cost grew with the square of the library. The read is lazy, so a pass
-   with nothing to copy and nothing tagged never makes it.
-
-   Name order is what makes the same video in three folders always copy from
-   the same one. Hidden folders are left out, as `library` leaves them out, and
-   the folder being synced is not a source for itself. */
+// One read serves the id index, the title check and the ISRC check; a walk per question
+// made a `--resync` cost the square of the library. Lazy, so a pass with nothing to ask never reads.
+// Name order makes one video in three folders always copy from the same one.
 struct Others {
     dir: PathBuf,
     here: Option<std::ffi::OsString>,
@@ -1484,12 +1485,9 @@ impl Others {
     }
 }
 
-/* Video ids this pass wants, matched to a file the library already holds.
-   Built once per pass and not once per `--resync`: a song on two playlists
-   arrives in the first folder's pass, and the second folder's pass has to see
-   it. A file only counts when it is already in the format being asked for,
-   or the copy would put a second format in the folder for `convert` to undo.
-   `~` and chapter ids are no listing's, so no listing can ask for them. */
+// Ids this pass wants, matched to files other folders hold. Built per pass, not per `--resync`,
+// so the second folder sees what the first just fetched. Only the chosen format counts, or
+// `convert` would have a second format to undo; `~` and chapter ids are no listing's.
 fn library_index(others: &Others, format: &str, wanted: &HashSet<&str>) -> HashMap<String, Held> {
     let mut found: HashMap<String, Held> = HashMap::new();
     if wanted.is_empty() {
@@ -1512,13 +1510,9 @@ fn library_index(others: &Others, format: &str, wanted: &HashSet<&str>) -> HashM
     found
 }
 
-/* Copies, not hardlinks, so a tag edited in one folder is not edited in the
-   other. On APFS `fs::copy` clones and costs no space until one side changes.
-   The copy is named after the source, which already has the name its lookup
-   or an edit gave it, with this playlist's number in front: the scan's
-   prediction is yt-dlp's raw title, and a `Have` track is never renamed. It
-   goes through a scratch name and is renamed into place, so a copy killed
-   part-way cannot leave a truncated file that the next scan calls downloaded. */
+// A copy and not a hardlink, so editing a tag in one folder leaves the other alone. Named after the
+// source, which has the name its lookup gave it, with this playlist's number in front: a `Have` track
+// is never renamed. Through a scratch name, so a killed copy is not a truncated file the scan trusts.
 fn copy_known(tx: &Sender<Msg>, tracks: &mut [Track], known: &HashMap<String, Held>) -> usize {
     let Some(folder) = folder_of(tracks) else {
         return 0;
@@ -1537,6 +1531,7 @@ fn copy_known(tx: &Sender<Msg>, tracks: &mut [Track], known: &HashMap<String, He
                 "copy: {name} is already here, so track {} downloads as usual",
                 track.index
             )));
+            unmark(tx, track);
             continue;
         }
         let scratch = folder.join(format!("{SCRATCH}{name}"));
@@ -1547,16 +1542,14 @@ fn copy_known(tx: &Sender<Msg>, tracks: &mut [Track], known: &HashMap<String, He
         if let Err(err) = done {
             let _ = std::fs::remove_file(&scratch);
             let _ = tx.send(Msg::Log(format!("copy: track {}: {err}", track.index)));
+            unmark(tx, track);
             continue;
         }
         track.path = Some(dest.clone());
         track.status = Status::Have;
         track.source = "copied".into();
         track.note = format!("from {}", held.folder);
-        // The pick gate said "copy from"; now it has been done.
-        if track.twin.take().is_some() {
-            let _ = tx.send(Msg::Twin { index: track.index, twin: None });
-        }
+        unmark(tx, track);
         let _ = tx.send(Msg::Path { index: track.index, path: dest });
         let _ = tx.send(Msg::Update {
             index: track.index,
@@ -1574,33 +1567,36 @@ fn copy_known(tx: &Sender<Msg>, tracks: &mut [Track], known: &HashMap<String, He
     copied
 }
 
-/* Every spelling of a title a comparison should try: the whole of it, and
-   what follows the last ` - `, since one side often carries the artist and
-   the other does not. */
+// The whole title and what follows the last ` - `, since one side often has the artist and the other not.
 fn title_keys(text: &str) -> (String, String) {
     let whole = normalised(strip_number(text));
     let tail = whole.rsplit_once(" - ").map_or_else(String::new, |(_, t)| t.trim().to_string());
     (whole, tail)
 }
 
-/// Marks a track that looks like another copy of the same song, for the pick
-/// gate to show. A warning and never a skip: a live version and the studio
-/// one can share a title.
-/* Two ids in this listing match on title and a duration within two seconds,
-   `reconcile`'s rules. Against files already in the library only the title is
-   compared, since their durations would cost a tag read per file and this is
-   run for a screen. A title match is never made across two tails, which is
-   where every `Intro` would meet every other. An id the library already holds
-   is said as a copy instead, since that is what the sync will do with it. */
+/// Marks a likely copy of the same song for the pick gate. A warning and never a skip.
+// Two ids in this listing match on title and a duration within 2s, `reconcile`'s rules. Library files
+// match on title only, since their length costs a tag read. Two tails never meet, or every `Intro` would.
+// An id the library holds says it will be copied instead, which is what the sync does.
 fn mark_twins(tracks: &mut [Track], known: &HashMap<String, Held>, shelves: &[Shelf], here: &Path) {
     let keys: Vec<(String, String)> = tracks.iter().map(|t| title_keys(&t.name)).collect();
-    let mut library: Vec<((String, String), &str)> = Vec::new();
+    // First folder wins, as it did when this was a scan in folder order.
+    let mut whole_of: HashMap<String, &str> = HashMap::new();
+    let mut tail_of: HashMap<String, &str> = HashMap::new();
     for shelf in shelves.iter().filter(|s| s.path.file_name() != here.file_name()) {
         for (name, present) in &shelf.files {
-            if *present {
-                let stem = Path::new(name).file_stem().unwrap_or_default().to_string_lossy();
-                library.push((title_keys(&stem), shelf.name.as_str()));
+            if !present {
+                continue;
             }
+            let stem = Path::new(name).file_stem().unwrap_or_default().to_string_lossy();
+            let (whole, tail) = title_keys(&stem);
+            if whole.is_empty() {
+                continue;
+            }
+            if !tail.is_empty() {
+                tail_of.entry(tail).or_insert(shelf.name.as_str());
+            }
+            whole_of.entry(whole).or_insert(shelf.name.as_str());
         }
     }
     for i in 0..tracks.len() {
@@ -1627,31 +1623,30 @@ fn mark_twins(tracks: &mut [Track], known: &HashMap<String, Held>, shelves: &[Sh
             continue;
         }
         let (whole, tail) = &keys[i];
-        let hit = library.iter().find(|((w, t), _)| {
-            !w.is_empty() && (w == whole || (w == tail && !tail.is_empty()) || t == whole)
-        });
-        if let Some((_, folder)) = hit {
+        let hit = whole_of
+            .get(whole)
+            .or_else(|| whole_of.get(tail).filter(|_| !tail.is_empty()))
+            .or_else(|| tail_of.get(whole));
+        if let Some(folder) = hit {
             tracks[i].twin = Some(format!("maybe in {folder}"));
         }
     }
 }
 
-/* After tagging, when the lookup has had its say: two different videos that
-   Deezer gives the same ISRC are one recording. Another folder's answer comes
-   from its sidecar's `#isrc` lines, so this costs no tag read. The same video
-   in two folders is what a copy produces and is not a twin. Returns what it
-   marked, for the caller to say: `open_shelf` calls it before the tracks are
-   sent and has nobody to tell. */
-fn flag_isrc_twins(others: &Others, tracks: &mut [Track]) -> Vec<(usize, String)> {
-    let mut marked = Vec::new();
+// Two videos with one ISRC are one recording. Returns what changed; `open_shelf` has nobody to tell.
+// A track with an ISRC drops its earlier title-based marker, since the ISRC is the stronger answer.
+// The same video in two folders is what a copy makes, so it is not a twin.
+fn flag_isrc_twins(others: &Others, tracks: &mut [Track]) -> Vec<(usize, Option<String>)> {
+    let mut changed = Vec::new();
     if tracks.iter().all(|t| t.isrc.is_none()) {
-        return marked;
+        return changed;
     }
     let mut elsewhere: HashMap<&str, (&str, &str)> = HashMap::new();
     for other in others.all() {
+        let files: HashMap<&str, &Path> =
+            other.sidecar.entries.iter().map(|(id, file)| (id.as_str(), file.as_path())).collect();
         for (id, isrc) in &other.sidecar.isrcs {
-            let held = other.sidecar.entries.iter().any(|(entry, file)| entry == id && file.is_file());
-            if held {
+            if files.get(id.as_str()).is_some_and(|file| file.is_file()) {
                 elsewhere.entry(isrc.as_str()).or_insert((other.name.as_str(), id.as_str()));
             }
         }
@@ -1670,12 +1665,12 @@ fn flag_isrc_twins(others: &Others, tracks: &mut [Track]) -> Vec<(usize, String)
                 .map(|(folder, _)| format!("same recording in {folder}"))
         };
         seen.entry(isrc).or_insert((track.index, track.id.clone()));
-        if let Some(twin) = twin {
-            track.twin = Some(twin.clone());
-            marked.push((track.index, twin));
+        if track.twin != twin {
+            track.twin.clone_from(&twin);
+            changed.push((track.index, twin));
         }
     }
-    marked
+    changed
 }
 
 /// Lowercased, composed and trimmed, which is what every other comparison in
@@ -2315,17 +2310,16 @@ fn tag_tracks(
                 track.artist = out.artist;
                 track.title = out.title;
                 track.mbid = out.mbid;
-                // A re-identified track may no longer be the recording its sidecar line names.
-                if out.isrc.is_none()
-                    && track.isrc.take().is_some()
+                let info = tag::read(&path).ok();
+                // The file is the truth, so a line for a recording it no longer holds goes.
+                let isrc = info.as_ref().map_or(out.isrc, |i| i.isrc.clone());
+                if isrc.is_none()
+                    && track.isrc.is_some()
                     && let Some(folder) = path.parent()
                 {
                     let _ = manifest::drop_isrc(folder, &track.id);
                 }
-                if out.isrc.is_some() {
-                    track.isrc = out.isrc;
-                }
-                let info = tag::read(&path).ok();
+                track.isrc = isrc;
                 track.duration = info.as_ref().map(|i| i.duration).unwrap_or(0);
                 track.album = info.as_ref().map(|i| i.album.clone()).unwrap_or_default();
                 track.year = info.as_ref().and_then(|i| i.year);
@@ -3553,13 +3547,14 @@ fn search(
     track.source = m.source.into();
     track.note = std::mem::take(&mut note);
     track.mbid = m.mbid.clone();
-    if m.isrc.is_none()
+    let isrc = written.as_ref().and_then(|i| i.isrc.clone());
+    if isrc.is_none()
         && track.isrc.is_some()
         && let Some(folder) = path.parent()
     {
         let _ = manifest::drop_isrc(folder, &track.id);
     }
-    track.isrc.clone_from(&m.isrc);
+    track.isrc = isrc;
     if !departed {
         track.listed = true;
     }
@@ -9796,10 +9791,7 @@ mod duplicate_tests {
         Track::new(index, id.into(), name.into(), folder.join(format!("{index:02} - {name}.opus")))
     }
 
-    /* The whole path short of the scan: the index finds the file, the copy
-       lands under this playlist's number, and the archive then names the id so
-       yt-dlp skips it. Break `copy_known` to leave the track `Pending` and the
-       archive line goes with it. */
+    // The path short of the scan: index, copy under this playlist's number, then the archive names the id.
     #[test]
     fn a_video_another_folder_holds_is_copied_and_the_archive_skips_it() {
         let dir = library_dir("copy");
@@ -10072,6 +10064,69 @@ mod duplicate_tests {
         std::fs::remove_file(manifest::path(&dir.join("A"))).unwrap();
         assert_eq!(others.all().as_ptr(), first);
         assert_eq!(others.all().len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    // An acoustid or Apple hit has no ISRC to give, and that is no reason to lose the one the file has.
+    #[test]
+    fn a_hit_with_no_isrc_keeps_the_one_the_same_song_already_has() {
+        let dir = library_dir("isrc-keep");
+        let file = dir.join("01 - A.opus");
+        if tiny_opus(&file).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            return;
+        }
+        let (tx, _rx) = channel();
+        let asker = Asker { tx, enabled: false };
+        let mut cfg = config(false);
+        cfg.cover = false;
+        let hit = |isrc: Option<&str>| crate::lookup::Match {
+            title: "Autobahn".into(),
+            artist: "Kraftwerk".into(),
+            album: None,
+            mbid: None,
+            cover_url: None,
+            score: None,
+            isrc: isrc.map(Into::into),
+            source: "test",
+        };
+        let mut cover = CoverState::default();
+        tag::apply(&file, &hit(Some("GB01A0900374")), &cfg, &mut cover, &asker, 1, "").unwrap();
+        tag::apply(&file, &hit(None), &cfg, &mut cover, &asker, 1, "").unwrap();
+        assert_eq!(tag::read(&file).unwrap().isrc.as_deref(), Some("GB01A0900374"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_copy_that_does_not_happen_does_not_leave_its_marker() {
+        let dir = library_dir("copy-skip");
+        folder_with(&dir, "A", "vid1", "01 - Song.opus");
+        let b = dir.join("B");
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(b.join("02 - Song.opus"), "somebody else's").unwrap();
+        let mut tracks = vec![pending(2, "vid1", "Song", &b)];
+        let known = index_for(&dir, &b, &HashSet::from(["vid1"]));
+        mark_twins(&mut tracks, &known, &[], &b);
+        let (tx, rx) = channel();
+        assert_eq!(copy_known(&tx, &mut tracks, &known), 0);
+        assert_eq!(tracks[0].twin, None, "it still says it was copied");
+        assert!(rx.try_iter().any(|m| matches!(m, Msg::Twin { twin: None, .. })));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // The ISRC is the stronger answer, so it replaces a title guess it contradicts.
+    #[test]
+    fn an_isrc_replaces_the_title_marker_it_contradicts() {
+        let dir = library_dir("isrc-replaces");
+        let a = folder_with(&dir, "A", "old", "01 - Song.opus");
+        manifest::set_isrcs(&a, &[("old".into(), "AAAA".into())]).unwrap();
+        let b = dir.join("B");
+        let mut tracks = vec![pending(1, "new", "Song", &b)];
+        tracks[0].twin = Some("maybe in A".into());
+        tracks[0].isrc = Some("BBBB".into());
+        let cfg = cfg_for(&dir);
+        let changed = flag_isrc_twins(&Others::new(&cfg, &b), &mut tracks);
+        assert_eq!(tracks[0].twin, None);
+        assert_eq!(changed, [(1, None)]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

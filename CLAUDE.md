@@ -692,8 +692,8 @@ than at the start of every session.
   `settled()` and `tally()`, and it would replace the word that says how the
   tagging went, which a duplicate is not. `Msg::Twin` sets or clears it and the
   row says `≈` and the words in `warn`, so nothing rests on colour. It sits
-  ahead of the tail in a column of its own: after the tail it landed wherever
-  the tail ended. A row the sync will copy says `≈ copy from Focus`, because
+  after the tail, which is padded to the widest on screen so every marker
+  keeps one column without moving the tail on rows that have one. A row the sync will copy says `≈ copy from Focus`, because
   unpicking it saves a copy and not a download, and `copy_known` clears it. It is a
   warning only, never a skip: a live version and the studio one share a title.
 - **The pick gate compares titles with `reconcile`'s rules, and the library
@@ -713,16 +713,19 @@ than at the start of every session.
   reader does with these. `set_isrcs` merges and drops an id with no entry,
   and is called from `write_manifest` after the entries are written, since that
   rewrite decides which ids still exist. The file's tag is the truth and the
-  sidecar follows it: `tag::apply` removes an ISRC when the new hit has none,
-  since the title above it is another recording's, and the identify and `T`
-  paths call `drop_isrc` for the line. A track already on disk reads its ISRC
+  sidecar follows it: `tag::apply` removes an ISRC only when the hit has none
+  *and* its title differs from the file's, because an AcoustID or Apple hit
+  never carries one and would otherwise strip a correct tag. The identify and
+  `T` paths then read the file back and call `drop_isrc` if the line is stale. A track already on disk reads its ISRC
   off the tag in `tag_tracks` and `open_shelf`, so an old file is compared and
   a reopened folder shows what a sync did. Pinned by
   `isrcs_ride_in_headers_beside_an_old_format_entry_and_vanish_with_it`.
 - **Only Deezer gives an ISRC.** `lookup::deezer` reads `isrc` off the search
   hit it already makes, which costs no request; Apple and AcoustID matches
   carry `None`. `flag_isrc_twins` runs after tagging and in `open_shelf`, and
-  compares against other folders' `#isrc` lines, so it costs no tag read. The same video in two folders
+  compares against other folders' `#isrc` lines, so it costs no tag read. A
+  track with an ISRC drops its title-based marker first, since the ISRC is the
+  stronger answer and a contradicted guess should not outlive it. The same video in two folders
   is what a copy makes and is not a twin.
 - **Three call sites in `pipeline` carry this and nothing tests them.**
   `library_index` and `mark_twins` before `Msg::Tracks`, `copy_known` after

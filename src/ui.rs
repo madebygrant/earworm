@@ -1243,6 +1243,22 @@ fn draw_detail(
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
+// The dim words after a track's name: where it came from, why, and what it was before.
+fn tail_of(track: &app::Track) -> String {
+    let mut bits: Vec<String> = Vec::new();
+    if !track.source.is_empty() {
+        bits.push(track.source.clone());
+    }
+    if !track.note.is_empty() {
+        bits.push(track.note.clone());
+    }
+    // The video title the tags were corrected away from, so a wrong identification shows.
+    if track.was != track.name {
+        bits.push(format!("was {}", truncate(&track.was, 32)));
+    }
+    bits.join("  ")
+}
+
 fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
     let p = app.theme;
     let rows = app.rows();
@@ -1316,6 +1332,7 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
         .unwrap_or(0);
     let name_width = longest.min(width.saturating_sub(STATUS_WIDTH + 9).max(12));
 
+    let tail_width = rows.iter().map(|pos| cols(&tail_of(&app.tracks[*pos]))).max().unwrap_or(0);
     let items: Vec<ListItem> = rows
         .iter()
         .map(|pos| {
@@ -1349,31 +1366,17 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
                 ));
             }
 
-            let mut bits: Vec<String> = Vec::new();
-            if !track.source.is_empty() {
-                bits.push(track.source.clone());
-            }
-            if !track.note.is_empty() {
-                bits.push(track.note.clone());
-            }
-            // The video title the tags were corrected away from, so a wrong
-            // identification is visible without opening the file.
-            if track.was != track.name {
-                bits.push(format!("was {}", truncate(&track.was, 32)));
-            }
-            let tail = bits.join("  ");
+            let tail = tail_of(track);
             let name = truncate(&track.name, name_width);
             let pad = name_width.saturating_sub(cols(&name));
             spans.push(Span::styled(format!("  {name}"), row_style(selected, p)));
             if !tail.is_empty() || track.twin.is_some() {
-                spans.push(dim(" ".repeat(pad), p));
+                spans.push(dim(format!("{:pad$}  {tail}", ""), p));
             }
-            // Amber and a word, so it reads without colour too, and ahead of the tail so it keeps one column.
+            // Amber and a word, after the tail padded to the widest, so it keeps one column.
             if let Some(twin) = &track.twin {
-                spans.push(Span::styled(format!("  ≈ {twin}"), Style::new().fg(p.warn)));
-            }
-            if !tail.is_empty() {
-                spans.push(dim(format!("  {tail}"), p));
+                let gap = tail_width.saturating_sub(cols(&tail));
+                spans.push(Span::styled(format!("{:gap$}  ≈ {twin}", ""), Style::new().fg(p.warn)));
             }
             ListItem::new(Line::from(spans))
         })
@@ -3536,11 +3539,18 @@ mod tests {
         };
         let mut with_tail = mk(2, "A much longer track name");
         with_tail.source = "deezer".into();
-        app.apply(Msg::Tracks(vec![mk(1, "Short"), with_tail]));
+        let mut plain = mk(3, "Third");
+        plain.source = "deezer".into();
+        app.apply(Msg::Tracks(vec![mk(1, "Short"), with_tail, plain]));
         for index in [1, 2] {
             app.apply(Msg::Twin { index, twin: Some("maybe in A".into()) });
         }
         let screen = screen_of(&mut app, 120, 14);
+        let col = |line: &str, needle: &str| super::cols(&line[..line.find(needle).unwrap()]);
+        // A twin row's source stays where a plain row's is.
+        let sources: Vec<usize> = screen.lines().filter(|l| l.contains("deezer")).map(|l| col(l, "deezer")).collect();
+        assert_eq!(sources.len(), 2, "{screen}");
+        assert_eq!(sources[0], sources[1], "{screen}");
         let at: Vec<usize> = screen
             .lines()
             .filter(|l| l.contains("≈ maybe in A"))

@@ -37,10 +37,8 @@ const KIND: &str = "#kind";
 /// Set when somebody has told earworm to stop listing this folder. The files
 /// stay exactly where they are; only the row goes.
 const HIDDEN: &str = "#hidden";
-/// One line per track with a recording id: `#isrc`, a tab, then the video id,
-/// a space and the ISRC. A header rather than a third column on the entry
-/// line, because an older binary reads that column as part of the filename,
-/// sees every file as missing and downloads the library again.
+/// One line per recording: `#isrc`, a tab, the video id, a space and the ISRC.
+// A header and not an entry column, which an older binary would read as part of the filename.
 const ISRC: &str = "#isrc";
 
 /// Marks an id earworm invented rather than one YouTube gave it.
@@ -386,14 +384,18 @@ pub fn set_kind(folder: &Path, kind: Kind) -> std::io::Result<()> {
     body(folder, &headers, was.entries.into_iter())
 }
 
+// A space splits the id from the ISRC, and a local id is no listing's: neither can be held.
+fn isrc_line_ok(id: &str, isrc: &str) -> bool {
+    !is_local(id) && !id.contains(['\t', '\n', ' ']) && !isrc.contains(['\t', '\n', ' '])
+}
+
 /// Records the ISRCs a pass found, keeping the ones already there.
-/* Only ids that still have an entry are kept, so a track that left the
-   folder does not leave a line behind. Called after the entries are written,
-   because that rewrite is what decides which ids are still here. */
+// Only ids that still have an entry are kept, so a departed track leaves no line.
+// Called after the entries are written, since that rewrite decides which ids remain.
 pub fn set_isrcs(folder: &Path, found: &[(String, String)]) -> std::io::Result<()> {
     let was = load(folder);
     let mut isrcs = was.isrcs.clone();
-    for (id, isrc) in found {
+    for (id, isrc) in found.iter().filter(|(id, isrc)| isrc_line_ok(id, isrc)) {
         match isrcs.iter_mut().find(|(known, _)| known == id) {
             Some(entry) => entry.1.clone_from(isrc),
             None => isrcs.push((id.clone(), isrc.clone())),
@@ -503,10 +505,8 @@ fn body(
     if headers.hidden {
         body.push_str(&format!("{HIDDEN}\tyes\n"));
     }
-    for (id, isrc) in &headers.isrcs {
-        if !id.contains(['\t', '\n', ' ']) && !isrc.contains(['\t', '\n', ' ']) {
-            body.push_str(&format!("{ISRC}\t{id} {isrc}\n"));
-        }
+    for (id, isrc) in headers.isrcs.iter().filter(|(id, isrc)| isrc_line_ok(id, isrc)) {
+        body.push_str(&format!("{ISRC}\t{id} {isrc}\n"));
     }
     for (id, file) in entries {
         let Some(name) = file.file_name().map(|n| n.to_string_lossy().to_string()) else {
@@ -532,9 +532,8 @@ mod tests {
         dir
     }
 
-    /* The ISRC is a header, never a third column: an older binary splits an
-       entry on its first tab and would read `01 - A.opus\tGB01A…` as a
-       filename, call every file missing and download the library again. */
+    // A header, never a third column: an older binary splits an entry on its first tab,
+    // reads `01 - A.opus\tGB01A…` as a filename and downloads the library again.
     #[test]
     fn isrcs_ride_in_headers_beside_an_old_format_entry_and_vanish_with_it() {
         let dir = scratch("isrc");
@@ -559,6 +558,22 @@ mod tests {
         write(&dir, "u", std::iter::empty()).unwrap();
         set_isrcs(&dir, &[]).unwrap();
         assert!(load(&dir).isrcs.is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // A local id with a space cannot be held, and must not look like a change on every pass.
+    #[test]
+    fn an_isrc_that_cannot_be_written_is_not_held() {
+        let dir = scratch("isrc-space");
+        let file = dir.join("Song name.opus");
+        std::fs::write(&file, "x").unwrap();
+        write(&dir, "", [("~Song name.opus".to_string(), file)].into_iter()).unwrap();
+        set_isrcs(&dir, &[("~Song name.opus".into(), "GB01A0900374".into())]).unwrap();
+        assert!(load(&dir).isrcs.is_empty());
+        let before = std::fs::metadata(path(&dir)).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        set_isrcs(&dir, &[("~Song name.opus".into(), "GB01A0900374".into())]).unwrap();
+        assert_eq!(std::fs::metadata(path(&dir)).unwrap().modified().unwrap(), before, "rewritten for nothing");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
