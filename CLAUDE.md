@@ -636,6 +636,167 @@ than at the start of every session.
   `--no-album` is the control that already exists. Worth doing on its own, not
   smuggled in here.
 
+### Splitting a video by its chapters
+
+- **The choice is asked, never assumed, and only with a gate.** A video with
+  two or more chapters is not an album: `Me at the zoo` has three in nineteen
+  seconds, and tutorials and podcasts carry timestamps. `settle_split` asks
+  only when `pass.gate` is on, the video's file is not already there, and the
+  folder holds no chapters of it. `--resync` and `--no-pick` pass no gate, so
+  the unattended answer is the video as it was, the same reasoning as the
+  `false` literal `resync` passes.
+- **The sidecar's chapter entries are the whole record of the choice.** A
+  header would have to be carried by every writer of the manifest; the `vid#NN`
+  entries already are, and `write_manifest` preserves entries the current
+  tracks do not cover. `manifest::is_split` reads them. A folder that holds the
+  whole file is never asked again, which is also how a declined split stays
+  declined.
+- **A chapter id is `{video}#{nn}`, and `is_chapter` checks the whole shape.**
+  A bare `#` matched `~Song #2.mp3`, a local id, and one such file made
+  `retry` skip its download for every track in a synced folder. It is guarded
+  like a `~` id. No listing names it, so `note_departures` skips it: a listing that holds the
+  video would otherwise call every chapter departed, prove it, and offer the
+  album to `D`. It is not guarded in `write_archive` because chapter tracks
+  never reach it: yt-dlp is only ever given the one video.
+- **yt-dlp is not used to split.** `--split-chapters` keeps the whole file, and
+  no hook reports the chapter files (docs/history.md has the four stages
+  tried), so earworm would be predicting names yt-dlp has already sanitised.
+  It cuts with ffmpeg itself, and names the files.
+- **A cut is a copy except for flac and alac, and the length is checked.** A
+  flac with no seek table ignores the range under a copy and writes the whole
+  file, exiting 0. `tag::cut` re-encodes the lossless formats and compares the
+  result's length with the chapter's, so that case is an error and not a
+  full-length track. `a_chapter_cut_is_the_right_length_in_every_container`
+  fails if the re-encode is taken out.
+- **A cut is written under `SCRATCH` and renamed into place, and the manifest
+  entry is written after each chapter.** A kill in the middle of ffmpeg leaves
+  a hidden scratch file that `sweep_scratch` clears at the start of the next
+  cut, and nothing at the name a later sync reads as a finished chapter. The
+  entry is the only record the folder was split: written once at the end, a
+  run stopped half way left the full file and some cut files with no entries,
+  so the next sync read the video as whole and the chapters as somebody's own
+  music. What is still not covered is a chapter cut and recorded but stopped
+  before the lookup: it reads as `Have` and is never identified, which is what
+  any downloaded track in that state does.
+- **The full file goes last, and only if no chapter failed.** `fetch_split`
+  removes it once every track has a file of its own that is not the video's.
+  A failed chapter can be recorded against the video's own path, which is on
+  disk and is not its cut, so the test is on `Failed` as well as on the file.
+  A chapter whose name would equal the video's gets `(chapter)` added in
+  `chapter_tracks`, because the cut reads the file it would write over.
+- **A split folder stays split when the chapters vanish upstream.**
+  `settle_split` reads `manifest::is_split` before it looks at the listing's
+  chapters: with none, it rebuilds the tracks from the sidecar's `vid#nn`
+  entries (`held_chapters`), so the video is not fetched again beside the cuts
+  and the `.m3u8` keeps every chapter. A folder never split with no chapters is
+  the plain video.
+- **A cut carries nothing of the video but audio and its picture.** `-map_metadata
+  -1` leaves the chapter list, so `tag::cut` also drops chapters, and
+  `fetch_split` copies the full file's picture onto each cut: it is the fallback
+  art for a chapter the lookup cannot place. A cut that fails keeps its reason:
+  `tag_tracks` leaves a `Failed` track with no file alone, or "no file" replaces
+  `cut: ...`, and the cut error also goes to the log.
+- **The kill window the sidecar cannot cover.** Stopped after the download and
+  before the first cut is recorded, the folder holds the whole video and no
+  chapter entry, so the next sync reads it as a video that was never split and
+  asks again. Nothing is lost.
+- **A split promotes the kind only when nothing has answered.** A `[playlist]`
+  name or an earlier header is somebody's choice, and the name wins on
+  reopening anyway, so overriding it made the run and the library disagree.
+- **The video is one row while it downloads.** yt-dlp reports progress and
+  `@D` by the video's index, so on chapter rows it would mark chapter 1 as the
+  whole download and hand it the full-length file's path. `fetch_split` sends
+  the video, then the chapters once they exist.
+- **`retry` does not download for a split video.** Its tracks have no download
+  of their own, and running yt-dlp over them would fetch the whole video again
+  and give its file to track 1. A sync cuts anything missing, from the full
+  file that was kept for it.
+- **`convert` does nothing for chapters.** `plans` is empty when split: a
+  chapter has no video of its own to refetch, and a cut in the old format is
+  not converted by yt-dlp.
+- **Four things in `pipeline` carry this and nothing tests them.** The call
+  to `settle_split`, `album` and `kind` being promoted when it returns
+  `Some`, the empty `plans`, and `fetch_split` standing in for `ytdlp::run`.
+  Reaching them needs a live scan, as with the three lines in the albums
+  section. What is tested is one level down, and the whole path was run once
+  by hand against a real six-chapter video: five tracks of the right lengths,
+  the full file gone, and the folder read back as split.
+- **The scan's `--print` carries the chapters, and the stubs agree.** One
+  more field before the filename: `splitn(7)`. All three stub yt-dlps print
+  it as `NA`, so a stub still printing six fields breaks where the format is.
+
+### Loudness tags
+
+- **`loudness` is off until the file turns it on.** It goes through `opt_in`
+  like `convert`, because the pass runs on tracks already on disk and rewrites
+  their tags: on by default, the next `--resync` would touch every file in
+  the library. The flag only ever switches it off.
+- **The two reference levels are different on purpose.** Opus is
+  `R128_TRACK_GAIN`, a Q7.8 integer against -23 LUFS, and nothing else.
+  Everything else is `REPLAYGAIN_TRACK_GAIN` in dB against -18 plus a peak.
+  Opus players ignore ReplayGain, and writing both would give them two
+  answers. `the_two_reference_levels_are_not_swapped` pins the numbers.
+- **`write_loudness` skips a file that already has the track tag.** A resync
+  then costs a tag read and no ffmpeg, and a value another tool wrote stays.
+  Album gain is the opposite: it is rewritten when the computed value differs,
+  because adding a track changes it for every file.
+- **Album gain is read back from the track tags, not measured again.**
+  `stored_loudness` inverts the gain, so the album pass decodes nothing. It
+  depends on the track pass having run first, which is why it sits after
+  `tag_tracks` in `pipeline` and only when the folder is an album.
+- **Opus albums have no peak.** R128 has no peak tag to write, and inventing
+  one in a ReplayGain tag would give opus players a second answer.
+- **`measure` writes ffmpeg's stderr to a file.** The summary is on stderr,
+  and `run_bounded` drains no pipe, for the reason `transcode` documents.
+  Silence prints `-inf`, which parses as a number, so `parse_loudness` refuses
+  non-finite values or a silent file would be written a gain of infinity.
+- **A measuring failure is a log line, never a status.** It costs one tag.
+  Marking the track `Failed` would report a downloaded, tagged file as broken.
+- **`Extra::key` picks the key from the tag type.** lofty has no `Lyrics`
+  mapping for ID3v2, only `UnsyncLyrics`, and `set_extra` reports a key the
+  container cannot hold instead of dropping it.
+- **`lyrics` is off until the file turns it on,** for the reason `loudness`
+  is, and because it is the one setting that makes a request to a third party
+  for every track.
+- **`enrich_with` asks for lyrics only after reading the tag.** A track that
+  has words never costs a request, a rerun is free, and lyrics the user typed
+  or another tool wrote are never replaced. The fetch is a closure so the test
+  counts requests without a network, as `tag::sleeve` does.
+- **LRCLIB's `get` needs an album and a duration, and most playlist tracks
+  have no album.** `lookup::lyrics` tries `get` only when there is an album and
+  otherwise searches by artist and title. A search result has to be within two
+  seconds of the track's length *and* by the same artist and title, because
+  length alone lets a cover of the same song through and lyrics are never
+  overwritten once written. No duration means no lookup at all. An exact match
+  that says instrumental ends the lookup: searching on could attach another
+  record's words.
+- **A miss and an outage are different answers, and `Lookup` says which.**
+  `lrclib_json` reads a 404 as `Missing` and anything else as `Down`;
+  `get_json` cannot, which is why the lyrics calls do not use it. Both leave
+  the tag empty and the next sync asks again, and nothing records that a track
+  was tried, deliberately: LRCLIB grows. The summary tells them apart, since
+  "nothing there" and "did not answer" call for different reactions.
+- **`Breaker` stops asking after three failed requests in a row, for five
+  minutes.** Every track asks up to twice and the lyrics timeout is eight
+  seconds, so a down service would otherwise cost a library the length of the
+  sync in timeouts, with the cancel check only reached between tracks. A 404
+  and a success both reset the count, or a library of tracks LRCLIB lacks would
+  trip it. `lyrics_via` takes the request as a closure so the tests stand in
+  for the network and count what was asked; the pause is checked against an
+  `Instant` the test supplies. `Lookup::Skipped` (no length, no name) is not
+  counted at all, or the summary would claim searches that never happened.
+- **A miss is counted, never flagged.** `tag_tracks` returns an `Extras` tally
+  and `pipeline` and `retry` append `said()` to the summary. A track with no
+  lyrics is a track LRCLIB lacks, so marking it `Failed` would report a good
+  file as broken. Tracks that already had words are not in the count, or "9 of
+  12" would claim searches that never happened. `retry` appends it too, since
+  it rebuilds the summary rather than adding to the run's. Nothing tests that
+  the two call sites append it: `pipeline` needs a live scan.
+- **Plain text only.** `lyrics_of` prefers `plainLyrics` and strips the
+  timestamps from `syncedLyrics` when that is all there is, because a plain
+  tag shows `[01:23.45]` as text in any player that does not read LRC. An
+  instrumental writes nothing.
+
 ### Playing through cliamp
 
 - **`cliamp playlist import` refuses a name it already holds,** exit 1, without
@@ -1597,6 +1758,18 @@ than at the start of every session.
   only way a folder renamed in a file manager can be pinned, and it is the one
   answer to that prompt that is not a change. Already pinned says so rather
   than going quiet.
+- **Every template field a single video lacks carries a default.** yt-dlp
+  prints `NA` for `playlist` and `playlist_index` there, which named the
+  folder `NA` and the file `NA - Title`, and made the `@D` and `@P` lines
+  unparseable: `parse::<usize>()` failed on `NA`, so the track never reached
+  `Downloaded`. The folder is `%(playlist,title)s`, the number is
+  `%(playlist_index|01)02d` and the two print templates use `|1`. The default
+  is `01` and not `1` because yt-dlp substitutes it verbatim, without the
+  `02d` applied. `a_single_video_gets_an_index_and_a_folder_from_its_own_title`
+  answers like yt-dlp does, so reverting the `|1` fails it. The scan's own
+  print was left alone: its index already falls back to the track's position.
+  Measured on a real video; a folder already named `NA` keeps working because
+  the manifest still maps the id to its file.
 - **A recorded name goes into a yt-dlp template, where `%` opens a field.**
   `folder_field` escapes it, or a playlist called `100% Hits` writes somewhere
   nobody asked for.

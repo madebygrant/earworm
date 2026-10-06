@@ -13,6 +13,7 @@ const DEEZER_URL: &str = "https://api.deezer.com/search";
 const ITUNES_URL: &str = "https://itunes.apple.com/search";
 const COVERART_URL: &str = "https://coverartarchive.org/release-group";
 const UA: &str = "earworm/0.1";
+const LRCLIB_URL: &str = "https://lrclib.net/api";
 
 // Below this the fingerprint is a guess, not an identification.
 const ACOUSTID_MIN_SCORE: f64 = 0.8;
@@ -22,6 +23,7 @@ const ACOUSTID_DELAY: Duration = Duration::from_millis(340);
 const DEEZER_DELAY: Duration = Duration::from_millis(200);
 const IMAGE_DELAY: Duration = Duration::from_millis(250);
 const ITUNES_DELAY: Duration = Duration::from_millis(200);
+const LRCLIB_DELAY: Duration = Duration::from_millis(250);
 
 /* What these services ask for is a gap between requests, and a request that
    took longer than the gap has already served it. Sleeping afterwards paid it
@@ -66,6 +68,16 @@ static DEEZER_RATE: Limiter = Limiter::new(DEEZER_DELAY);
    that can carry one, so in practice it costs a restore nothing. */
 static IMAGE_RATE: Limiter = Limiter::new(IMAGE_DELAY);
 static ITUNES_RATE: Limiter = Limiter::new(ITUNES_DELAY);
+static LRCLIB_RATE: Limiter = Limiter::new(LRCLIB_DELAY);
+
+// LRCLIB itself matches within two seconds, and a longer cut is a different recording.
+const LRCLIB_SLACK: f64 = 2.0;
+// Shorter than the shared agent's, since a track is asked about up to twice and a library is hundreds of them.
+const LRCLIB_TIMEOUT: Duration = Duration::from_secs(8);
+// Consecutive failed requests before lyrics stop being asked for, and for how long.
+const LRCLIB_GIVE_UP: u32 = 3;
+const LRCLIB_PAUSE: Duration = Duration::from_secs(300);
+static LRCLIB_BREAKER: Breaker = Breaker::new();
 
 // ureq has no timeout by default, and a stalled lookup would hang the worker
 // with no way to skip the track.
@@ -602,6 +614,194 @@ pub fn downgrades(new: &str, old: &str) -> bool {
     parts.iter().any(|p| !got.contains(&normalise(p)))
 }
 
+/// What asking for a track's lyrics came to. `Missing` and `Unavailable` look
+/// alike to the tags, which stay empty, but not to the summary: one is a track
+/// LRCLIB lacks and the other is a service that did not answer.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Lookup {
+    Found(String),
+    Missing,
+    /// Not asked: no length or no name to ask with.
+    Skipped,
+    Unavailable,
+}
+
+// How one request ended. A 404 is an answer, where a timeout or a refused connection is not.
+enum Reply {
+    Found(Value),
+    Missing,
+    Down,
+}
+
+fn lrclib_json(url: &str) -> Reply {
+    let call = agent().get(url).config().timeout_global(Some(LRCLIB_TIMEOUT)).build().call();
+    match call {
+        Ok(mut resp) => resp.body_mut().read_json::<Value>().map_or(Reply::Down, Reply::Found),
+        Err(ureq::Error::StatusCode(404)) => Reply::Missing,
+        Err(_) => Reply::Down,
+    }
+}
+
+/* LRCLIB has gone down for hours before, and every track asks up to twice with
+   a timeout each, so a library would sit on it for the length of the sync.
+   After a few failures in a row it stops asking for a while, and a success at
+   any point starts the count again. */
+struct Breaker {
+    // Consecutive failures, and when the pause ends once there have been enough.
+    state: Mutex<(u32, Option<Instant>)>,
+}
+
+impl Breaker {
+    const fn new() -> Self {
+        Self { state: Mutex::new((0, None)) }
+    }
+
+    fn paused(&self, now: Instant) -> bool {
+        let mut state = self.state.lock().unwrap();
+        match state.1 {
+            Some(until) if now < until => true,
+            Some(_) => {
+                *state = (0, None);
+                false
+            }
+            None => false,
+        }
+    }
+
+    fn record(&self, answered: bool, now: Instant) {
+        let mut state = self.state.lock().unwrap();
+        state.0 = if answered { 0 } else { state.0 + 1 };
+        if state.0 >= LRCLIB_GIVE_UP {
+            state.1 = Some(now + LRCLIB_PAUSE);
+        }
+    }
+}
+
+/// Plain lyrics for a track. LRCLIB's `get` wants an album and a duration, and
+/// most playlist tracks have no album, so a miss or a missing album falls
+/// through to `search`, which is held to the same duration and to the same
+/// artist and title.
+pub fn lyrics(artist: &str, title: &str, album: &str, duration: u64) -> Lookup {
+    lyrics_via(&LRCLIB_BREAKER, artist, title, album, duration, |url| {
+        LRCLIB_RATE.wait();
+        lrclib_json(url)
+    })
+}
+
+// Takes the request so a test can stand in for the network and count what was asked.
+fn lyrics_via(
+    breaker: &Breaker,
+    artist: &str,
+    title: &str,
+    album: &str,
+    duration: u64,
+    fetch: impl Fn(&str) -> Reply,
+) -> Lookup {
+    // Without a length there is no telling the studio cut from a live one.
+    if duration == 0 || artist.is_empty() || title.is_empty() {
+        return Lookup::Skipped;
+    }
+    if breaker.paused(Instant::now()) {
+        return Lookup::Unavailable;
+    }
+    if !album.is_empty() {
+        let url = format!(
+            "{LRCLIB_URL}/get?track_name={}&artist_name={}&album_name={}&duration={duration}",
+            encode(title),
+            encode(artist),
+            encode(album)
+        );
+        match fetch(&url) {
+            Reply::Down => {
+                breaker.record(false, Instant::now());
+                return Lookup::Unavailable;
+            }
+            Reply::Found(hit) => {
+                breaker.record(true, Instant::now());
+                // An exact match that says instrumental is the answer: another record's words are not.
+                if instrumental(&hit) {
+                    return Lookup::Missing;
+                }
+                if let Some(text) = lyrics_of(&hit) {
+                    return Lookup::Found(text);
+                }
+            }
+            Reply::Missing => breaker.record(true, Instant::now()),
+        }
+    }
+    let url = format!(
+        "{LRCLIB_URL}/search?track_name={}&artist_name={}",
+        encode(title),
+        encode(artist)
+    );
+    match fetch(&url) {
+        Reply::Down => {
+            breaker.record(false, Instant::now());
+            Lookup::Unavailable
+        }
+        Reply::Missing => {
+            breaker.record(true, Instant::now());
+            Lookup::Missing
+        }
+        Reply::Found(results) => {
+            breaker.record(true, Instant::now());
+            results
+                .as_array()
+                .and_then(|results| pick(results, artist, title, duration))
+                .and_then(lyrics_of)
+                .map_or(Lookup::Missing, Lookup::Found)
+        }
+    }
+}
+
+/* The first result with words, within the slack of the track's length and by
+   the same artist and title. Length alone lets a cover or tribute of the same
+   song through, and lyrics are never overwritten once written. `similar` is
+   the containment test the lookups use, so a collaboration still matches. */
+fn pick<'a>(results: &'a [Value], artist: &str, title: &str, duration: u64) -> Option<&'a Value> {
+    let said = |hit: &Value, key: &str| hit.get(key).and_then(Value::as_str).unwrap_or_default().to_string();
+    results.iter().find(|hit| {
+        hit.get("duration")
+            .and_then(Value::as_f64)
+            .is_some_and(|d| (d - duration as f64).abs() <= LRCLIB_SLACK)
+            && similar(&said(hit, "artistName"), artist)
+            && similar(&said(hit, "trackName"), title)
+            && lyrics_of(hit).is_some()
+    })
+}
+
+fn instrumental(hit: &Value) -> bool {
+    hit.get("instrumental").and_then(Value::as_bool) == Some(true)
+}
+
+fn lyrics_of(hit: &Value) -> Option<String> {
+    if instrumental(hit) {
+        return None;
+    }
+    let text = |key: &str| hit.get(key).and_then(Value::as_str).map(str::trim).filter(|t| !t.is_empty());
+    // Synced text in a plain tag would show its timestamps in a player that does not read them.
+    text("plainLyrics")
+        .map(str::to_string)
+        .or_else(|| text("syncedLyrics").map(strip_timestamps))
+        .filter(|t| !t.is_empty())
+}
+
+// `[01:23.45] words` becomes `words`; a line with no timestamp is kept as it is.
+fn strip_timestamps(synced: &str) -> String {
+    let line = |line: &str| {
+        let mut rest = line.trim_start();
+        while let Some(inner) = rest.strip_prefix('[').and_then(|r| r.split_once(']')) {
+            let (stamp, after) = inner;
+            if !stamp.chars().all(|c| c.is_ascii_digit() || matches!(c, ':' | '.')) {
+                break;
+            }
+            rest = after.trim_start();
+        }
+        rest.to_string()
+    };
+    synced.lines().map(line).collect::<Vec<_>>().join("\n").trim().to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -758,6 +958,135 @@ mod tests {
         };
         assert!(!plausible(&bad, "Boards of Canada", "Roygbiv"));
     }
+
+    #[test]
+    fn synced_lyrics_lose_their_timestamps_and_nothing_else() {
+        let synced = "[00:12.50] Fahren fahren fahren\n[00:15.00] auf der Autobahn\n[00:16.00]\n[01:02.3][01:30.1] twice\n[ar: Kraftwerk]";
+        assert_eq!(
+            strip_timestamps(synced),
+            "Fahren fahren fahren\nauf der Autobahn\n\ntwice\n[ar: Kraftwerk]"
+        );
+    }
+
+    #[test]
+    fn lyrics_prefer_plain_text_and_skip_an_instrumental() {
+        let both = serde_json::json!({"plainLyrics": "plain", "syncedLyrics": "[00:01.00] synced"});
+        assert_eq!(lyrics_of(&both).as_deref(), Some("plain"));
+        let synced = serde_json::json!({"plainLyrics": null, "syncedLyrics": "[00:01.00] synced"});
+        assert_eq!(lyrics_of(&synced).as_deref(), Some("synced"));
+        let instrumental = serde_json::json!({"instrumental": true, "plainLyrics": "words"});
+        assert_eq!(lyrics_of(&instrumental), None);
+        assert_eq!(lyrics_of(&serde_json::json!({"plainLyrics": "  "})), None);
+    }
+
+    // The length is what keeps a live cut or a radio edit's words off the studio track.
+    #[test]
+    fn a_search_result_has_to_match_the_length_and_have_words() {
+        let hit = |duration: f64, words: Option<&str>| {
+            serde_json::json!({"artistName": "Kraftwerk", "trackName": "Autobahn", "duration": duration, "plainLyrics": words})
+        };
+        let results = [hit(330.0, Some("live")), hit(214.0, None), hit(212.4, Some("studio"))];
+        let found = pick(&results, "Kraftwerk", "Autobahn", 213).unwrap();
+        assert_eq!(lyrics_of(found).as_deref(), Some("studio"));
+        assert!(pick(&results, "Kraftwerk", "Autobahn", 100).is_none());
+        assert!(pick(&[], "Kraftwerk", "Autobahn", 213).is_none());
+    }
+
+    // A cover of the same song at the same length would otherwise get its words written for good.
+    #[test]
+    fn a_search_result_has_to_be_by_the_same_artist_and_title() {
+        let by = |artist: &str, title: &str| {
+            serde_json::json!({"artistName": artist, "trackName": title, "duration": 213.0, "plainLyrics": "words"})
+        };
+        let results = [by("The Tribute Band", "Autobahn"), by("Kraftwerk", "Radioactivity")];
+        assert!(pick(&results, "Kraftwerk", "Autobahn", 213).is_none());
+        // A collaboration credit and a longer title still match.
+        let credited = [by("Kraftwerk & Friends", "Autobahn (Remastered)")];
+        assert!(pick(&credited, "Kraftwerk", "Autobahn", 213).is_some());
+    }
+
+    #[test]
+    fn no_lookup_is_made_without_a_length_or_a_name() {
+        let breaker = Breaker::new();
+        let never = |_: &str| -> Reply { panic!("asked the network") };
+        assert_eq!(lyrics_via(&breaker, "Kraftwerk", "Autobahn", "Autobahn", 0, never), Lookup::Skipped);
+        assert_eq!(lyrics_via(&breaker, "", "Autobahn", "", 213, never), Lookup::Skipped);
+        assert_eq!(lyrics_via(&breaker, "Kraftwerk", "", "", 213, never), Lookup::Skipped);
+    }
+
+    // An exact match that says instrumental is final: searching on could attach another record's words.
+    #[test]
+    fn an_instrumental_from_the_exact_lookup_is_not_searched_past() {
+        let calls = std::cell::Cell::new(0);
+        let fetch = |url: &str| {
+            calls.set(calls.get() + 1);
+            assert!(url.contains("/get?"), "went on to {url}");
+            Reply::Found(serde_json::json!({"instrumental": true, "plainLyrics": null}))
+        };
+        let got = lyrics_via(&Breaker::new(), "Kraftwerk", "Autobahn", "Autobahn", 213, fetch);
+        assert_eq!((got, calls.get()), (Lookup::Missing, 1));
+    }
+
+    #[test]
+    fn a_miss_on_the_exact_lookup_falls_through_to_search() {
+        let urls = std::cell::RefCell::new(Vec::new());
+        let fetch = |url: &str| {
+            urls.borrow_mut().push(url.split('?').next().unwrap().to_string());
+            if url.contains("/get?") {
+                Reply::Missing
+            } else {
+                Reply::Found(serde_json::json!([
+                    {"artistName": "Kraftwerk", "trackName": "Autobahn", "duration": 213.0, "plainLyrics": "words"}
+                ]))
+            }
+        };
+        let got = lyrics_via(&Breaker::new(), "Kraftwerk", "Autobahn", "Autobahn", 213, fetch);
+        assert_eq!(got, Lookup::Found("words".into()));
+        assert_eq!(urls.borrow().len(), 2);
+        // No album, no exact lookup.
+        urls.borrow_mut().clear();
+        lyrics_via(&Breaker::new(), "Kraftwerk", "Autobahn", "", 213, fetch);
+        assert_eq!(urls.borrow().len(), 1);
+        assert!(urls.borrow()[0].ends_with("/search"));
+    }
+
+    // Three failures in a row stop the asking, so a down service costs a few timeouts and not a whole sync.
+    #[test]
+    fn a_service_that_keeps_failing_is_left_alone_for_a_while() {
+        let breaker = Breaker::new();
+        let calls = std::cell::Cell::new(0);
+        let down = |_: &str| {
+            calls.set(calls.get() + 1);
+            Reply::Down
+        };
+        let ask = || lyrics_via(&breaker, "Kraftwerk", "Autobahn", "", 213, down);
+        for _ in 0..LRCLIB_GIVE_UP {
+            assert_eq!(ask(), Lookup::Unavailable);
+        }
+        assert_eq!(calls.get(), LRCLIB_GIVE_UP as usize);
+        // Paused: answered with no request at all.
+        assert_eq!(ask(), Lookup::Unavailable);
+        assert_eq!(calls.get(), LRCLIB_GIVE_UP as usize, "asked while paused");
+        // And asked again once the pause is over.
+        let later = Instant::now() + LRCLIB_PAUSE + Duration::from_secs(1);
+        assert!(!breaker.paused(later));
+    }
+
+    // A 404 is an answer, so a library full of tracks LRCLIB lacks must not trip it.
+    #[test]
+    fn misses_and_successes_do_not_count_as_failures() {
+        let breaker = Breaker::new();
+        let now = Instant::now();
+        breaker.record(false, now);
+        breaker.record(false, now);
+        breaker.record(true, now);
+        breaker.record(false, now);
+        breaker.record(false, now);
+        assert!(!breaker.paused(now), "a success did not reset the count");
+        let missing = |_: &str| Reply::Missing;
+        for _ in 0..(LRCLIB_GIVE_UP * 3) {
+            assert_eq!(lyrics_via(&breaker, "A", "B", "", 213, missing), Lookup::Missing);
+        }
+        assert!(!breaker.paused(Instant::now()));
+    }
 }
-
-

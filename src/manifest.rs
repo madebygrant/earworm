@@ -72,6 +72,37 @@ pub fn is_local(id: &str) -> bool {
     id.starts_with(LOCAL)
 }
 
+/* One chapter of a video that was split into tracks: the video's id, a `#`
+   and the chapter's number. A video id is eleven characters from a set that
+   has no `#`, so the suffix cannot collide with a real one, and it sits
+   after the id rather than before so the line still starts with something the
+   `#` header rule does not skip. */
+pub fn chapter_id(video: &str, number: usize) -> String {
+    format!("{video}#{number:02}")
+}
+
+/// Whether this id names a chapter of a video. Like a local id, no listing
+/// names it, so its absence from one proves nothing.
+/* The whole shape, not just a `#`: a local id is `~` and a filename, and a
+   filename can say `Song #2.mp3`. Read as a chapter, one such file in a synced
+   folder made `retry` skip its download for every track in it. */
+pub fn is_chapter(id: &str) -> bool {
+    id.rsplit_once('#').is_some_and(|(video, number)| {
+        !video.is_empty()
+            && !is_local(video)
+            && !number.is_empty()
+            && number.bytes().all(|b| b.is_ascii_digit())
+    })
+}
+
+/// Whether the folder already holds chapters of this video. That is the whole
+/// record of the choice to split: a folder that has them was split, and the
+/// next sync does the same without asking again.
+pub fn is_split(folder: &Path, video: &str) -> bool {
+    let prefix = format!("{video}#");
+    entries(folder).iter().any(|(id, _)| id.starts_with(&prefix))
+}
+
 /// Whether a folder holds one record or a collection of them.
 /* An album's tracks share a sleeve, so looking each one up separately returns
    whatever release that track matched and one record ends up holding three

@@ -845,13 +845,24 @@ fn pipeline(
     }
     /* Before the tagging pass, which is the first thing the answer changes,
        and after the scan, which is where the only automatic signal is. */
-    let kind = settle_kind(listing.playlist_id.as_deref(), folder_of(tracks).as_deref());
-    let album = matches!(kind, Some((manifest::Kind::Album, _)));
+    let mut kind = settle_kind(listing.playlist_id.as_deref(), folder_of(tracks).as_deref());
+    let asker = Asker {
+        tx: tx.clone(),
+        enabled: cfg.fix,
+    };
 
     if pass.attaching {
         reconcile(tx, tracks);
     }
     note_departures(cfg, tx, listing.complete, tracks);
+    /* After the departures, which are read off the one video, and before the
+       list is shown, so the screen only ever holds the chapters. */
+    let split = settle_split(cfg, &asker, &pass, listing.chapters, tracks);
+    // Only when nothing has answered: a `[playlist]` name is somebody's choice, and the name wins on reopening anyway.
+    if split.is_some() && kind.is_none() {
+        kind = Some((manifest::Kind::Album, "its chapters"));
+    }
+    let album = matches!(kind, Some((manifest::Kind::Album, _)));
     let _ = tx.send(Msg::Tracks(tracks.clone()));
 
     // Held on to, because `to_bring` has to honour the same answer.
@@ -867,7 +878,12 @@ fn pipeline(
        every track either holds the file an earlier run left or holds nothing,
        and the download is about to overwrite `path` for anything it fetches.
        Empty unless `convert` is on. */
-    let plans = to_bring(cfg, tracks, picked.as_ref());
+    // A chapter is cut from the video's own file and has no download of its own to bring across.
+    let plans = if split.is_some() {
+        HashMap::new()
+    } else {
+        to_bring(cfg, tracks, picked.as_ref())
+    };
     let refetch: HashSet<usize> = plans
         .iter()
         .filter(|(_, plan)| **plan == Bring::Refetch)
@@ -886,7 +902,9 @@ fn pipeline(
        would throw away the tags, cover and playlist for every track that did
        download. Carry the failure into the summary instead. */
     let mut warning = String::new();
-    if let Err(err) = ytdlp::run(cfg, tracks, tx, &refetch) {
+    if let Some(split) = &split {
+        warning = fetch_split(cfg, tx, cancel, tracks, split);
+    } else if let Err(err) = ytdlp::run(cfg, tracks, tx, &refetch) {
         warning = err.to_string();
         let _ = tx.send(Msg::Log(format!("download: {warning}")));
     }
@@ -898,10 +916,6 @@ fn pipeline(
     let stuck = broke + unencoded;
 
     let _ = tx.send(Msg::Stage("tagging".into()));
-    let asker = Asker {
-        tx: tx.clone(),
-        enabled: cfg.fix,
-    };
     /* An image that was here before the download is the user's, and `apply`
        writing over it is the same loss as deleting it: `drop_folder_cover`
        keeps the name and nothing keeps the bytes. `theirs` is that same
@@ -911,13 +925,19 @@ fn pipeline(
         one_sleeve: album,
         ..CoverState::default()
     };
-    tag_tracks(cfg, tx, cancel, tracks, &playlist, &asker, &mut cover, None);
+    let extras = tag_tracks(cfg, tx, cancel, tracks, &playlist, &asker, &mut cover, None);
+    if album && cfg.loudness && !cancel.load(Ordering::SeqCst) {
+        album_loudness(tx, tracks);
+    }
 
     record_kind(tx, folder_of(tracks).as_deref(), kind);
     sync_manifest(cfg, tracks);
     let playlist_file = write_playlist(cfg, tracks)?;
     drop_folder_cover(tracks, &theirs, album);
     let mut summary = summarise(tracks, playlist_file.as_deref());
+    if let Some(line) = extras.said() {
+        summary = format!("{summary}, {line}");
+    }
     /* Said out loud, because the rows scroll off and a --resync's one line
        per folder is the only record anyone reads afterwards. */
     if converted > 0 {
@@ -939,6 +959,248 @@ fn pipeline(
         summary = format!("{summary}   [{warning}]");
     }
     Ok(summary)
+}
+
+/// A single video that is being cut into its chapters.
+struct Split {
+    chapters: Vec<ytdlp::Chapter>,
+    /// The video as the scan saw it, which is what the download is about: the
+    /// chapters are cut out of this file and never fetched themselves.
+    video: Track,
+}
+
+/* Whether this one video becomes its chapters, and if so the tracks that
+   replace it in `tracks`. A video with two or more chapters is not
+   necessarily an album: tutorials and podcasts carry timestamps too, so the
+   answer is asked, and never assumed.
+
+   Asked once. A folder that already holds this video's chapters is split
+   again without a question, and one that holds the whole file was either
+   declined or downloaded before this existed, so it is left alone. That is
+   the only record of the choice, and it carries through every writer of the
+   sidecar for free. Nothing asks without a gate: `--resync` and `--no-pick`
+   walk unattended, and the safe answer for them is the video as it was. */
+fn settle_split(
+    cfg: &Config,
+    asker: &Asker,
+    pass: &Pass,
+    chapters: Vec<ytdlp::Chapter>,
+    tracks: &mut Vec<Track>,
+) -> Option<Split> {
+    let video = tracks.first()?.clone();
+    let folder = video.path.as_deref()?.parent()?.to_path_buf();
+    let split = manifest::is_split(&folder, &video.id);
+    if chapters.is_empty() {
+        // Upstream lost its chapters: the cuts on disk are still the folder, and fetching the video again would put it back beside them.
+        let held = held_chapters(&folder, &video.id);
+        if !split || held.is_empty() {
+            return None;
+        }
+        *tracks = held;
+        return Some(Split { chapters, video });
+    }
+    if !split {
+        if video.status == Status::Have || !pass.gate {
+            return None;
+        }
+        let shown: Vec<&str> = chapters.iter().take(3).map(|c| c.title.as_str()).collect();
+        let note = format!(
+            "{} chapters, starting {}. Splitting makes one track each, in an album folder.",
+            chapters.len(),
+            shown.join(", ")
+        );
+        let options = vec![
+            format!("Split into {} tracks", chapters.len()),
+            "Keep as one track".to_string(),
+        ];
+        if asker.choose_noted("This video has chapters", &note, options) != Some(0) {
+            return None;
+        }
+    }
+    *tracks = chapter_tracks(cfg, &video, &chapters, &folder);
+    Some(Split { chapters, video })
+}
+
+fn held_chapters(folder: &Path, video: &str) -> Vec<Track> {
+    let prefix = format!("{video}#");
+    let mut held: Vec<(usize, PathBuf)> = manifest::entries(folder)
+        .into_iter()
+        .filter(|(_, file)| file.is_file())
+        .filter_map(|(id, file)| Some((id.strip_prefix(&prefix)?.parse().ok()?, file)))
+        .collect();
+    held.sort();
+    held.into_iter()
+        .map(|(number, file)| {
+            let stem = file.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+            let mut track = Track::new(number, manifest::chapter_id(video, number), strip_number(&stem).to_string(), file);
+            track.status = Status::Have;
+            track
+        })
+        .collect()
+}
+
+// Numbered from one in listing order, and found again by the manifest on a later sync, which is what keeps a rename from costing the cut.
+fn chapter_tracks(cfg: &Config, video: &Track, chapters: &[ytdlp::Chapter], folder: &Path) -> Vec<Track> {
+    let ext = config::extension(&cfg.format);
+    let known = manifest::read(folder);
+    chapters
+        .iter()
+        .enumerate()
+        .map(|(i, chapter)| {
+            let number = i + 1;
+            let id = manifest::chapter_id(&video.id, number);
+            let mut path = folder.join(chapter_file(number, &chapter.title, ext));
+            // The cut reads the video's file, so a chapter may not be named like it, and a file by that name is the video and not the chapter.
+            if video.path.as_ref() == Some(&path) {
+                path = folder.join(chapter_file(number, &format!("{} (chapter)", chapter.title), ext));
+            }
+            let mut track = Track::new(number, id.clone(), chapter.title.clone(), path);
+            track.duration = (chapter.end - chapter.start).round() as u64;
+            match known.get(&id) {
+                Some(file) => {
+                    track.path = Some(file.clone());
+                    track.status = Status::Have;
+                }
+                None if track.path.as_deref().is_some_and(Path::is_file) => track.status = Status::Have,
+                None => {}
+            }
+            track
+        })
+        .collect()
+}
+
+/* The download for a split video: the whole file once, then each chapter cut
+   out of it. Returns the warning the run's summary carries. The video is
+   shown as one row while it downloads and the chapters replace it afterwards,
+   because yt-dlp reports progress by the video's index and a chapter row
+   would otherwise claim to be downloading the whole thing.
+
+   The full file goes once every chapter has a file of its own, and not
+   before: a cut that failed leaves it for the next sync to try again from
+   without fetching it twice. */
+fn fetch_split(
+    cfg: &Config,
+    tx: &Sender<Msg>,
+    cancel: &AtomicBool,
+    tracks: &mut [Track],
+    split: &Split,
+) -> String {
+    if !tracks.iter().any(|t| t.status == Status::Pending) {
+        return String::new();
+    }
+    let mut whole = vec![split.video.clone()];
+    let mut warning = String::new();
+    let _ = tx.send(Msg::Tracks(whole.clone()));
+    if whole[0].status != Status::Have
+        && let Err(err) = ytdlp::run(cfg, &mut whole, tx, &HashSet::new())
+    {
+        warning = err.to_string();
+        let _ = tx.send(Msg::Log(format!("download: {warning}")));
+    }
+    let _ = tx.send(Msg::Tracks(tracks.to_vec()));
+    let Some(full) = whole[0].path.clone().filter(|p| p.is_file()) else {
+        return warning;
+    };
+
+    // Whatever an earlier cut was killed in the middle of.
+    if let Some(folder) = full.parent() {
+        sweep_scratch(folder);
+    }
+    let artist = tag::read(&full).map(|info| info.artist).unwrap_or_default();
+    // The cut drops the picture, and the video's thumbnail is what a chapter the lookup cannot place falls back on.
+    let art = tag::read_cover(&full);
+    // By position and not by iterator: the manifest write after each cut reads every track.
+    for i in 0..tracks.len() {
+        if tracks[i].status != Status::Pending {
+            continue;
+        }
+        if cancel.load(Ordering::SeqCst) {
+            break;
+        }
+        let index = tracks[i].index;
+        let (Some(chapter), Some(target)) = (split.chapters.get(index - 1), tracks[i].path.clone()) else {
+            continue;
+        };
+        /* Cut under a scratch name and renamed into place, so a kill in the
+           middle of ffmpeg leaves nothing at the name a later sync reads as a
+           finished chapter. */
+        let ext = target.extension().and_then(|e| e.to_str()).unwrap_or_default();
+        let scratch = target.with_file_name(format!("{SCRATCH}{index}.{ext}"));
+        let cut = if target == full {
+            // The cut reads the file it would write over.
+            Err(anyhow::anyhow!("a chapter is named like the video's own file"))
+        } else {
+            tag::cut(&full, &scratch, chapter.start, chapter.end, &cfg.format)
+                .and_then(|()| {
+                    // What the lookup has to go on: the chapter's name, under the video's artist.
+                    let fields = tag::Fields {
+                        artist: artist.clone(),
+                        title: chapter.title.clone(),
+                        ..tag::Fields::default()
+                    };
+                    tag::set_fields(&scratch, &fields)?;
+                    art.as_deref().map_or(Ok(()), |image| tag::set_cover(&scratch, image))
+                })
+                .and_then(|()| std::fs::rename(&scratch, &target).map_err(Into::into))
+        };
+        if cut.is_err() {
+            let _ = std::fs::remove_file(&scratch);
+        }
+        match cut {
+            Ok(()) => {
+                tracks[i].status = Status::Downloaded;
+                let _ = tx.send(Msg::Update {
+                    index,
+                    status: Status::Downloaded,
+                    source: None,
+                    note: None,
+                    name: None,
+                });
+                let _ = tx.send(Msg::Path { index, path: target });
+                /* After each chapter, because the entry is the only record
+                   that this folder was split: stopped half way, the next sync
+                   still finds it, resumes from the full file and does not
+                   call the video whole with chapter files lying beside it. */
+                write_manifest(cfg, tracks, false);
+            }
+            Err(err) => {
+                tracks[i].status = Status::Failed;
+                let _ = tx.send(Msg::Log(format!("cut: chapter {index}: {err}")));
+                let _ = tx.send(Msg::Update {
+                    index,
+                    status: Status::Failed,
+                    source: None,
+                    note: Some(format!("cut: {err}")),
+                    name: None,
+                });
+            }
+        }
+    }
+    // A failed chapter may be recorded against the video's own file, which is there and is not its cut.
+    let whole_done = tracks.iter().all(|t| {
+        t.status != Status::Failed && t.path.as_deref().is_some_and(|p| p != full && p.is_file())
+    });
+    if whole_done {
+        let _ = std::fs::remove_file(&full);
+    }
+    warning
+}
+
+// Runs after the tagging pass, because it needs every track's own gain first.
+fn album_loudness(tx: &Sender<Msg>, tracks: &[Track]) {
+    let paths: Vec<&Path> = tracks
+        .iter()
+        .filter(|t| !matches!(t.status, Status::Gone | Status::Skipped | Status::Local))
+        .filter_map(|t| t.path.as_deref())
+        .filter(|p| p.is_file())
+        .collect();
+    let (changed, skipped) = tag::write_album_loudness(&paths);
+    if changed > 0 {
+        let _ = tx.send(Msg::Log(format!("loudness: album gain on {changed} tracks")));
+    }
+    if skipped > 0 {
+        let _ = tx.send(Msg::Log(format!("loudness: album: {skipped} tracks left out, tags unreadable")));
+    }
 }
 
 /// The prefix YouTube Music gives a release, which is the one automatic signal
@@ -985,7 +1247,7 @@ fn settle_kind(
    A folder still missing here is a run where nothing downloaded at all, which
    is not worth a line in the log. */
 fn record_kind(tx: &Sender<Msg>, folder: Option<&Path>, kind: Option<(manifest::Kind, &str)>) {
-    let (Some(folder), Some((kind, "the playlist id"))) = (folder, kind) else {
+    let (Some(folder), Some((kind, "the playlist id" | "its chapters"))) = (folder, kind) else {
         return;
     };
     if !folder.is_dir() {
@@ -1684,7 +1946,8 @@ fn tag_tracks(
     asker: &Asker,
     cover: &mut CoverState,
     wanted: Option<&HashSet<usize>>,
-) {
+) -> Extras {
+    let mut extras = Extras::default();
     for track in tracks.iter_mut() {
         if cancel.load(Ordering::SeqCst) {
             break;
@@ -1704,6 +1967,10 @@ fn tag_tracks(
             continue;
         };
         if !path.is_file() {
+            // Already failed with a reason of its own, such as a cut that went wrong, and "no file" would replace it.
+            if track.status == Status::Failed {
+                continue;
+            }
             track.status = Status::Failed;
             let _ = tx.send(Msg::Update {
                 index: track.index,
@@ -1741,6 +2008,7 @@ fn tag_tracks(
                 });
                 offer_meta(tx, track);
             }
+            extras.add(enrich(cfg, tx, track, &path));
             continue;
         }
 
@@ -1806,6 +2074,7 @@ fn tag_tracks(
                         let _ = tx.send(Msg::Log(format!("cover: track {}: {err}", track.index)));
                     }
                 }
+                extras.add(enrich(cfg, tx, track, &path));
                 rename(cfg, tx, track);
             }
             Err(err) => {
@@ -1820,7 +2089,93 @@ fn tag_tracks(
             }
         }
     }
+    extras
+}
 
+// What the optional per-track passes managed, for the summary: a miss is not a failure, so it is counted and not flagged.
+#[derive(Default, Clone, Copy, Debug, PartialEq)]
+struct Extras {
+    lyrics_found: usize,
+    lyrics_missed: usize,
+    // Not asked because the service stopped answering, which is not the same as nothing being there.
+    lyrics_unavailable: usize,
+}
+
+impl Extras {
+    fn add(&mut self, other: Extras) {
+        self.lyrics_found += other.lyrics_found;
+        self.lyrics_missed += other.lyrics_missed;
+        self.lyrics_unavailable += other.lyrics_unavailable;
+    }
+
+    // Only tracks that were searched for count: one that already had words, or had nothing to ask with, was never asked about.
+    fn said(&self) -> Option<String> {
+        let asked = self.lyrics_found + self.lyrics_missed;
+        let mut said = Vec::new();
+        if asked > 0 {
+            said.push(format!("lyrics found for {} of {asked} searched", self.lyrics_found));
+        }
+        if self.lyrics_unavailable > 0 {
+            said.push(format!(
+                "lyrics service not answering, {} left for the next sync",
+                self.lyrics_unavailable
+            ));
+        }
+        (!said.is_empty()).then(|| said.join(", "))
+    }
+}
+
+// Per-track extras written after identification: loudness and lyrics. Runs for tracks already
+// on disk too, so a resync backfills old folders. Both are off by default.
+fn enrich(cfg: &Config, tx: &Sender<Msg>, track: &Track, path: &Path) -> Extras {
+    enrich_with(cfg, tx, track, path, lookup::lyrics)
+}
+
+// Takes the lyrics fetch so a test can count requests without a network.
+fn enrich_with(
+    cfg: &Config,
+    tx: &Sender<Msg>,
+    track: &Track,
+    path: &Path,
+    fetch: impl Fn(&str, &str, &str, u64) -> lookup::Lookup,
+) -> Extras {
+    let mut extras = Extras::default();
+    if cfg.loudness {
+        match tag::write_loudness(path) {
+            Ok(true) => {
+                let _ = tx.send(Msg::Log(format!("loudness: track {} measured", track.index)));
+            }
+            Ok(false) => {}
+            // A failure here costs the gain tag and nothing else, so it is a log line and not a status.
+            Err(err) => {
+                let _ = tx.send(Msg::Log(format!("loudness: track {}: {err}", track.index)));
+            }
+        }
+    }
+    if cfg.lyrics {
+        // Asked before the request: a track that has words never costs one, and a rerun is free.
+        match tag::extra(path, tag::Extra::Lyrics) {
+            Ok(Some(_)) => {}
+            Ok(None) => match fetch(&track.artist, &track.title, &track.album, track.duration) {
+                lookup::Lookup::Found(text) => match tag::set_extra(path, tag::Extra::Lyrics, &text) {
+                    Ok(()) => {
+                        extras.lyrics_found += 1;
+                        let _ = tx.send(Msg::Log(format!("lyrics: track {} found", track.index)));
+                    }
+                    Err(err) => {
+                        let _ = tx.send(Msg::Log(format!("lyrics: track {}: {err}", track.index)));
+                    }
+                },
+                lookup::Lookup::Missing => extras.lyrics_missed += 1,
+                lookup::Lookup::Unavailable => extras.lyrics_unavailable += 1,
+                lookup::Lookup::Skipped => {}
+            },
+            Err(err) => {
+                let _ = tx.send(Msg::Log(format!("lyrics: track {}: {err}", track.index)));
+            }
+        }
+    }
+    extras
 }
 
 /// Serves edits and cover changes after the run, so the tracks stay editable
@@ -2453,8 +2808,15 @@ fn retry(
 
     let theirs = folder_covers(tracks);
     let mut warning = String::new();
-    // Nothing to refetch for a format: a retry is about tracks that failed.
-    if let Err(err) = ytdlp::run(cfg, tracks, tx, &HashSet::new()) {
+    /* Nothing to refetch for a format: a retry is about tracks that failed.
+       Not for a split video: its tracks have no download of their own, and
+       running yt-dlp over them would fetch the whole video again and hand its
+       file to track 1. A sync cuts any chapter that is missing. */
+    if tracks.iter().any(|t| manifest::is_chapter(&t.id)) {
+        let _ = tx.send(Msg::Log(
+            "retry: chapters are cut when the playlist syncs, so this only tags again".into(),
+        ));
+    } else if let Err(err) = ytdlp::run(cfg, tracks, tx, &HashSet::new()) {
         warning = err.to_string();
         let _ = tx.send(Msg::Log(format!("retry: {warning}")));
     }
@@ -2479,7 +2841,7 @@ fn retry(
         one_sleeve: album,
         ..CoverState::default()
     };
-    tag_tracks(cfg, tx, cancel, tracks, &playlist, asker, &mut cover, Some(&failed));
+    let extras = tag_tracks(cfg, tx, cancel, tracks, &playlist, asker, &mut cover, Some(&failed));
 
     sync_manifest(cfg, tracks);
     let playlist_file = write_playlist(cfg, tracks)?;
@@ -2500,6 +2862,9 @@ fn retry(
         "{}   [{outcome}]",
         summarise(tracks, playlist_file.as_deref())
     );
+    if let Some(line) = extras.said() {
+        summary = format!("{summary}, {line}");
+    }
     if !warning.is_empty() {
         summary = format!("{summary}   [{warning}]");
     }
@@ -2977,6 +3342,10 @@ fn note_departures(cfg: &Config, tx: &Sender<Msg>, complete: bool, tracks: &mut 
            would call every file it holds departed, mark the departures proven
            off a complete listing, and offer the lot to `D`. */
         .filter(|(id, _)| !manifest::is_local(id))
+        /* A chapter's id is one earworm made from the video's, so no listing
+           names it either. Reading it as departed would offer the whole split
+           album to `D` the moment a listing arrives that holds the video. */
+        .filter(|(id, _)| !manifest::is_chapter(id))
         .collect();
     if missing.is_empty() {
         return;
@@ -3417,7 +3786,16 @@ fn rename(cfg: &Config, tx: &Sender<Msg>, track: &mut Track) {
 }
 
 fn filename(index: usize, artist: &str, title: &str, ext: &str) -> String {
-    let stem = format!("{index:02} - {} - {}", clean(artist), clean(title));
+    fit_stem(&format!("{index:02} - {} - {}", clean(artist), clean(title)), ext)
+}
+
+/// A chapter's file before the lookup has named it: the number and the
+/// chapter's own title.
+fn chapter_file(index: usize, title: &str, ext: &str) -> String {
+    fit_stem(&format!("{index:02} - {}", clean(title)), ext)
+}
+
+fn fit_stem(stem: &str, ext: &str) -> String {
     /* The 255 limit a path component gets is bytes, not characters, and one
        accented character is two of them. Counted the same way, cut on a char
        boundary, and left room for the extension. */
@@ -6011,7 +6389,7 @@ pub mod tests {
         std::fs::write(
             &bin,
             format!(
-                "#!/bin/sh\nprintf 'vid1\t1\tBrand New\t213\tPL1\t{}\\n'\n",
+                "#!/bin/sh\nprintf 'vid1\t1\tBrand New\t213\tPL1\tNA\t{}\\n'\n",
                 predicted.display()
             ),
         )
@@ -6141,7 +6519,7 @@ pub mod tests {
         std::fs::write(
             &bin,
             format!(
-                "#!/bin/sh\nprintf 'vid1\t1\tOriginal Title\t213\tPL1\t{}\\n'\n",
+                "#!/bin/sh\nprintf 'vid1\t1\tOriginal Title\t213\tPL1\tNA\t{}\\n'\n",
                 downloaded.display()
             ),
         )
@@ -7099,6 +7477,8 @@ pub mod tests {
             format: config::DEFAULT_FORMAT.into(),
             // Off, so a test that does not ask for it converts nothing.
             convert: false,
+            loudness: false,
+            lyrics: false,
             config_file: None,
             resync: false,
             list: false,
@@ -8569,5 +8949,498 @@ mod purge_tests {
         assert!(dir.join("08 - Proven.opus").is_file());
         std::fs::remove_dir_all(&dir).unwrap();
         std::fs::remove_dir_all(elsewhere.parent().unwrap()).unwrap();
+    }
+
+    // Off by default, so a plain sync must leave a file's tags exactly as they were.
+    #[test]
+    fn enrich_writes_loudness_only_when_it_is_on() {
+        let dir = std::env::temp_dir().join(format!("earworm-enrich-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("01 - A.flac");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i", "sine=f=440:d=2", "-ac", "2", "-y"])
+            .arg(&file)
+            .status();
+        if !made.is_ok_and(|s| s.success()) {
+            eprintln!("skipped: ffmpeg could not make a fixture");
+            std::fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+        let track = Track::new(1, "a".into(), "01 - A.flac".into(), file.clone());
+        let (tx, rx) = mpsc::channel();
+        let mut cfg = super::tests::config(false);
+
+        super::enrich(&cfg, &tx, &track, &file);
+        assert!(tag::extra(&file, tag::Extra::TrackGain).unwrap().is_none(), "written with loudness off");
+
+        cfg.loudness = true;
+        super::enrich(&cfg, &tx, &track, &file);
+        assert!(tag::extra(&file, tag::Extra::TrackGain).unwrap().is_some(), "not written with loudness on");
+        assert!(rx.try_iter().any(|m| matches!(m, Msg::Log(l) if l.contains("loudness"))));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn enrich_asks_for_lyrics_only_for_a_track_without_them() {
+        let dir = std::env::temp_dir().join(format!("earworm-lyrics-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("01 - A.flac");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-t", "0.2", "-y"])
+            .arg(&file)
+            .status();
+        if !made.is_ok_and(|s| s.success()) {
+            eprintln!("skipped: ffmpeg could not make a fixture");
+            std::fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+        let mut track = Track::new(1, "a".into(), "01 - A.flac".into(), file.clone());
+        track.artist = "Kraftwerk".into();
+        track.title = "Autobahn".into();
+        track.duration = 213;
+        let (tx, _rx) = mpsc::channel();
+        let calls = std::cell::Cell::new(0);
+        let fetch = |artist: &str, title: &str, _album: &str, duration: u64| {
+            calls.set(calls.get() + 1);
+            assert_eq!((artist, title, duration), ("Kraftwerk", "Autobahn", 213));
+            lookup::Lookup::Found("Fahren fahren fahren".to_string())
+        };
+        let mut cfg = super::tests::config(false);
+
+        super::enrich_with(&cfg, &tx, &track, &file, fetch);
+        assert_eq!(calls.get(), 0, "asked with lyrics off");
+
+        cfg.lyrics = true;
+        let found = super::enrich_with(&cfg, &tx, &track, &file, fetch);
+        assert_eq!(calls.get(), 1);
+        assert_eq!((found.lyrics_found, found.lyrics_missed), (1, 0));
+        assert_eq!(tag::extra(&file, tag::Extra::Lyrics).unwrap().as_deref(), Some("Fahren fahren fahren"));
+
+        // Already has them: a rerun is free, and what is there stays.
+        tag::set_extra(&file, tag::Extra::Lyrics, "mine").unwrap();
+        let had = super::enrich_with(&cfg, &tx, &track, &file, fetch);
+        assert_eq!(had, super::Extras::default(), "a track that had lyrics was counted");
+        assert_eq!(calls.get(), 1, "asked again for a track that had lyrics");
+        assert_eq!(tag::extra(&file, tag::Extra::Lyrics).unwrap().as_deref(), Some("mine"));
+
+        // No answer writes nothing.
+        tag::set_extra(&file, tag::Extra::Lyrics, "").unwrap();
+        let missed = super::enrich_with(&cfg, &tx, &track, &file, |_: &str, _: &str, _: &str, _: u64| lookup::Lookup::Missing);
+        assert_eq!((missed.lyrics_found, missed.lyrics_missed), (0, 1));
+        assert_eq!(tag::extra(&file, tag::Extra::Lyrics).unwrap(), None);
+
+        // A service that did not answer is neither a hit nor a miss, and a track not asked about is neither.
+        let down = super::enrich_with(&cfg, &tx, &track, &file, |_: &str, _: &str, _: &str, _: u64| lookup::Lookup::Unavailable);
+        assert_eq!(down, super::Extras { lyrics_unavailable: 1, ..super::Extras::default() });
+        let skipped = super::enrich_with(&cfg, &tx, &track, &file, |_: &str, _: &str, _: &str, _: u64| lookup::Lookup::Skipped);
+        assert_eq!(skipped, super::Extras::default());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_summary_counts_lyrics_only_for_tracks_that_were_searched() {
+        let none = super::Extras::default();
+        assert_eq!(none.said(), None, "said something when nothing was asked");
+        let mut sum = none;
+        sum.add(super::Extras { lyrics_found: 1, lyrics_missed: 0, lyrics_unavailable: 0 });
+        sum.add(super::Extras { lyrics_found: 0, lyrics_missed: 2, lyrics_unavailable: 0 });
+        sum.add(none);
+        assert_eq!(sum.said().as_deref(), Some("lyrics found for 1 of 3 searched"));
+        // Every track missing is still worth saying: it is the line that explains empty tags.
+        let all = super::Extras { lyrics_found: 0, lyrics_missed: 4, lyrics_unavailable: 0 };
+        assert_eq!(all.said().as_deref(), Some("lyrics found for 0 of 4 searched"));
+        // An outage is said on its own, and beside the count when some were asked before it began.
+        let down = super::Extras { lyrics_unavailable: 7, ..none };
+        assert_eq!(down.said().as_deref(), Some("lyrics service not answering, 7 left for the next sync"));
+        let both = super::Extras { lyrics_found: 2, lyrics_missed: 1, lyrics_unavailable: 5 };
+        assert_eq!(
+            both.said().as_deref(),
+            Some("lyrics found for 2 of 3 searched, lyrics service not answering, 5 left for the next sync")
+        );
+    }
+}
+
+#[cfg(test)]
+mod chapter_tests {
+    use super::*;
+    use crate::app::Reply;
+    use std::sync::mpsc::Receiver;
+
+    fn chapter(title: &str, start: f64, end: f64) -> ytdlp::Chapter {
+        ytdlp::Chapter { title: title.into(), start, end }
+    }
+
+    fn three() -> Vec<ytdlp::Chapter> {
+        vec![chapter("Intro", 0.0, 4.0), chapter("Middle", 4.0, 8.0), chapter("End", 8.0, 12.0)]
+    }
+
+    fn folder(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("earworm-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // A video the scan predicted a path for, with or without the file there.
+    fn video(dir: &Path, present: bool) -> Track {
+        let path = dir.join("01 - Album.opus");
+        let mut track = Track::new(1, "vid".into(), "Album".into(), path.clone());
+        if present {
+            // A test that made real audio there first keeps it.
+            if !path.exists() {
+                std::fs::write(&path, "audio").unwrap();
+            }
+            track.status = Status::Have;
+        }
+        track
+    }
+
+    // Answers the one question with `reply` and reports whether it was asked at all.
+    fn settle(pass: Pass, reply: Reply, tracks: &mut Vec<Track>) -> (Option<Split>, bool) {
+        let (tx, rx): (Sender<Msg>, Receiver<Msg>) = mpsc::channel();
+        let asker = Asker { tx, enabled: true };
+        let cfg = super::tests::config(false);
+        let mut asked = false;
+        let split = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| settle_split(&cfg, &asker, &pass, three(), tracks));
+            while !worker.is_finished() {
+                if let Ok(Msg::Ask(_, back)) = rx.recv_timeout(Duration::from_millis(50)) {
+                    asked = true;
+                    back.send(reply.clone()).unwrap();
+                }
+            }
+            worker.join().unwrap()
+        });
+        (split, asked)
+    }
+
+    #[test]
+    fn a_video_with_chapters_is_split_only_when_somebody_says_so() {
+        let dir = folder("splitask");
+        let mut tracks = vec![video(&dir, false)];
+
+        let (split, asked) = settle(Pass::plain(true), Reply::Choice(0), &mut tracks);
+        assert!(asked && split.is_some());
+        let ids: Vec<&str> = tracks.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["vid#01", "vid#02", "vid#03"]);
+        assert_eq!(tracks.iter().map(|t| t.index).collect::<Vec<_>>(), [1, 2, 3]);
+        assert_eq!(tracks[1].path.as_deref(), Some(dir.join("02 - Middle.opus").as_path()));
+        assert_eq!(tracks[1].duration, 4);
+        assert!(tracks.iter().all(|t| t.status == Status::Pending));
+
+        for no in [Reply::Choice(1), Reply::Cancel] {
+            let mut tracks = vec![video(&dir, false)];
+            let (split, asked) = settle(Pass::plain(true), no, &mut tracks);
+            assert!(asked && split.is_none());
+            assert_eq!(tracks.len(), 1, "declining still replaced the video");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // The safe answer for a pass nobody is watching is the video as it was.
+    #[test]
+    fn nothing_is_asked_without_a_gate_or_for_a_video_already_whole() {
+        let dir = folder("splitquiet");
+        let mut tracks = vec![video(&dir, false)];
+        let (split, asked) = settle(Pass::plain(false), Reply::Choice(0), &mut tracks);
+        assert!(!asked && split.is_none() && tracks.len() == 1, "an unattended pass asked or split");
+
+        // The file is here: declined before, or downloaded before this existed.
+        let mut tracks = vec![video(&dir, true)];
+        let (split, asked) = settle(Pass::plain(true), Reply::Choice(0), &mut tracks);
+        assert!(!asked && split.is_none() && tracks.len() == 1, "a whole video was asked about again");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* The chapter entries in the sidecar are the whole record of the choice,
+       so a folder that has them splits again with nobody there to ask, and
+       finds each file under the name it has been renamed to. */
+    #[test]
+    fn a_folder_that_was_split_is_split_again_without_asking() {
+        let dir = folder("splitagain");
+        let renamed = dir.join("02 - Band - The Middle.opus");
+        std::fs::write(&renamed, "audio").unwrap();
+        manifest::write(&dir, "https://youtu.be/vid", [("vid#02".to_string(), renamed.clone())].into_iter()).unwrap();
+
+        let mut tracks = vec![video(&dir, false)];
+        let (split, asked) = settle(Pass::plain(false), Reply::Cancel, &mut tracks);
+        assert!(!asked && split.is_some());
+        assert_eq!(tracks.len(), 3);
+        assert_eq!(tracks[1].status, Status::Have);
+        assert_eq!(tracks[1].path.as_deref(), Some(renamed.as_path()), "the rename was lost");
+        assert_eq!(tracks[0].status, Status::Pending, "a chapter with no file is not downloaded");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // A listing that holds the video must not call its own chapters gone.
+    #[test]
+    fn a_chapter_is_never_called_departed() {
+        let dir = folder("chapgone");
+        let file = dir.join("01 - Intro.opus");
+        std::fs::write(&file, "audio").unwrap();
+        manifest::write(&dir, "https://youtu.be/vid", [("vid#01".to_string(), file)].into_iter()).unwrap();
+        let mut listed = vec![video(&dir, false)];
+        note_departures(&super::tests::config(true), &mpsc::channel().0, true, &mut listed);
+        assert_eq!(listed.len(), 1, "a chapter was added as a departure");
+        assert!(listed.iter().all(|t| t.status != Status::Gone));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn tone(at: &Path, seconds: u32) -> bool {
+        std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i"])
+            .arg(format!("sine=f=440:d={seconds}"))
+            .args(["-ac", "2", "-c:a", "libopus", "-y"])
+            .arg(at)
+            .status()
+            .is_ok_and(|s| s.success())
+    }
+
+    /* The video is already here, so no yt-dlp runs and the test reaches the
+       cutting alone. The full file is removed once every chapter has its own,
+       and is the one thing left if a cut fails. */
+    #[test]
+    fn a_split_video_is_cut_into_its_chapters_and_the_whole_file_goes() {
+        let dir = folder("splitcut");
+        let whole = dir.join("01 - Album.opus");
+        if !tone(&whole, 12) {
+            eprintln!("skipped: ffmpeg could not make a fixture");
+            std::fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+        tag::set_fields(&whole, &tag::Fields { artist: "Band".into(), title: "Album".into(), ..Default::default() }).unwrap();
+        // The video's thumbnail, which the cuts have to carry or a chapter the lookup cannot place has no art.
+        let jpg = dir.join("thumb.jpg");
+        let made = std::process::Command::new("ffmpeg")
+            .args(["-v", "error", "-f", "lavfi", "-i", "testsrc=size=64x64:duration=1:rate=1", "-frames:v", "1", "-y"])
+            .arg(&jpg)
+            .status()
+            .is_ok_and(|s| s.success());
+        if made {
+            tag::set_cover(&whole, &std::fs::read(&jpg).unwrap()).unwrap();
+        }
+        let cfg = super::tests::config(false);
+        let mut tracks = chapter_tracks(&cfg, &video(&dir, true), &three(), &dir);
+        let split = Split { chapters: three(), video: Track::new(1, "vid".into(), "Album".into(), whole.clone()) };
+        let mut split = split;
+        split.video.status = Status::Have;
+        let (tx, rx) = mpsc::channel();
+
+        let warning = fetch_split(&cfg, &tx, &AtomicBool::new(false), &mut tracks, &split);
+        assert_eq!(warning, "");
+        for (track, title) in tracks.iter().zip(["Intro", "Middle", "End"]) {
+            assert_eq!(track.status, Status::Downloaded, "{title}");
+            let path = track.path.as_deref().unwrap();
+            assert!(path.is_file(), "{title} was not written");
+            let info = tag::read(path).unwrap();
+            assert_eq!((info.title.as_str(), info.artist.as_str()), (title, "Band"));
+            assert!((3..=5).contains(&info.duration), "{title} is {}s", info.duration);
+            assert_eq!(tag::read_cover(path).is_some(), made, "{title} lost the video's picture");
+        }
+        assert!(!whole.exists(), "the full-length file was left behind");
+        assert!(rx.try_iter().any(|m| matches!(m, Msg::Path { index: 3, .. })));
+        // The record of the split is written by the cut itself, before anything else gets the chance to be interrupted.
+        assert!(manifest::is_split(&dir, "vid"));
+        assert_eq!(manifest::entries(&dir).len(), 3);
+        let leftovers = std::fs::read_dir(&dir).unwrap().flatten().filter(|e| e.file_name().to_string_lossy().starts_with(SCRATCH)).count();
+        assert_eq!(leftovers, 0, "a scratch file was left in the folder");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_failed_cut_keeps_the_whole_file_for_the_next_sync() {
+        let dir = folder("splitfail");
+        let whole = dir.join("01 - Album.opus");
+        if !tone(&whole, 12) {
+            eprintln!("skipped: ffmpeg could not make a fixture");
+            std::fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+        let cfg = super::tests::config(false);
+        // The last chapter runs past the end of the file, which is a cut that comes out empty.
+        let chapters = vec![chapter("Intro", 0.0, 4.0), chapter("Gone", 100.0, 104.0)];
+        let mut tracks = chapter_tracks(&cfg, &video(&dir, true), &chapters, &dir);
+        let mut split = Split { chapters, video: Track::new(1, "vid".into(), "Album".into(), whole.clone()) };
+        split.video.status = Status::Have;
+        let (tx, _rx) = mpsc::channel();
+
+        fetch_split(&cfg, &tx, &AtomicBool::new(false), &mut tracks, &split);
+        assert_eq!(tracks[0].status, Status::Downloaded);
+        assert_eq!(tracks[1].status, Status::Failed);
+        assert!(tracks[1].note.is_empty() || tracks[1].note.starts_with("cut"));
+        assert!(whole.is_file(), "the video was removed with a chapter still missing");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // The cut reads the file it would write over, so a chapter named like the video is given another name.
+    #[test]
+    fn a_chapter_named_like_the_video_does_not_overwrite_it() {
+        let dir = folder("splitclash");
+        let whole = dir.join("01 - Album.opus");
+        if !tone(&whole, 8) {
+            eprintln!("skipped: ffmpeg could not make a fixture");
+            std::fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+        let before = std::fs::read(&whole).unwrap();
+        let cfg = super::tests::config(false);
+        let chapters = vec![chapter("Album", 0.0, 4.0), chapter("Two", 4.0, 8.0)];
+        // Forced, since the names above no longer collide: a track whose recorded file is the video's own.
+        let mut forced = chapter_tracks(&cfg, &video(&dir, true), &chapters, &dir);
+        forced[0].path = Some(whole.clone());
+        forced[0].status = Status::Pending;
+        let guard = Split { chapters: chapters.clone(), video: Track::new(1, "vid".into(), "Album".into(), whole.clone()) };
+        let mut guard = guard;
+        guard.video.status = Status::Have;
+        fetch_split(&cfg, &mpsc::channel().0, &AtomicBool::new(false), &mut forced, &guard);
+        assert_eq!(forced[0].status, Status::Failed);
+        assert_eq!(std::fs::read(&whole).unwrap(), before, "the video was overwritten");
+        // The forced run recorded its second cut, and the second half of this test starts from nothing.
+        let _ = std::fs::remove_file(dir.join(".earworm"));
+        let _ = std::fs::remove_file(dir.join("02 - Two.opus"));
+
+        let mut tracks = chapter_tracks(&cfg, &video(&dir, true), &chapters, &dir);
+        assert_eq!(tracks[0].status, Status::Pending, "the video's own file was taken for the chapter");
+        assert_ne!(tracks[0].path.as_deref(), Some(whole.as_path()), "the chapter would overwrite the video");
+        let mut split = Split { chapters, video: Track::new(1, "vid".into(), "Album".into(), whole.clone()) };
+        split.video.status = Status::Have;
+        let (tx, _rx) = mpsc::channel();
+        fetch_split(&cfg, &tx, &AtomicBool::new(false), &mut tracks, &split);
+        assert_eq!(tracks[0].status, Status::Downloaded);
+        assert!(tracks[0].path.as_deref().is_some_and(Path::is_file));
+        // Every chapter has a file of its own, so the video itself is what goes, and only after the cuts.
+        assert!(!whole.exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_chapter_id_is_the_whole_shape_and_not_just_a_hash() {
+        assert!(manifest::is_chapter("dQw4w9WgXcQ#01"));
+        assert!(manifest::is_chapter("dQw4w9WgXcQ#12"));
+        assert!(!manifest::is_chapter("dQw4w9WgXcQ"));
+        // A local id is a filename, and a filename can say `#2`.
+        assert!(!manifest::is_chapter(&manifest::local_id("Song #2.mp3")));
+        assert!(!manifest::is_chapter(&manifest::local_id("track#1")));
+        assert!(!manifest::is_chapter("#01"));
+        assert!(!manifest::is_chapter("abc#"));
+        assert!(!manifest::is_chapter("abc#x1"));
+    }
+
+    // A killed ffmpeg leaves scratch behind, and a later sync clears it instead of reading it as a track.
+    #[test]
+    fn a_cut_that_was_killed_leaves_nothing_a_later_sync_reads_as_a_chapter() {
+        let dir = folder("splitscratch");
+        let whole = dir.join("01 - Album.opus");
+        if !tone(&whole, 12) {
+            eprintln!("skipped: ffmpeg could not make a fixture");
+            std::fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+        let stale = dir.join(format!("{SCRATCH}2.opus"));
+        std::fs::write(&stale, "half a chapter").unwrap();
+        let cfg = super::tests::config(false);
+        let mut tracks = chapter_tracks(&cfg, &video(&dir, true), &three(), &dir);
+        let mut split = Split { chapters: three(), video: Track::new(1, "vid".into(), "Album".into(), whole.clone()) };
+        split.video.status = Status::Have;
+        fetch_split(&cfg, &mpsc::channel().0, &AtomicBool::new(false), &mut tracks, &split);
+        assert!(!stale.exists(), "a leftover scratch file survived");
+        assert!(tracks.iter().all(|t| t.status == Status::Downloaded));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /* Stopped half way: the chapters already cut are in the sidecar, the full
+       file is still here, and the next sync finds both. Without the entry
+       written per chapter, the video would read as whole and the cut files as
+       somebody's own music. */
+    #[test]
+    fn a_split_that_stopped_part_way_resumes_from_the_full_file() {
+        let dir = folder("splitresume");
+        let whole = dir.join("01 - Album.opus");
+        if !tone(&whole, 12) {
+            eprintln!("skipped: ffmpeg could not make a fixture");
+            std::fs::remove_dir_all(&dir).unwrap();
+            return;
+        }
+        let cfg = super::tests::config(false);
+        let broken = vec![chapter("Intro", 0.0, 4.0), chapter("Middle", 100.0, 104.0), chapter("End", 8.0, 12.0)];
+        let mut tracks = chapter_tracks(&cfg, &video(&dir, true), &broken, &dir);
+        let mut split = Split { chapters: broken, video: Track::new(1, "vid".into(), "Album".into(), whole.clone()) };
+        split.video.status = Status::Have;
+        fetch_split(&cfg, &mpsc::channel().0, &AtomicBool::new(false), &mut tracks, &split);
+        assert_eq!(
+            tracks.iter().map(|t| t.status).collect::<Vec<_>>(),
+            [Status::Downloaded, Status::Failed, Status::Downloaded]
+        );
+        assert!(whole.is_file(), "the full file went with a chapter still missing");
+
+        // The next sync: the scan sees the whole file, the sidecar says it was split.
+        let mut next = vec![video(&dir, true)];
+        let (again, asked) = settle(Pass::plain(false), Reply::Cancel, &mut next);
+        assert!(!asked && again.is_some(), "a stopped split read as a whole video");
+        assert_eq!(next.iter().map(|t| t.status).collect::<Vec<_>>(), [Status::Have, Status::Pending, Status::Have]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    // Break it by moving the empty-chapters return back above the `is_split` check.
+    #[test]
+    fn a_folder_that_was_split_stays_split_when_upstream_loses_its_chapters() {
+        let dir = folder("splitgone");
+        let one = dir.join("01 - Intro.opus");
+        let two = dir.join("02 - Middle.opus");
+        std::fs::write(&one, "a").unwrap();
+        std::fs::write(&two, "b").unwrap();
+        manifest::write(
+            &dir,
+            "https://youtu.be/vid",
+            [("vid#01".to_string(), one), ("vid#02".to_string(), two)].into_iter(),
+        )
+        .unwrap();
+        // The scan sees the video, whose full file went after the split.
+        let mut tracks = vec![video(&dir, false)];
+        let (tx, _rx) = mpsc::channel();
+        let asker = Asker { tx, enabled: false };
+        let cfg = super::tests::config(false);
+        let split = settle_split(&cfg, &asker, &Pass::plain(false), Vec::new(), &mut tracks);
+        assert!(split.is_some());
+        let names: Vec<&str> = tracks.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, ["Intro", "Middle"]);
+        assert!(tracks.iter().all(|t| t.status == Status::Have), "the video would be fetched again");
+
+        // A folder never split, with no chapters, is the plain video.
+        let other = folder("splitnever");
+        let mut plain = vec![video(&other, false)];
+        assert!(settle_split(&cfg, &asker, &Pass::plain(false), Vec::new(), &mut plain).is_none());
+        assert_eq!(plain.len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+        std::fs::remove_dir_all(&other).unwrap();
+    }
+
+    // Break it by removing the `Failed` early exit in `tag_tracks`: the reason becomes "no file".
+    #[test]
+    fn a_failed_cut_keeps_its_reason_through_the_tagging_pass() {
+        let dir = folder("cutreason");
+        let mut track = Track::new(1, "vid#01".into(), "Intro".into(), dir.join("01 - Intro.opus"));
+        track.status = Status::Failed;
+        let (tx, rx) = mpsc::channel();
+        let asker = Asker { tx: tx.clone(), enabled: false };
+        let cfg = super::tests::config(false);
+        let mut tracks = vec![track];
+        tag_tracks(
+            &cfg,
+            &tx,
+            &AtomicBool::new(false),
+            &mut tracks,
+            "Album",
+            &asker,
+            &mut CoverState::default(),
+            None,
+        );
+        drop(tx);
+        assert!(
+            !rx.try_iter().any(|m| matches!(m, Msg::Update { note: Some(n), .. } if n == "no file")),
+            "the cut's reason was replaced"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }
