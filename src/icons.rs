@@ -16,6 +16,7 @@ pub const NAMES: &str = "text, symbols, nerd";
 const NF_ALBUM: &str = "\u{f0025}";
 const NF_PLAYLIST: &str = "\u{f0cb8}";
 const NF_LOCAL: &str = "\u{f1359}";
+const NF_CUSTOM: &str = "\u{f0900}";
 
 impl Icons {
     pub fn parse(name: &str) -> Option<Icons> {
@@ -50,8 +51,10 @@ impl Icons {
         match (self, kind) {
             (Icons::Text, _) => None,
             (Icons::Symbols, Some(Kind::Album)) => Some("●"),
+            (Icons::Symbols, Some(Kind::Custom)) => Some("◈"),
             (Icons::Symbols, _) => Some("▤"),
             (Icons::Nerd, Some(Kind::Album)) => Some(NF_ALBUM),
+            (Icons::Nerd, Some(Kind::Custom)) => Some(NF_CUSTOM),
             (Icons::Nerd, _) => Some(NF_PLAYLIST),
         }
     }
@@ -69,8 +72,13 @@ impl Icons {
         let local = "local folder, no URL to sync from";
         match self {
             Icons::Text => Vec::new(),
-            Icons::Symbols => vec![("●", "album"), ("▤", "playlist"), ("◆", local)],
-            Icons::Nerd => vec![(NF_ALBUM, "album"), (NF_PLAYLIST, "playlist"), (NF_LOCAL, local)],
+            Icons::Symbols => vec![("●", "album"), ("▤", "playlist"), ("◈", "custom playlist"), ("◆", local)],
+            Icons::Nerd => vec![
+                (NF_ALBUM, "album"),
+                (NF_PLAYLIST, "playlist"),
+                (NF_CUSTOM, "custom playlist"),
+                (NF_LOCAL, local),
+            ],
         }
     }
 }

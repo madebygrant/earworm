@@ -58,6 +58,9 @@ download from a music library:
 - **Icons for the library.** `●` marks an album, `▤` a playlist and `◆` a
   folder earworm did not download. `icons = "nerd"` draws larger Nerd Font glyphs, and `icons = "text"` goes
   back to words.
+- **Custom playlists.** Build a list from tracks in any of your folders with
+  `N` and `P`, reorder it, and play it in cliamp. It follows a track when you
+  edit it, and deleting a list never touches audio.
 - **A song on two playlists downloads once.** A video another folder already
   holds is copied across instead of fetched again, and the pick screen marks a
   likely duplicate with `≈`.

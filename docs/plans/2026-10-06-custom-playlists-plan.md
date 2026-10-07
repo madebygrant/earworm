@@ -149,6 +149,13 @@ Exit:
   renames its file), and checks the playlist still resolves every entry.
 - A test that deletes the playlist with `D` and checks no audio is gone.
 
+Status 2026-10-07: built, in `src/custom.rs`, `src/playlists.rs`, the
+`Kind::Custom` row, `View::Playlist` and the keys `N` (new), `P` (add), `J K x`
+and Enter on the list screen. The two exit tests pass, and a third checks that
+no folder command will act on a custom row's path. Not driven through a pty:
+the harness lost keys here, so the screens were checked live once and the keys
+through unit tests. `play` is untested because it reaches the real cliamp store.
+
 ## 4. Export
 
 Why here: it exports what wave 3 builds, and uses wave 2's filename mapping.

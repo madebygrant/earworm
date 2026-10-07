@@ -110,7 +110,9 @@ pub struct Facts<'a> {
 }
 
 pub fn earned(f: &Facts) -> Vec<Achievement> {
-    let library: usize = f.shelves.iter().map(|s| s.tracks).sum();
+    // A custom list is no folder: its tracks are counted where they live and nothing in it was adopted.
+    let folders: Vec<&Shelf> = f.shelves.iter().filter(|s| s.kind != Some(Kind::Custom)).collect();
+    let library: usize = folders.iter().map(|s| s.tracks).sum();
     // Real work: a track this run tagged. A resync of an unchanged folder leaves every track `Have`.
     let did_work = f.tracks.iter().any(|t| matches!(t.status, Status::Ok | Status::Manual));
     let run_is_clean = matches!(f.done, Some((Ok(_), "finished")))
@@ -123,12 +125,12 @@ pub fn earned(f: &Facts) -> Vec<Achievement> {
     let on_air = f.playback.playing && f.shelves.iter().any(|s| f.playback.on(&s.path));
 
     let checks = [
-        (Achievement::FirstPlaylist, f.shelves.iter().any(|s| s.url.is_some())),
-        (Achievement::TenPlaylists, f.shelves.len() >= 10),
+        (Achievement::FirstPlaylist, folders.iter().any(|s| s.url.is_some())),
+        (Achievement::TenPlaylists, folders.len() >= 10),
         (Achievement::HundredTracks, library >= 100),
         (Achievement::ThousandTracks, library >= 1000),
         (Achievement::AnAlbum, f.shelves.iter().any(|s| s.kind == Some(Kind::Album))),
-        (Achievement::Adopted, f.shelves.iter().any(|s| s.url.is_none())),
+        (Achievement::Adopted, folders.iter().any(|s| s.url.is_none())),
         (Achievement::CleanRun, run_is_clean),
         (
             Achievement::HandTagged,
@@ -222,6 +224,17 @@ mod tests {
             playback: &Playback::default(),
             secrets: 0,
         })
+    }
+
+    #[test]
+    fn a_custom_list_earns_nothing_a_folder_would() {
+        let mut list = shelf(500, None, Some(Kind::Custom));
+        list.missing = 1;
+        let lists: Vec<Shelf> = (0..10).map(|_| list.clone()).collect();
+        let earned = got(&lists, &[], None);
+        for a in [Achievement::Adopted, Achievement::TenPlaylists, Achievement::HundredTracks] {
+            assert!(!earned.contains(&a), "{a:?} earned from lists alone");
+        }
     }
 
     // The pinned list: a rename here re-announces the achievement to everyone.

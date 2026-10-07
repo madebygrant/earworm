@@ -30,6 +30,17 @@ pub fn folder(root: &Path) -> PathBuf {
     root.join(FOLDER)
 }
 
+/// The file a playlist is stored in, which is also what its library row calls its path.
+pub fn path_of(root: &Path, name: &str) -> PathBuf {
+    file_for(root, name)
+}
+
+/// Whether a path is inside the store, so a command that means "a folder" can refuse it.
+// A custom playlist's library row carries its file as the path, and a folder command would treat it as a directory.
+pub fn in_store(root: &Path, path: &Path) -> bool {
+    path.starts_with(folder(root))
+}
+
 fn file_for(root: &Path, name: &str) -> PathBuf {
     folder(root).join(format!("{}.{EXT}", portable::name(name, Form::Composed)))
 }
@@ -74,6 +85,57 @@ fn parse(text: &str) -> Option<Playlist> {
 pub fn load(root: &Path, name: &str) -> Option<Playlist> {
     let found = parse(&std::fs::read_to_string(file_for(root, name)).ok()?)?;
     (found.name == name).then_some(found)
+}
+
+/// The path cliamp's stored name is built from. Only its last component matters, and it is the list's name.
+pub fn key(root: &Path, name: &str) -> PathBuf {
+    folder(root).join(name)
+}
+
+/// Gives a playlist another name, keeping its tracks and order.
+// The file can be the same one under both names (`mix` and `Mix` on a case-insensitive disk), which is
+// a rename and not a clash. Any other file is refused if it is held, and the old one goes only after the new one is written.
+pub fn rename(root: &Path, old: &str, new: &str) -> Result<()> {
+    let Some(mut list) = load(root, old) else {
+        bail!("no playlist called \"{old}\"");
+    };
+    if old == new {
+        return Ok(());
+    }
+    // `save` replaces a playlist of the same name, which is right for an edit and wrong for a rename.
+    if load(root, new).is_some() {
+        bail!("there is already a playlist called \"{new}\"");
+    }
+    // On a case-insensitive disk `Mix` and `mix` are one file whose paths differ, so what the new path holds decides.
+    let held_by_old = std::fs::read_to_string(file_for(root, new)).ok().and_then(|t| parse(&t)).is_some_and(|p| p.name == old);
+    if file_for(root, old) == file_for(root, new) || held_by_old {
+        list.name = new.to_string();
+        return write(root, &list);
+    }
+    list.name = new.to_string();
+    save(root, &list)?;
+    delete(root, old)
+}
+
+/// Writes the `.m3u8` a player is handed, with `../Folder/file` entries for the tracks that exist.
+// For playback inside the library only: the entries are relative to the store, so they hold wherever
+// `--dir` is. Export rewrites them, because a car stereo or a phone will not follow a `../`.
+pub fn write_m3u8(root: &Path, list: &Playlist, files: &[Option<PathBuf>]) -> Result<PathBuf> {
+    let mut text = String::from("#EXTM3U\n");
+    let mut any = false;
+    for file in files.iter().flatten() {
+        let rel = file.strip_prefix(root).map_or_else(|_| file.display().to_string(), |r| format!("../{}", r.display()));
+        text.push_str(&rel);
+        text.push('\n');
+        any = true;
+    }
+    if !any {
+        bail!("none of \"{}\" is on disk  ·  nothing to play", list.name);
+    }
+    let path = file_for(root, &list.name).with_extension("m3u8");
+    std::fs::create_dir_all(folder(root))?;
+    crate::config::write_atomically(&path, &text)?;
+    Ok(path)
 }
 
 /// Files in the store that do not parse, by name, for the caller to report.
@@ -126,7 +188,7 @@ pub fn list(root: &Path) -> Vec<Playlist> {
         .filter(|p| p.extension().is_some_and(|e| e == EXT))
         .filter_map(|p| parse(&std::fs::read_to_string(p).ok()?))
         .collect();
-    found.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    found.sort_by_key(|p| p.name.to_lowercase());
     found
 }
 
@@ -147,12 +209,16 @@ pub fn save(root: &Path, playlist: &Playlist) -> Result<()> {
     {
         bail!("\"{}\" already uses that file name  ·  give this one another name", held.name);
     }
+    write(root, playlist)
+}
+
+fn write(root: &Path, playlist: &Playlist) -> Result<()> {
     std::fs::create_dir_all(folder(root))?;
     let mut text = format!("{NAME}\t{}\n", playlist.name);
     for entry in playlist.entries.iter().filter(|e| writable(e)) {
         text.push_str(&format!("{}\t{}\n", entry.id, entry.hint.display()));
     }
-    crate::config::write_atomically(&path, &text)
+    crate::config::write_atomically(&file_for(root, &playlist.name), &text)
 }
 
 /// Removes the list and its `.m3u8`, and nothing else. The audio is in the
@@ -231,6 +297,41 @@ mod tests {
         assert_eq!(load(&dir, "Mix").unwrap().entries, [entry("ok", "A/a.opus")]);
         save(&dir, &Playlist { name: "Mix".into(), entries: vec![entry("up", "../x.opus"), entry("ok", "A/a.opus")] }).unwrap();
         assert!(!std::fs::read_to_string(file_for(&dir, "Mix")).unwrap().contains("../"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_rename_keeps_the_tracks_and_refuses_a_name_another_playlist_holds() {
+        let dir = root("rename");
+        let tracks = vec![entry("a", "A/a.opus"), entry("b", "A/b.opus")];
+        save(&dir, &Playlist { name: "Old".into(), entries: tracks.clone() }).unwrap();
+        save(&dir, &Playlist { name: "Other".into(), entries: Vec::new() }).unwrap();
+
+        rename(&dir, "Old", "New").unwrap();
+        assert!(load(&dir, "Old").is_none());
+        assert_eq!(load(&dir, "New").unwrap().entries, tracks);
+
+        // A clash leaves both exactly as they were.
+        let err = rename(&dir, "New", "Other").unwrap_err().to_string();
+        assert!(err.contains("already"), "{err}");
+        assert_eq!(load(&dir, "New").map(|p| p.entries), Some(tracks), "the rename lost the list");
+        assert_eq!(load(&dir, "Other").map(|p| p.entries.len()), Some(0), "the rename replaced the other list");
+
+        // Only the case changes, which is the same file on a case-insensitive disk and not a clash.
+        rename(&dir, "New", "new").unwrap();
+        assert!(load(&dir, "new").is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_m3u8_names_tracks_relative_to_the_store_and_leaves_out_the_missing() {
+        let dir = root("m3u8");
+        let list = Playlist { name: "Mix".into(), entries: vec![entry("a", "A/a.opus"), entry("b", "B/b.opus")] };
+        let files = [Some(dir.join("A/01 - Café.opus")), None, Some(dir.join("B/02 - B.opus"))];
+        let path = write_m3u8(&dir, &list, &files).unwrap();
+        let text = std::fs::read_to_string(path).unwrap();
+        assert_eq!(text, "#EXTM3U\n../A/01 - Café.opus\n../B/02 - B.opus\n");
+        assert!(write_m3u8(&dir, &list, &[None, None]).unwrap_err().to_string().contains("nothing to play"));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

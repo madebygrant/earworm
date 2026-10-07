@@ -2,6 +2,7 @@ mod achievements;
 mod app;
 mod cheats;
 mod config;
+mod custom;
 mod deps;
 mod icons;
 mod lookup;
@@ -578,6 +579,11 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         handle_library_key(app, code, mods);
         return;
     }
+    // Before the track keys, which are where an unhandled key would otherwise fall to.
+    if app.view == View::Playlist {
+        handle_playlist_key(app, code, mods);
+        return;
+    }
     /* The filter box takes every key while it is open, so `q` types a letter
        instead of ending the session. */
     if app.typing_filter {
@@ -675,6 +681,11 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             let targets = app.targets();
             app.send(Cmd::Artist(targets));
         }
+        // The marks, or the row under the cursor, into a custom playlist.
+        KeyCode::Char('P') if app.can_command() => {
+            let picks = app.picks();
+            app.send(Cmd::AddToPlaylist(picks));
+        }
         KeyCode::Char('g') => app.jump(false),
         KeyCode::Char('G') => app.jump(true),
         _ => {}
@@ -707,6 +718,56 @@ fn handle_found_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             if let Some((shelf, (name, _))) = app.found_at() {
                 let (folder, name) = (shelf.path.clone(), name.clone());
                 app.send(Cmd::Open(folder, Some(name)));
+            }
+        }
+        // A folder and a filename, which is all a result is: the worker finds the id.
+        KeyCode::Char('P') if app.can_find() => {
+            if let Some((shelf, (name, _))) = app.found_at() {
+                let pick = (shelf.path.clone(), name.clone());
+                app.send(Cmd::AddToPlaylist(vec![pick]));
+            }
+        }
+        _ => {}
+    }
+}
+
+// A custom playlist's own screen. Its rows are ids resolved to files in other folders, so none of the
+// track list's keys apply: `e` would write tags into a folder this list does not own. Enter goes to the
+// source, which is where those edits are made.
+fn handle_playlist_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let name = app.custom.name.clone();
+    match code {
+        KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.quit = true,
+        KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
+        KeyCode::Char('q') => app.quit = true,
+        KeyCode::Esc => app.view = View::Library,
+        KeyCode::Char('l') => app.show_logs = !app.show_logs,
+        KeyCode::Char('j') | KeyCode::Down => app.custom_step(true),
+        KeyCode::Char('k') | KeyCode::Up => app.custom_step(false),
+        KeyCode::Char('g') => app.custom_jump(false),
+        KeyCode::Char('G') => app.custom_jump(true),
+        // Shifted so `j` and `k` keep meaning the cursor, as they do on every other screen.
+        KeyCode::Char('J') | KeyCode::Char('K') if app.can_playlist() => {
+            if let Some(row) = app.custom_selected() {
+                let (id, up) = (row.id.clone(), code == KeyCode::Char('K'));
+                app.send(Cmd::MoveEntry { name, id, up });
+            }
+        }
+        KeyCode::Char('x') | KeyCode::Delete if app.can_playlist() => {
+            if let Some(id) = app.custom_selected().map(|r| r.id.clone()) {
+                app.send(Cmd::RemoveEntry { name, id });
+            }
+        }
+        KeyCode::Char('p') if app.can_playlist() && app.can_play() => app.send(Cmd::PlayPlaylist(name)),
+        KeyCode::Enter if app.can_playlist() => {
+            let source = app.custom_selected().map(|r| (r.path.clone(), r.file.clone()));
+            match source {
+                Some((Some(path), file)) => match path.parent() {
+                    Some(folder) => app.send(Cmd::Open(folder.to_path_buf(), Some(file))),
+                    None => app.say("that track has no folder"),
+                },
+                Some((None, file)) => app.say(format!("{file} is not on disk  ·  x takes it off the list")),
+                None => {}
             }
         }
         _ => {}
@@ -854,19 +915,26 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('u') if mods.contains(KeyModifiers::CONTROL) => app.page_shelf(false),
         KeyCode::Char('g') => app.shelf_jump(false),
         KeyCode::Char('G') => app.shelf_jump(true),
-        KeyCode::Enter if app.can_browse() => {
-            if let Some(folder) = app.selected_shelf().map(|s| s.path.clone()) {
-                app.send(Cmd::Open(folder, None));
+        // A custom playlist's row carries its file as the path, so it goes by name and never as a folder.
+        KeyCode::Enter if app.can_browse() => match app.custom_row() {
+            Some(name) => app.send(Cmd::OpenPlaylist(name)),
+            None => {
+                if let Some(folder) = app.selected_shelf().map(|s| s.path.clone()) {
+                    app.send(Cmd::Open(folder, None));
+                }
             }
-        }
+        },
         /* Free here, unlike on the track list where it marks a row, and this
            is the screen that already says what cliamp is doing. */
         KeyCode::Char(' ') if app.can_browse() && app.can_play() => app.send(Cmd::Toggle),
-        KeyCode::Char('p') if app.can_browse() && app.can_play_shelf() => {
-            if let Some(folder) = app.selected_shelf().map(|s| s.path.clone()) {
-                app.send(Cmd::Play(folder));
+        KeyCode::Char('p') if app.can_browse() && app.can_play_shelf() => match app.custom_row() {
+            Some(name) => app.send(Cmd::PlayPlaylist(name)),
+            None => {
+                if let Some(folder) = app.selected_shelf().map(|s| s.path.clone()) {
+                    app.send(Cmd::Play(folder));
+                }
             }
-        }
+        },
         /* Library-only, like space: `f` follows the active track on the track
            list, and the setting is about the next playlist rather than the
            one on screen. */
@@ -877,11 +945,14 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         /* `e` edits a track on the other screen, so it edits the playlist
            here: this list's rows are folders, and the name is all there is
            on one to change. */
-        KeyCode::Char('e') if app.can_browse() => {
-            if let Some(folder) = app.selected_shelf().map(|s| s.path.clone()) {
-                app.send(Cmd::Rename(folder));
+        KeyCode::Char('e') if app.can_browse() => match app.custom_row() {
+            Some(name) => app.send(Cmd::RenamePlaylist(name)),
+            None => {
+                if let Some(folder) = app.selected_shelf().map(|s| s.path.clone()) {
+                    app.send(Cmd::Rename(folder));
+                }
             }
-        }
+        },
         KeyCode::Char('O') if app.can_browse() => {
             if let Some(folder) = app.selected_shelf().map(|s| s.path.clone()) {
                 app.send(Cmd::Reveal(folder));
@@ -889,13 +960,17 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         }
         /* `D` removes the playlist, then asks whether the folder goes with
            it: forgetting keeps the audio, deleting takes everything. */
-        KeyCode::Char('D') if app.can_browse() => {
-            if let Some(folder) = app.selected_shelf().map(|s| s.path.clone()) {
-                app.send(Cmd::Remove(folder));
+        KeyCode::Char('D') if app.can_browse() => match app.custom_row() {
+            Some(name) => app.send(Cmd::DeletePlaylist(name)),
+            None => {
+                if let Some(folder) = app.selected_shelf().map(|s| s.path.clone()) {
+                    app.send(Cmd::Remove(folder));
+                }
             }
-        }
+        },
         KeyCode::Char('R') if app.can_browse() => app.send(Cmd::ResyncAll),
         KeyCode::Char('n') if app.can_browse() => app.send(Cmd::Url),
+        KeyCode::Char('N') if app.can_browse() => app.send(Cmd::NewPlaylist),
         _ => {}
     }
 }
@@ -1449,6 +1524,114 @@ mod tests {
         handle_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE);
         assert!(cmds.try_recv().is_err(), "o sent a command as well as sorting");
         assert_eq!(app.sort, crate::app::Sort::Synced);
+    }
+
+    fn custom_library() -> (App, std::sync::mpsc::Receiver<Cmd>) {
+        let (tx, cmds) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        app.apply(app::Msg::Library {
+            shelves: vec![crate::app::Shelf {
+                path: std::path::PathBuf::from("/music/.playlists/Mix.playlist"),
+                name: "Mix".into(),
+                kind: Some(crate::manifest::Kind::Custom),
+                tracks: 2,
+                ..Default::default()
+            }],
+            show: true,
+        });
+        (app, cmds)
+    }
+
+    // The row's path is a file in the store, and a folder command would be handed it as a directory.
+    #[test]
+    fn a_custom_row_is_routed_by_name_and_never_sent_as_a_folder() {
+        let (mut app, cmds) = custom_library();
+        for (key, want) in [('e', "rename"), ('D', "delete"), ('p', "play")] {
+            app.playback.player = crate::app::Player::Running;
+            handle_key(&mut app, KeyCode::Char(key), KeyModifiers::NONE);
+            let sent = cmds.try_recv().unwrap_or_else(|_| panic!("{key} sent nothing"));
+            let name = match (&sent, want) {
+                (Cmd::RenamePlaylist(n), "rename") | (Cmd::DeletePlaylist(n), "delete") | (Cmd::PlayPlaylist(n), "play") => n,
+                _ => panic!("{key} sent the wrong command"),
+            };
+            assert_eq!(name, "Mix");
+            app.busy = false;
+        }
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::OpenPlaylist(n)) if n == "Mix"));
+        app.busy = false;
+        handle_key(&mut app, KeyCode::Char('N'), KeyModifiers::NONE);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::NewPlaylist)));
+    }
+
+    fn open_list() -> (App, std::sync::mpsc::Receiver<Cmd>) {
+        let (mut app, cmds) = custom_library();
+        let row = |id: &str, here: bool| crate::app::PlaylistRow {
+            id: id.into(),
+            label: format!("Song {id}"),
+            folder: "Focus".into(),
+            file: format!("{id}.opus"),
+            path: here.then(|| std::path::PathBuf::from(format!("/music/Focus/{id}.opus"))),
+        };
+        app.apply(app::Msg::Custom { name: "Mix".into(), rows: vec![row("a", true), row("b", false), row("c", true)], show: true, focus: None });
+        (app, cmds)
+    }
+
+    /* `e` here would write tags into a file in a folder this list does not own, and `s` or `r`
+       would act on tracks that are not in the worker's list at all. Only the screen's own keys work. */
+    #[test]
+    fn the_playlist_screen_takes_its_own_keys_and_none_of_the_track_commands() {
+        let (mut app, cmds) = open_list();
+        assert_eq!(app.view, View::Playlist);
+        for key in ['e', 's', 'r', 'c', 'T', 'S', 'A', 'u', 'm', 'P'] {
+            handle_key(&mut app, KeyCode::Char(key), KeyModifiers::NONE);
+            assert!(cmds.try_recv().is_err(), "{key} reached a track command from a custom playlist");
+        }
+        handle_key(&mut app, KeyCode::Char('J'), KeyModifiers::NONE);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::MoveEntry { id, up: false, .. }) if id == "a"));
+        app.busy = false;
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::RemoveEntry { id, .. }) if id == "b"), "it carries the id and not the position");
+    }
+
+    #[test]
+    fn enter_goes_to_the_source_folder_and_says_so_when_there_is_none() {
+        let (mut app, cmds) = open_list();
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(
+            cmds.try_recv(),
+            Ok(Cmd::Open(folder, Some(file))) if folder == std::path::Path::new("/music/Focus") && file == "a.opus"
+        ));
+        app.busy = false;
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(cmds.try_recv().is_err(), "a missing track was opened");
+        assert!(app.stage.contains("not on disk"), "{:?}", app.stage);
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.view, View::Library);
+    }
+
+    #[test]
+    fn the_search_adds_its_result_by_folder_and_filename() {
+        let (tx, cmds) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        let focus = crate::app::Shelf {
+            path: std::path::PathBuf::from("/music/Focus"),
+            name: "Focus".into(),
+            files: vec![("01 - Creep.opus".into(), true)],
+            ..Default::default()
+        };
+        app.apply(app::Msg::Library { shelves: vec![focus], show: true });
+        app.filter = "creep".into();
+        app.find_tracks();
+        handle_key(&mut app, KeyCode::Char('P'), KeyModifiers::NONE);
+        assert!(matches!(
+            cmds.try_recv(),
+            Ok(Cmd::AddToPlaylist(picks)) if picks == [(std::path::PathBuf::from("/music/Focus"), "01 - Creep.opus".to_string())]
+        ));
     }
 
     /* The library's Esc asks `shelf_narrowed()`: `narrowed()` is the track

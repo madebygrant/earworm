@@ -59,6 +59,28 @@ one, so you decide. After tagging, `≈ same recording in Focus` means Deezer ga
 two different videos the same ISRC, the recording's own id, which is also
 written into the file's tag.
 
+## Custom playlists
+
+A custom playlist is a list you build from tracks already in your library, in
+any folders. `N` on the library names one. It shows in the library with a
+`◈` (or ` custom ` in text mode) and `built here` where a synced folder says
+when it was synced, and `a` can narrow to them.
+
+To fill one, press `P` on a track in the search results (`t`), or on a track
+list for the marked tracks, or the one under the cursor. A chooser lists your
+lists and a new one. A track already in the list is not added twice.
+
+Enter on a custom playlist opens it. `J` and `K` move a track, `x` takes it
+off the list and never off disk, `p` plays it in cliamp, and Enter goes to the
+track's own folder, which is where you edit its tags. A track that is no longer
+on disk keeps its row with a `!`.
+
+The list follows a track when you edit it, because it holds the video and not
+the filename. The first time you add a track from a folder earworm has not
+touched, earworm writes a `.earworm` there so the list can keep following it.
+`e` renames a list and `D` deletes it after asking, and the tracks stay in
+their folders. Lists live in `.playlists` under your library folder.
+
 ## Giving one a URL
 
 `S` on a folder with no URL asks for one, then syncs. That sync is different

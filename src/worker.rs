@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use crate::app::{Asker, Cmd, Escape, Msg, Reply, Shelf, Status, Track, Watch};
 use crate::cheats::{Feature, LOCKED, Unlocked};
 use crate::config::{self, Config, composed, decomposed};
+use crate::custom;
 use crate::lookup;
 use crate::manifest;
 use crate::player;
@@ -73,7 +74,7 @@ fn ask_start(cfg: &mut Config, tx: &Sender<Msg>) -> Start {
             None => Start::Cancelled,
         };
     }
-    let saved = library(&cfg.dir);
+    let saved = library_all(&cfg.dir);
     if cfg.resync {
         return Start::Resync(saved);
     }
@@ -398,6 +399,42 @@ pub fn library(dir: &Path) -> Vec<Shelf> {
             })
         })
         .collect();
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found
+}
+
+/// What the library screen draws: the folders, then the custom playlists, by name.
+// `library` stays folders only. Resync, `--list`, `--check` and the duplicate checks all treat a row as a
+// directory to sync or read, and a custom playlist is a list of ids that is none of those.
+pub fn library_all(dir: &Path) -> Vec<Shelf> {
+    let mut found = library(dir);
+    let lists = playlists::list(dir);
+    if lists.is_empty() {
+        return found;
+    }
+    let others = Others::at(dir, Path::new(""));
+    for list in lists {
+        let resolved = resolve_entries(&others, dir, &list.entries);
+        let files: Vec<(String, bool)> = list
+            .entries
+            .iter()
+            .zip(&resolved)
+            .map(|(entry, file)| {
+                let name = file.as_deref().unwrap_or(&entry.hint).file_name().unwrap_or_default();
+                (name.to_string_lossy().to_string(), file.is_some())
+            })
+            .collect();
+        let present = files.iter().filter(|(_, here)| *here).count();
+        found.push(Shelf {
+            path: playlists::path_of(dir, &list.name),
+            name: list.name,
+            tracks: present,
+            missing: files.len() - present,
+            files,
+            kind: Some(manifest::Kind::Custom),
+            ..Shelf::default()
+        });
+    }
     found.sort_by(|a, b| a.name.cmp(&b.name));
     found
 }
@@ -1441,16 +1478,16 @@ struct Held {
 }
 
 /// One other playlist folder under `--dir`, as its sidecar holds it.
-struct Other {
-    name: String,
-    sidecar: manifest::Sidecar,
+pub(crate) struct Other {
+    pub(crate) name: String,
+    pub(crate) sidecar: manifest::Sidecar,
 }
 
 /// The other playlist folders under `--dir`, read at most once per pass.
 // One read serves the id index, the title check and the ISRC check; a walk per question
 // made a `--resync` cost the square of the library. Lazy, so a pass with nothing to ask never reads.
 // Name order makes one video in three folders always copy from the same one.
-struct Others {
+pub(crate) struct Others {
     dir: PathBuf,
     here: Option<std::ffi::OsString>,
     read: std::cell::OnceCell<Vec<Other>>,
@@ -1458,14 +1495,18 @@ struct Others {
 
 impl Others {
     fn new(cfg: &Config, here: &Path) -> Self {
+        Others::at(&cfg.dir, here)
+    }
+
+    pub(crate) fn at(dir: &Path, here: &Path) -> Self {
         Others {
-            dir: cfg.dir.clone(),
+            dir: dir.to_path_buf(),
             here: here.file_name().map(ToOwned::to_owned),
             read: std::cell::OnceCell::new(),
         }
     }
 
-    fn all(&self) -> &[Other] {
+    pub(crate) fn all(&self) -> &[Other] {
         self.read.get_or_init(|| {
             let Ok(entries) = std::fs::read_dir(&self.dir) else {
                 return Vec::new();
@@ -1515,7 +1556,7 @@ fn library_index(others: &Others, format: &str, wanted: &HashSet<&str>) -> HashM
 // Where each entry of a custom playlist is now, or `None` for one that is gone.
 // The id resolves it, so a rename of the file or its folder breaks nothing. A video id is global and
 // the entry's folder only breaks a tie; a `~` id is a filename, so it only means something in its own folder.
-fn resolve_entries(others: &Others, root: &Path, entries: &[playlists::Entry]) -> Vec<Option<PathBuf>> {
+pub(crate) fn resolve_entries(others: &Others, root: &Path, entries: &[playlists::Entry]) -> Vec<Option<PathBuf>> {
     let mut held: HashMap<&str, Vec<(&str, &PathBuf)>> = HashMap::new();
     for other in others.all() {
         for (id, file) in &other.sidecar.entries {
@@ -2518,6 +2559,7 @@ fn rename_shelf(
     tracks: &[Track],
     folder: &Path,
 ) -> Result<()> {
+    not_custom(cfg, folder)?;
     let current = folder
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -2596,7 +2638,7 @@ fn rename_shelf(
         let _ = tx.send(Msg::Folder(to.clone()));
     }
     let _ = tx.send(Msg::Library {
-        shelves: library(&cfg.dir),
+        shelves: library_all(&cfg.dir),
         show: false,
     });
     let _ = tx.send(Msg::Flash(format!("renamed to {name}")));
@@ -2631,6 +2673,7 @@ fn remove_shelf(
     if !folder.starts_with(&cfg.dir) || folder == cfg.dir {
         bail!("that folder is outside {}", cfg.dir.display());
     }
+    not_custom(cfg, folder)?;
     let name = folder
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -2720,7 +2763,7 @@ fn remove_shelf(
         tracks.clear();
     }
     let _ = tx.send(Msg::Library {
-        shelves: library(&cfg.dir),
+        shelves: library_all(&cfg.dir),
         show: open,
     });
     /* Forgetting takes the sidecar, not the music, and a folder holding
@@ -2946,9 +2989,51 @@ fn serve(
                 report(tx, remove_shelf(cfg, tx, &asker, tracks, &folder));
                 None
             }
+            Cmd::NewPlaylist => {
+                report(tx, custom::new(&cfg.dir, tx, &asker));
+                None
+            }
+            Cmd::AddToPlaylist(picks) => {
+                report(tx, custom::add(&cfg.dir, tx, &asker, &picks));
+                None
+            }
+            Cmd::OpenPlaylist(name) => {
+                report(tx, custom::open(&cfg.dir, tx, &name));
+                None
+            }
+            Cmd::MoveEntry { name, id, up } => {
+                report(tx, custom::move_entry(&cfg.dir, tx, &name, &id, up));
+                None
+            }
+            Cmd::RemoveEntry { name, id } => {
+                report(tx, custom::remove_entry(&cfg.dir, tx, &name, &id));
+                None
+            }
+            Cmd::RenamePlaylist(name) => {
+                report(tx, custom::rename(&cfg.dir, tx, &asker, &name));
+                None
+            }
+            Cmd::DeletePlaylist(name) => {
+                report(tx, custom::delete(&cfg.dir, tx, &asker, &name));
+                None
+            }
+            Cmd::PlayPlaylist(name) => {
+                match custom::play(&cfg.dir, &name) {
+                    Ok((said, folders)) => {
+                        let _ = tx.send(Msg::OnAir(Some((name, folders))));
+                        let _ = tx.send(Msg::Flash(said));
+                    }
+                    Err(err) => {
+                        let _ = tx.send(Msg::Flash(format!("cliamp: {err}")));
+                        let _ = tx.send(Msg::Log(format!("cliamp: {err}")));
+                    }
+                }
+                None
+            }
             Cmd::Play(folder) => {
                 match player::load(&folder) {
                     Ok(said) => {
+                        let _ = tx.send(Msg::OnAir(None));
                         let _ = tx.send(Msg::Flash(said));
                     }
                     Err(err) => {
@@ -2963,7 +3048,7 @@ fn serve(
         if let Some(result) = synced {
             // Counts and sync times have moved, so the library screen is stale.
             let _ = tx.send(Msg::Library {
-                shelves: library(&cfg.dir),
+                shelves: library_all(&cfg.dir),
                 show: false,
             });
             if !finish(cfg, tx, cancel, tracks, result) {
@@ -2973,6 +3058,15 @@ fn serve(
         // Last, so the keys stay dead until everything above has landed.
         let _ = tx.send(Msg::Idle);
     }
+}
+
+// A custom playlist's row carries its file as the path, and these commands treat a path as a directory to move or delete.
+// The keys route a custom row elsewhere, and this is the second lock: `remove_dir_all` does not come back.
+fn not_custom(cfg: &Config, path: &Path) -> Result<()> {
+    if playlists::in_store(&cfg.dir, path) {
+        bail!("that is a custom playlist, not a folder  ·  its own keys never touch audio");
+    }
+    Ok(())
 }
 
 /// How often `serve` re-checks cliamp while it has nothing else to do. A probe
@@ -2996,9 +3090,10 @@ fn open_row(
     folder: &Path,
     land_on: Option<&str>,
 ) -> Result<()> {
+    not_custom(cfg, folder)?;
     // Re-read rather than trusting what the screen was showing: the folder may
     // have gone away between the listing and the keypress.
-    let shelves = library(&cfg.dir);
+    let shelves = library_all(&cfg.dir);
     let shelf = shelves
         .into_iter()
         .find(|s| s.path == folder)
@@ -4585,7 +4680,8 @@ pub mod tests {
             })
             .last()
             .expect("the library was never refreshed");
-        assert_eq!(shelves.iter().map(|s| s.name.clone()).collect::<Vec<_>>(), ["Evenings"]);
+        // The folder under its new name, and the custom playlist beside it, which is still there.
+        assert_eq!(shelves.iter().map(|s| s.name.clone()).collect::<Vec<_>>(), ["Evenings", "Mix"]);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -10413,6 +10509,58 @@ mod playlist_tests {
         assert_eq!(playlists::rehome(&dir, "A", "Renamed").unwrap(), 1);
         let fresh = playlists::load(&dir, "Mix").unwrap().entries;
         assert_eq!(resolve(&dir, &fresh), [Some(dir.join("Renamed/Song.opus"))]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn a_custom_playlist_is_a_library_row_but_never_a_folder() {
+        let dir = root("rows");
+        folder(&dir, "A", &[("a1", "01 - One.opus")]);
+        folder(&dir, "B", &[("b1", "01 - Two.opus")]);
+        let mix = playlists::Playlist {
+            name: "Mix".into(),
+            entries: vec![entry("b1", "B/01 - Two.opus"), entry("gone", "A/05 - Lost.opus"), entry("a1", "A/01 - One.opus")],
+        };
+        playlists::save(&dir, &mix).unwrap();
+
+        let all = library_all(&dir);
+        let row = all.iter().find(|s| s.name == "Mix").expect("the playlist is not on the library");
+        assert_eq!(row.kind, Some(manifest::Kind::Custom));
+        assert_eq!((row.tracks, row.missing), (2, 1));
+        assert_eq!(row.path, playlists::path_of(&dir, "Mix"), "a folder command would be handed the wrong thing");
+        // In the playlist's order, with the missing one named and flagged.
+        assert_eq!(
+            row.files,
+            [("01 - Two.opus".to_string(), true), ("05 - Lost.opus".to_string(), false), ("01 - One.opus".to_string(), true)]
+        );
+        assert_eq!(all.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["A", "B", "Mix"]);
+
+        // Resync, `--list`, `--check` and the duplicate checks walk this, and a list is none of those.
+        assert_eq!(library(&dir).iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["A", "B"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    // `remove_dir_all` does not come back, and a custom row's path is a file in the store, not a folder.
+    #[test]
+    fn no_folder_command_will_act_on_a_custom_playlists_path() {
+        let dir = root("lock");
+        folder(&dir, "A", &[("a1", "01 - One.opus")]);
+        let list = playlists::Playlist { name: "Mix".into(), entries: vec![entry("a1", "A/01 - One.opus")] };
+        playlists::save(&dir, &list).unwrap();
+        let mut cfg = cfg_in(&dir);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let asker = Asker { tx: tx.clone(), enabled: false };
+        let mut tracks = Vec::new();
+
+        for target in [playlists::path_of(&dir, "Mix"), playlists::folder(&dir)] {
+            for (what, err) in [
+                ("remove", remove_shelf(&mut cfg, &tx, &asker, &mut tracks, &target).unwrap_err()),
+                ("rename", rename_shelf(&mut cfg, &tx, &asker, &tracks, &target).unwrap_err()),
+                ("open", open_row(&mut cfg, &tx, &mut tracks, &target, None).unwrap_err()),
+            ] {
+                assert!(err.to_string().contains("custom playlist"), "{what}: {err}");
+            }
+        }
+        assert!(playlists::load(&dir, "Mix").is_some(), "a folder command took the list");
+        assert!(dir.join("A/01 - One.opus").is_file());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

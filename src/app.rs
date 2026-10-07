@@ -307,6 +307,13 @@ pub struct Playback {
 }
 
 impl Playback {
+    /// Whether a custom list started from here is what cliamp is on: its row, not the source folder, is marked.
+    // cliamp reports a track and never a playlist, so this holds only while the track sits in one of the
+    // list's folders. Switching playlists inside cliamp is not visible from here.
+    pub fn list_on_air(&self, on_air: Option<&(String, Vec<PathBuf>)>, name: &str) -> bool {
+        on_air.is_some_and(|(n, folders)| n == name && folders.iter().any(|f| self.on(f)))
+    }
+
     /* Compared composed, because this path came back out of cliamp and the
        shelf's came off disk. Which form cliamp emits is its business and can
        change; a Korean folder name silently never matching is not a failure
@@ -346,6 +353,31 @@ pub enum View {
     /// with the folder each one sits in. The library screen narrows to the
     /// folders holding a match; this says which tracks they are.
     Found,
+    /// One custom playlist's tracks, in its order. Its own screen with its own cursor, so a key here never
+    /// reaches the track list's commands, which would write tags to a file in another folder.
+    Playlist,
+}
+
+/// One track of a custom playlist as the screen shows it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PlaylistRow {
+    /// What every command on the row carries, never its position: the order changes under a move.
+    pub id: String,
+    pub label: String,
+    /// The folder it sits in, and the file in it, for the jump to the source.
+    pub folder: String,
+    pub file: String,
+    /// `None` when no folder holds it now, which the row shows as `!`.
+    pub path: Option<PathBuf>,
+}
+
+/// The open custom playlist.
+#[derive(Clone, Debug, Default)]
+pub struct CustomView {
+    pub name: String,
+    pub rows: Vec<PlaylistRow>,
+    pub cursor: usize,
+    pub scroll: usize,
 }
 
 /// Work the UI asks of the worker once the run itself has finished.
@@ -402,6 +434,20 @@ pub enum Cmd {
     /// then either forgets the playlist or deletes the whole folder.
     /// Carries the folder rather than the row, like `Open`.
     Remove(PathBuf),
+    /// Ask for a name and make an empty custom playlist.
+    NewPlaylist,
+    /// Put tracks into a custom playlist, chosen from the list or newly named. A folder and a filename each,
+    /// and never a row position: the worker works out the ids, and adopts a folder that has none.
+    AddToPlaylist(Vec<(PathBuf, String)>),
+    /// Open a custom playlist's screen, by name as `Open` is by folder.
+    OpenPlaylist(String),
+    /// Move one entry a place. By id, because the rows move under the cursor.
+    MoveEntry { name: String, id: String, up: bool },
+    RemoveEntry { name: String, id: String },
+    RenamePlaylist(String),
+    /// The list and never the audio: the worker confirms first, and the tracks stay in their folders.
+    DeletePlaylist(String),
+    PlayPlaylist(String),
 }
 
 /* A question the UI asks on its own account. Nothing is blocked on the
@@ -488,6 +534,8 @@ pub enum Msg {
     Folder(PathBuf),
     /// Sent only when it changes, since the worker re-checks on a timer.
     Player(Playback),
+    /// The custom list just handed to cliamp, or `None` when a folder was.
+    OnAir(Option<(String, Vec<PathBuf>)>),
     Tracks(Vec<Track>),
     Progress {
         index: usize,
@@ -522,6 +570,9 @@ pub enum Msg {
     /// the counts, and `show` is false then: the run's own tracks are what the
     /// user is looking at and must not be replaced under them.
     Library { shelves: Vec<Shelf>, show: bool },
+    /// A custom playlist's rows. `show` opens the screen, and a refresh after an edit does not: the user
+    /// may have left it. `focus` is the id to land on, for a move that has to keep the cursor on its entry.
+    Custom { name: String, rows: Vec<PlaylistRow>, show: bool, focus: Option<String> },
     Ask(Prompt, Sender<Reply>),
     /// Hand the track list to the user to choose from before downloading.
     /// Not a `Prompt`: the answer is made with the list's own cursor, marks
@@ -900,6 +951,8 @@ pub struct App {
     /// `Msg::Folder`, since the UI only ever sees a track's path by chance.
     pub folder: Option<PathBuf>,
     pub playback: Playback,
+    /// The custom list last played from here and the folders it draws on; see `Playback::list_on_air`.
+    pub on_air: Option<(String, Vec<PathBuf>)>,
     pub tracks: Vec<Track>,
     pub logs: Vec<String>,
     pub view: View,
@@ -907,6 +960,8 @@ pub struct App {
     /// Cursor in the library, kept apart from the track cursor so coming back
     /// to the library lands on the row you left from.
     pub shelf: usize,
+    /// The custom playlist's screen, which has its own cursor like the library does.
+    pub custom: CustomView,
     pub cursor: usize,
     /// Narrows what the track list shows. A view over `tracks` and nothing
     /// more: `cursor` stays a position in `tracks` and `marked` stays a set of
@@ -1027,11 +1082,13 @@ impl App {
             playlist: String::new(),
             folder: None,
             playback: Playback::default(),
+            on_air: None,
             tracks: Vec::new(),
             logs: Vec::new(),
             view: View::Tracks,
             library: Vec::new(),
             shelf: 0,
+            custom: CustomView::default(),
             cursor: 0,
             filter: String::new(),
             typing_filter: false,
@@ -1256,6 +1313,7 @@ impl App {
             Msg::Flash(s) => self.say(s),
             Msg::Playlist(p) => self.playlist = p,
             Msg::Folder(f) => self.folder = Some(f),
+            Msg::OnAir(list) => self.on_air = list,
             Msg::Player(now) => {
                 self.playback = now;
                 self.recheck = true;
@@ -1327,6 +1385,21 @@ impl App {
                 self.shelf = self.shelf.min(self.library.len().saturating_sub(1));
                 if show {
                     self.view = View::Library;
+                }
+            }
+            Msg::Custom { name, rows, show, focus } => {
+                // Kept by id across a refresh: the entry under the cursor is the one to stay on.
+                let was = self.custom.rows.get(self.custom.cursor).map(|r| r.id.clone());
+                let same = self.custom.name == name;
+                self.custom.name = name;
+                self.custom.rows = rows;
+                let want = focus.or(if same { was } else { None });
+                self.custom.cursor = want
+                    .and_then(|id| self.custom.rows.iter().position(|r| r.id == id))
+                    .unwrap_or(if same { self.custom.cursor } else { 0 })
+                    .min(self.custom.rows.len().saturating_sub(1));
+                if show {
+                    self.view = View::Playlist;
                 }
             }
             /* Opens with everything that needs fetching already marked, so
@@ -1485,6 +1558,17 @@ impl App {
         targets
     }
 
+    /// The marked tracks, or the one under the cursor, as folder and filename for a custom playlist.
+    // Folder and file and not the row: the worker works out the id and adopts a folder that has none.
+    pub fn picks(&self) -> Vec<(PathBuf, String)> {
+        self.targets()
+            .into_iter()
+            .filter_map(|index| self.tracks.iter().find(|t| t.index == index))
+            .filter_map(|t| t.path.as_deref())
+            .filter_map(|p| Some((p.parent()?.to_path_buf(), p.file_name()?.to_string_lossy().to_string())))
+            .collect()
+    }
+
     /// Every row the filter shows, marked or unmarked together. `m` stops at
     /// the filter for the same reason, so this is the only way to reach the
     /// whole playlist in one key once a filter is on.
@@ -1610,18 +1694,47 @@ impl App {
         self.library.get(self.shelf)
     }
 
+    /// The name of the selected row when it is a custom playlist, which keys route by name and not path.
+    pub fn custom_row(&self) -> Option<String> {
+        self.selected_shelf()
+            .filter(|s| s.kind == Some(crate::manifest::Kind::Custom))
+            .map(|s| s.name.clone())
+    }
+
     /// Whether `p` on the library has something to hand over. cliamp being up
     /// is only half of it: the folder under the cursor has to hold a playlist
     /// file, and a folder earworm did not download need not. A key that can
     /// only refuse is worse than no key, so the row goes with it.
     pub fn can_play_shelf(&self) -> bool {
-        self.can_play() && self.selected_shelf().is_some_and(|s| s.playlist.is_some())
+        self.can_play()
+            && self.selected_shelf().is_some_and(|s| {
+                // A custom playlist makes its `.m3u8` when it is played.
+                s.playlist.is_some() || (s.kind == Some(crate::manifest::Kind::Custom) && s.tracks > 0)
+            })
     }
 
     /* Not gated on the library having rows: `n` is the way out of an empty
        one, and `Cmd::Open` is guarded by there being a row to open. */
     pub fn can_browse(&self) -> bool {
         self.view == View::Library && self.prompt.is_none() && !self.busy
+    }
+
+    /// Keys for a custom playlist's screen. Exclusive with `can_command`, `can_browse` and `can_find` on `View`.
+    pub fn can_playlist(&self) -> bool {
+        self.view == View::Playlist && self.prompt.is_none() && !self.busy
+    }
+
+    pub fn custom_selected(&self) -> Option<&PlaylistRow> {
+        self.custom.rows.get(self.custom.cursor)
+    }
+
+    pub fn custom_step(&mut self, down: bool) {
+        let last = self.custom.rows.len().saturating_sub(1);
+        self.custom.cursor = if down { (self.custom.cursor + 1).min(last) } else { self.custom.cursor.saturating_sub(1) };
+    }
+
+    pub fn custom_jump(&mut self, end: bool) {
+        self.custom.cursor = if end { self.custom.rows.len().saturating_sub(1) } else { 0 };
     }
 
     /// Esc in the track view. Goes back to the library when there is one, and
@@ -1823,8 +1936,9 @@ impl App {
             None => true,
             Some(crate::manifest::Kind::Album) => shelf.kind == Some(crate::manifest::Kind::Album),
             Some(crate::manifest::Kind::Playlist) => {
-                shelf.kind != Some(crate::manifest::Kind::Album)
+                !matches!(shelf.kind, Some(crate::manifest::Kind::Album | crate::manifest::Kind::Custom))
             }
+            Some(crate::manifest::Kind::Custom) => shelf.kind == Some(crate::manifest::Kind::Custom),
         }
     }
 
@@ -1835,7 +1949,8 @@ impl App {
         self.only = match self.only {
             None => Some(Kind::Album),
             Some(Kind::Album) => Some(Kind::Playlist),
-            Some(Kind::Playlist) => None,
+            Some(Kind::Playlist) => Some(Kind::Custom),
+            Some(Kind::Custom) => None,
         };
         self.snap();
         self.kind_label()
@@ -1846,6 +1961,7 @@ impl App {
             None => "every folder",
             Some(crate::manifest::Kind::Album) => "albums",
             Some(crate::manifest::Kind::Playlist) => "playlists",
+            Some(crate::manifest::Kind::Custom) => "custom playlists",
         }
     }
 
@@ -1929,7 +2045,8 @@ impl App {
         self.library
             .iter()
             .enumerate()
-            .filter(|(_, s)| self.kind_shows(s))
+            // A custom playlist's tracks are already found in the folders they came from.
+            .filter(|(_, s)| self.kind_shows(s) && s.kind != Some(crate::manifest::Kind::Custom))
             .flat_map(|(shelf, s)| {
                 s.files
                     .iter()
@@ -2014,11 +2131,26 @@ impl App {
 
     /// Whole-library totals for the status bar: what a sync would have to
     /// fetch, and how stale the stalest folder is.
+    // A list's tracks are already counted in the folders they live in, and its missing entries are not
+    // something a sync fetches.
+    fn folders(&self) -> impl Iterator<Item = &Shelf> {
+        self.library.iter().filter(|s| s.kind != Some(crate::manifest::Kind::Custom))
+    }
+
+    /// Whether cliamp is on this row. A playing list takes the marker from the folders it draws on.
+    pub fn row_on_air(&self, shelf: &Shelf) -> bool {
+        if shelf.kind == Some(crate::manifest::Kind::Custom) {
+            return self.playback.list_on_air(self.on_air.as_ref(), &shelf.name);
+        }
+        let list_playing = self.on_air.as_ref().is_some_and(|(_, fs)| fs.iter().any(|f| self.playback.on(f)));
+        self.playback.on(&shelf.path) && !list_playing
+    }
+
     pub fn library_totals(&self) -> (usize, usize, Option<u64>) {
         (
-            self.library.iter().map(|s| s.tracks).sum(),
-            self.library.iter().map(|s| s.missing).sum(),
-            self.library.iter().filter_map(|s| s.synced).max(),
+            self.folders().map(|s| s.tracks).sum(),
+            self.folders().map(|s| s.missing).sum(),
+            self.folders().filter_map(|s| s.synced).max(),
         )
     }
 
@@ -2883,9 +3015,10 @@ mod tests {
             kinded("Autobahn", Some(Kind::Album)),
             kinded("Road trip", Some(Kind::Playlist)),
             kinded("Sleep", None),
+            kinded("Mix", Some(Kind::Custom)),
         ]);
 
-        assert_eq!(app.shelf_rows(), vec![0, 1, 2]);
+        assert_eq!(app.shelf_rows(), vec![0, 1, 2, 3]);
         assert!(!app.filtering(), "the band is up with nothing narrowing");
 
         assert_eq!(app.cycle_kind(), "albums");
@@ -2893,12 +3026,89 @@ mod tests {
         assert!(app.filtering(), "the band would not say the list is narrowed");
         assert!(app.shelf_narrowed(), "Esc would have nothing to clear");
 
+        // A list built here is not a downloaded playlist, so it has its own stop.
         assert_eq!(app.cycle_kind(), "playlists");
         assert_eq!(app.shelf_rows(), vec![1, 2]);
 
+        assert_eq!(app.cycle_kind(), "custom playlists");
+        assert_eq!(app.shelf_rows(), vec![3]);
+
         assert_eq!(app.cycle_kind(), "every folder");
-        assert_eq!(app.shelf_rows(), vec![0, 1, 2]);
+        assert_eq!(app.shelf_rows(), vec![0, 1, 2, 3]);
         assert!(!app.shelf_narrowed());
+    }
+
+    // A custom list has no `.m3u8` until it is played, so the key cannot ask for one: it needs a track to hand over.
+    #[test]
+    fn p_is_offered_on_a_custom_row_only_when_it_has_tracks_and_cliamp_is_up() {
+        use crate::manifest::Kind;
+        let mut app = library_app(vec![Shelf { kind: Some(Kind::Custom), tracks: 2, ..stocked("Mix", &["a.opus"]) }]);
+        assert!(!app.can_play_shelf(), "offered with cliamp not running");
+        app.playback.player = Player::Running;
+        assert!(app.can_play_shelf());
+        app.library[0].tracks = 0;
+        assert!(!app.can_play_shelf(), "offered for a list with nothing on disk");
+    }
+
+    fn rows(ids: &[&str]) -> Vec<PlaylistRow> {
+        ids.iter()
+            .map(|id| PlaylistRow {
+                id: (*id).into(),
+                label: format!("Song {id}"),
+                folder: "Focus".into(),
+                file: format!("{id}.opus"),
+                path: Some(PathBuf::from(format!("/music/Focus/{id}.opus"))),
+            })
+            .collect()
+    }
+
+    /* A move reorders rows under the cursor, so the cursor has to follow the entry and not the position,
+       or `K` would leave you pointing at whatever slid into the row you were on. */
+    #[test]
+    fn the_playlist_cursor_follows_an_entry_through_a_move_and_a_refresh() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.apply(Msg::Custom { name: "Mix".into(), rows: rows(&["a", "b", "c"]), show: true, focus: None });
+        assert_eq!((app.view, app.custom.cursor), (View::Playlist, 0));
+
+        app.custom_step(true);
+        app.custom_step(true);
+        assert_eq!(app.custom_selected().unwrap().id, "c");
+        // `c` moved up and the worker says so: the cursor goes with it.
+        app.apply(Msg::Custom { name: "Mix".into(), rows: rows(&["a", "c", "b"]), show: false, focus: Some("c".into()) });
+        assert_eq!(app.custom_selected().unwrap().id, "c");
+        // A refresh with no focus keeps the entry the cursor was on, wherever it now is.
+        app.apply(Msg::Custom { name: "Mix".into(), rows: rows(&["c", "a", "b"]), show: false, focus: None });
+        assert_eq!(app.custom_selected().unwrap().id, "c");
+        // Removing the entry under the cursor leaves it on the same row, clamped, and never past the end.
+        app.apply(Msg::Custom { name: "Mix".into(), rows: rows(&["a", "b"]), show: false, focus: None });
+        assert!(app.custom.cursor < 2);
+        // Another playlist starts at the top.
+        app.custom_jump(true);
+        app.apply(Msg::Custom { name: "Other".into(), rows: rows(&["x", "y"]), show: false, focus: None });
+        assert_eq!(app.custom.cursor, 0);
+    }
+
+    #[test]
+    fn a_refresh_after_an_edit_does_not_pull_the_user_back_to_the_playlist() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.view = View::Library;
+        app.apply(Msg::Custom { name: "Mix".into(), rows: rows(&["a"]), show: false, focus: None });
+        assert_eq!(app.view, View::Library);
+        assert!(!app.can_playlist() && !app.can_command() && !app.can_find(), "the predicates must be exclusive");
+    }
+
+    // Its tracks are found in the folders they came from, so listing them again would show each twice.
+    #[test]
+    fn the_search_never_lists_a_custom_playlists_tracks_a_second_time() {
+        use crate::manifest::Kind;
+        let mut app = library_app(vec![
+            Shelf { kind: None, ..stocked("Folder", &["01 - Creep.opus"]) },
+            Shelf { kind: Some(Kind::Custom), ..stocked("Mix", &["01 - Creep.opus"]) },
+        ]);
+        app.filter = "creep".into();
+        assert_eq!(app.found_rows(), vec![(0, 0)]);
     }
 
     /// Both narrowings at once, and one Esc for the pair: half of it left on
@@ -3699,6 +3909,27 @@ mod tests {
         assert!(app.folder.is_none(), "the last playlist's folder stayed behind");
     }
 
+    #[test]
+    fn a_playing_list_takes_the_marker_from_the_folder_its_track_sits_in() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        let mut list = shelf("Mix");
+        list.kind = Some(crate::manifest::Kind::Custom);
+        let focus = shelf("Focus");
+        app.apply(Msg::Player(at(Player::Running, Some("/music/Focus"), true)));
+        assert!(app.row_on_air(&focus) && !app.row_on_air(&list), "a folder play marks the folder");
+
+        app.apply(Msg::OnAir(Some(("Mix".into(), vec![PathBuf::from("/music/Focus")]))));
+        assert!(app.row_on_air(&list) && !app.row_on_air(&focus), "the list should hold the marker");
+
+        app.apply(Msg::Player(at(Player::Running, Some("/music/Other"), true)));
+        assert!(!app.row_on_air(&list), "the track left the list's folders");
+
+        app.apply(Msg::OnAir(None));
+        app.apply(Msg::Player(at(Player::Running, Some("/music/Focus"), true)));
+        assert!(app.row_on_air(&focus), "playing the folder again marks it");
+    }
+
     fn at(player: Player, folder: Option<&str>, playing: bool) -> Playback {
         Playback {
             player,
@@ -3767,6 +3998,17 @@ mod tests {
             assert!(now.on(Path::new(decomposed)), "decomposed shelf missed {reported:?}");
             assert!(!now.on(Path::new("/music/Focus")), "it matched another folder");
         }
+    }
+
+    #[test]
+    fn library_totals_leave_a_custom_list_out() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        let mut list = shelf("Mix");
+        list.kind = Some(crate::manifest::Kind::Custom);
+        list.missing = 1;
+        app.library = vec![shelf("A"), list];
+        assert_eq!(app.library_totals(), (3, 0, None));
     }
 
     fn shelf(name: &str) -> Shelf {

@@ -114,6 +114,8 @@ pub fn is_split(folder: &Path, video: &str) -> bool {
 pub enum Kind {
     Album,
     Playlist,
+    // A list built from tracks in other folders. Only the library makes this one: no name or header can claim it.
+    Custom,
 }
 
 impl Kind {
@@ -121,6 +123,7 @@ impl Kind {
         match self {
             Kind::Album => "album",
             Kind::Playlist => "playlist",
+            Kind::Custom => "custom",
         }
     }
 

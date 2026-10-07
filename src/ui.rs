@@ -24,6 +24,8 @@ const PREVIEW_FROM: u16 = 100;
 const MISSING_WIDTH: usize = 13;
 /// ` album ` plus the space that separates it from the name.
 const KIND_WIDTH: usize = 8;
+/// ` custom ` plus the gap, for a library that has one.
+const KIND_WIDTH_CUSTOM: usize = 9;
 /// As much of cliamp's track title as the bar will spend on it. Long enough
 /// to recognise a song, short enough that it is not what pushed the counts
 /// off the row.
@@ -522,6 +524,8 @@ fn draw_filter_bar(frame: &mut Frame, app: &App, area: Rect) {
                 .sum(),
         ),
         View::Tracks => (app.shown(), app.tracks.len()),
+        // No filter here: the list is the playlist's own order.
+        View::Playlist => (0, 0),
     };
     let caret = if app.typing_filter { "\u{2588}" } else { "" };
     let word = match (app.view, app.only, app.review) {
@@ -578,11 +582,16 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         spans.push(dim("  ·  ", p));
         spans.push(Span::styled(app.playlist.clone(), Style::new().fg(p.text)));
     }
+    if app.view == View::Playlist {
+        spans.push(dim("  ·  ", p));
+        spans.push(Span::styled(app.custom.name.clone(), Style::new().fg(p.text)));
+    }
     spans.push(dim("  ·  ", p));
     // The stage belongs to the last run, which the library screen is not.
     let stage = match app.view {
         View::Library if !app.busy => "library".to_string(),
         View::Found if !app.busy => "search".to_string(),
+        View::Playlist if !app.busy => "custom playlist".to_string(),
         _ => app.stage.clone(),
     };
     spans.push(Span::styled(stage, Style::new().fg(p.text)));
@@ -600,6 +609,11 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
             format!("{} {tracks} in {} {plural}", rows.len(), folders.len()),
             Style::new().fg(p.text),
         ));
+    } else if app.view == View::Playlist {
+        let (here, all) = (app.custom.rows.iter().filter(|r| r.path.is_some()).count(), app.custom.rows.len());
+        let said = if here == all { format!("{all} tracks") } else { format!("{here} of {all} tracks") };
+        spans.push(dim("  ·  ", p));
+        spans.push(Span::styled(said, Style::new().fg(p.text)));
     } else if app.view == View::Library {
         let count = app.library.len();
         let plural = if count == 1 { "playlist" } else { "playlists" };
@@ -686,7 +700,46 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
         View::Tracks => draw_tracks(frame, app, area),
         View::Library => draw_library(frame, app, area),
         View::Found => draw_found(frame, app, area),
+        View::Playlist => draw_playlist(frame, app, area),
     }
+}
+
+// One custom playlist, in its own order. A missing track keeps its row with a `!`, as the library preview
+// does, so nothing is silently gone from the list; the folder is dim because it is where Enter goes.
+fn draw_playlist(frame: &mut Frame, app: &mut App, area: Rect) {
+    let p = app.theme;
+    if app.custom.rows.is_empty() {
+        let said = " nothing here yet   t finds tracks in any playlist, P adds one   esc goes back";
+        frame.render_widget(Paragraph::new(Line::from(dim(said, p))), area);
+        return;
+    }
+    let width = area.width as usize;
+    app.viewport = area.height as usize;
+    let longest = app.custom.rows.iter().map(|r| cols(&r.label)).max().unwrap_or(0);
+    let name_width = longest.min(width.saturating_sub(24).max(12));
+    let cursor = app.custom.cursor;
+    let items: Vec<ListItem> = app
+        .custom
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(at, row)| {
+            let label = truncate(&row.label, name_width);
+            let pad = name_width.saturating_sub(cols(&label));
+            let here = row.path.is_some();
+            ListItem::new(Line::from(vec![
+                Span::styled(if at == cursor { "▌" } else { " " }, Style::new().fg(p.cursor)),
+                dim(format!("{:>3} ", at + 1), p),
+                Span::styled(if here { " " } else { "!" }, Style::new().fg(p.warn)),
+                Span::styled(format!(" {label}"), row_style(at == cursor, p)),
+                dim(format!("{:pad$}  {}", "", truncate(&row.folder, width.saturating_sub(name_width + 10))), p),
+            ]))
+        })
+        .collect();
+    app.custom.scroll = app::scroll_to(app.custom.scroll, cursor, items.len(), area.height as usize);
+    let mut state = ListState::default().with_offset(app.custom.scroll);
+    state.select(Some(cursor));
+    frame.render_stateful_widget(List::new(items), area, &mut state);
 }
 
 /* Every matching track in the library, flat, with the folder it sits in. The
@@ -784,7 +837,7 @@ fn draw_found(frame: &mut Frame, app: &mut App, area: Rect) {
 fn kind_pill(
     icons: Icons,
     kind: Option<manifest::Kind>,
-    slot: bool,
+    width: usize,
     p: Palette,
 ) -> Vec<Span<'static>> {
     if let Some(glyph) = icons.kind(kind) {
@@ -795,14 +848,16 @@ fn kind_pill(
             Style::new().fg(p.accent).add_modifier(Modifier::BOLD),
         )];
     }
-    if !slot {
+    if width == 0 {
         return Vec::new();
     }
-    if kind != Some(manifest::Kind::Album) {
-        return vec![Span::raw(" ".repeat(KIND_WIDTH))];
-    }
+    let word = match kind {
+        Some(manifest::Kind::Album) => " album ",
+        Some(manifest::Kind::Custom) => " custom ",
+        _ => return vec![Span::raw(" ".repeat(width))],
+    };
     // The gap is outside the fill, or the pill is not one.
-    vec![Span::raw(" "), pill(" album ", p)]
+    vec![Span::raw(" "), pill(word, p), Span::raw(" ".repeat(width.saturating_sub(1 + word.len())))]
 }
 
 /// A filled marker, in the one pair every palette is measured on.
@@ -888,11 +943,17 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
        row on screen needs it. A library with no albums in it draws exactly as
        it did before, and the decision is per draw rather than per row, so the
        columns after it still line up. */
-    let slot = rows
-        .iter()
-        .any(|pos| app.library[*pos].kind == Some(manifest::Kind::Album));
+    let has = |kind| rows.iter().any(|pos| app.library[*pos].kind == Some(kind));
+    // Wide enough for the widest pill on screen, so a library without a custom playlist draws as it did.
+    let pill_width = if has(manifest::Kind::Custom) {
+        KIND_WIDTH_CUSTOM
+    } else if has(manifest::Kind::Album) {
+        KIND_WIDTH
+    } else {
+        0
+    };
     let kind_width = match icons {
-        Icons::Text if slot => KIND_WIDTH,
+        Icons::Text => pill_width,
         _ => icons.slot(),
     };
     let fixed = 40 + kind_width;
@@ -913,11 +974,11 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
                 // for "this is the folder Enter opens".
                 Span::styled(format!(" {name}{:pad$}", ""), row_style(row == selected, p)),
             ];
-            spans.extend(kind_pill(icons, shelf.kind, slot, p));
+            spans.extend(kind_pill(icons, shelf.kind, pill_width, p));
             spans.extend([
                 /* Two cells whether or not anything is playing, so the columns
                    after it do not step sideways as cliamp starts and stops. */
-                match (app.playback.on(&shelf.path), app.playback.playing) {
+                match (app.row_on_air(shelf), app.playback.playing) {
                     (true, true) => Span::styled(" ▶", Style::new().fg(p.cursor)),
                     (true, false) => dim(" ⏸", p),
                     (false, _) => Span::raw("  "),
@@ -945,6 +1006,8 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
                would need a slot of its own and could land next to the album
                pill on a folder that is both. */
             match (&shelf.url, shelf.synced) {
+                // Nothing upstream to sync or lack: the row says where it came from instead of `local`.
+                _ if shelf.kind == Some(manifest::Kind::Custom) => spans.push(dim("  built here", p)),
                 (Some(_), Some(at)) => {
                     spans.push(dim(format!("  synced {}", manifest::ago(at)), p));
                 }
@@ -1504,6 +1567,11 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         hints.push(("   enter open".to_string(), Style::new().fg(p.accent)));
         hints.push(("   / search".to_string(), Style::new().fg(p.muted)));
         hints.push(("   esc library".to_string(), Style::new().fg(p.muted)));
+    } else if app.view == View::Playlist {
+        hints.push(("   enter go to source".to_string(), Style::new().fg(p.accent)));
+        hints.push(("   J K move".to_string(), Style::new().fg(p.muted)));
+        hints.push(("   x remove".to_string(), Style::new().fg(p.muted)));
+        hints.push(("   esc library".to_string(), Style::new().fg(p.muted)));
     } else if app.view == View::Library {
         hints.push(("   enter open".to_string(), Style::new().fg(p.accent)));
         hints.push(("   t find a track".to_string(), Style::new().fg(p.muted)));
@@ -1512,6 +1580,8 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     } else if !app.tracks.is_empty() && app.picking.is_none() {
         if app.can_command() {
             extra.push(("   e edit".to_string(), Style::new().fg(p.accent)));
+            // Not in the help table, which is already as tall as a 24-row terminal allows.
+            extra.push(("   P add to a playlist".to_string(), Style::new().fg(p.muted)));
             /* Named rather than a bare `u undo`: one level of undo is only
                usable if you can see which level it is holding. */
             if let Some(what) = &app.undoable {
@@ -1640,8 +1710,19 @@ fn draw_help(frame: &mut Frame, app: &App) {
         ("", "^d ^u  PgDn PgUp", "by a screenful"),
         ("", "g G", "first, last"),
     ];
-    if app.view == View::Found {
+    if app.view == View::Playlist {
         rows.extend([
+            ("open", "enter", "go to this track's own folder"),
+            ("edit", "J K", "move this track down, up"),
+            ("", "x", "take it off this list, never off disk"),
+        ]);
+        if app.can_play() {
+            rows.push(("play", "p", "hand this list to cliamp"));
+        }
+        rows.extend([("view", "l", "yt-dlp output"), ("back", "Esc", "the library"), ("quit", "q  ^c", "")]);
+    } else if app.view == View::Found {
+        rows.extend([
+            ("add", "P", "this track to a custom playlist"),
             ("open", "enter", "open this track in its playlist"),
             ("find", "/", "search every folder by track name"),
             ("view", "l", "yt-dlp output"),
@@ -1653,11 +1734,12 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("open", "enter", "read this playlist off disk"),
             ("", "O", "this folder in the file manager"),
             ("name", "e", "rename this playlist"),
-            ("", "D", "remove this playlist"),
+            ("", "D", "remove this playlist, or delete a custom list"),
+            ("new", "N", "a custom playlist from tracks you pick"),
             ("find", "/", "filter by name or track"),
             ("", "t", "every matching track, across the library"),
             ("", "o", "order: name, last synced, most missing"),
-            ("", "a", "kind: every folder, albums, playlists"),
+            ("", "a", "kind: every folder, albums, playlists, custom"),
         ]);
         /* `space` is about cliamp and `p` is about the row under the cursor,
            so a folder with no playlist file to hand over loses one and keeps
@@ -3574,6 +3656,65 @@ mod tests {
             .collect();
         assert_eq!(at.len(), 2, "{screen}");
         assert_eq!(at[0], at[1], "{screen}");
+    }
+
+    fn custom_shelf(name: &str) -> Shelf {
+        Shelf { kind: Some(crate::manifest::Kind::Custom), url: None, ..kinded(name, None) }
+    }
+
+    #[test]
+    fn a_custom_playlist_wears_its_own_pill_and_is_not_called_local() {
+        let buffer = library_of(vec![
+            kinded("Autobahn", Some(crate::manifest::Kind::Album)),
+            custom_shelf("Mix"),
+            kinded("Sleep", None),
+        ]);
+        let rows = [row_text(&buffer, 2), row_text(&buffer, 3), row_text(&buffer, 4)];
+        assert!(rows[1].contains(" custom ") && rows[1].contains("built here"), "{:?}", rows[1]);
+        assert!(!rows[1].contains("local"), "a list built here is not a folder earworm did not download");
+        assert!(rows[0].contains(" album "), "{:?}", rows[0]);
+        // Wide enough for the widest, and every count lines up.
+        let at = col_of(&rows[0], "tracks");
+        assert!(rows.iter().all(|r| col_of(r, "tracks") == at), "{rows:?}");
+    }
+
+    #[test]
+    fn the_custom_icon_is_its_own_and_keeps_the_columns() {
+        let buffer = library_with(
+            crate::icons::Icons::Symbols,
+            vec![kinded("Autobahn", Some(crate::manifest::Kind::Album)), custom_shelf("Mix"), kinded("Sleep", None)],
+        );
+        let rows = [row_text(&buffer, 2), row_text(&buffer, 3), row_text(&buffer, 4)];
+        assert!(rows[1].contains('◈') && !rows[1].contains('▤') && !rows[1].contains('●'), "{:?}", rows[1]);
+        let at = col_of(&rows[0], "tracks");
+        assert!(rows.iter().all(|r| col_of(r, "tracks") == at), "{rows:?}");
+    }
+
+    #[test]
+    fn the_playlist_screen_shows_each_track_its_folder_and_a_bang_for_a_missing_one() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, "settings".into());
+        app.intro_done = true;
+        let row = |id: &str, here: bool| crate::app::PlaylistRow {
+            id: id.into(),
+            label: format!("Kraftwerk - Song {id}"),
+            folder: "Focus".into(),
+            file: format!("{id}.opus"),
+            path: here.then(|| std::path::PathBuf::from(format!("/m/Focus/{id}.opus"))),
+        };
+        app.apply(Msg::Custom { name: "Road trip".into(), rows: vec![row("a", true), row("b", false)], show: true, focus: None });
+        let screen = screen_of(&mut app, 100, 8);
+        assert!(screen.contains("Road trip") && screen.contains("custom playlist"), "{screen}");
+        assert!(screen.contains("1 of 2 tracks"), "a missing track went uncounted:\n{screen}");
+        let lines: Vec<&str> = screen.lines().collect();
+        let a = lines.iter().find(|l| l.contains("Song a")).unwrap();
+        let b = lines.iter().find(|l| l.contains("Song b")).unwrap();
+        assert!(a.contains("Focus") && !a.contains('!'), "{a}");
+        assert!(b.contains('!') && b.contains("Focus"), "{b}");
+        assert!(screen.contains("enter go to source"), "the screen does not say where Enter goes:\n{screen}");
+
+        app.apply(Msg::Custom { name: "Road trip".into(), rows: Vec::new(), show: false, focus: None });
+        assert!(screen_of(&mut app, 100, 8).contains("P adds one"), "an empty list says nothing about how to fill it");
     }
 
     // A long title and a long folder name used to push the marker off every width tried, 120 included.

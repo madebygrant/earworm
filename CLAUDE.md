@@ -735,6 +735,72 @@ than at the start of every session.
   a live scan, as with the lines in the albums section. What is tested is one
   level down. Moving `copy_known` above the gate would copy tracks nobody picked.
 
+### Custom playlists
+
+- **A custom playlist is a library row whose `path` is a file, so no folder
+  command may ever see one.** `library()` returns folders only and is what
+  resync, `--list`, `--check` and the duplicate checks walk: a list is none of
+  those, and that is also why `--resync` skips them with no "no URL" line.
+  `library_all()` is the folders plus the lists, and only the calls that feed
+  the screen use it. The keys route a custom row by name (`App::custom_row`),
+  and `not_custom` in `remove_shelf`, `rename_shelf` and `open_row` is the
+  second lock: `remove_dir_all` on the store would take every list.
+  `no_folder_command_will_act_on_a_custom_playlists_path` pins the second lock
+  and `a_custom_row_is_routed_by_name_and_never_sent_as_a_folder` the first.
+- **`Kind::Custom` is made by the library and read from nowhere.** No folder
+  name or `#kind` header can claim it, or a hand edit would turn a download
+  folder into a row that cannot sync. It gets its own icon and pill, its own
+  stop on `a`, and is left out of `found_rows`: its tracks are already found
+  in the folders they came from, so listing them again shows each twice.
+- **An entry is a video id, resolved through the library, with the last path as
+  a hint.** A path breaks on the first edit, because `write_track` renames the
+  file. A `~` id survives that (it is made once and never changes) but two
+  folders can hold the same one, so it only resolves in the folder its hint
+  names, and `rename_shelf` calls `playlists::rehome` to keep the hint true. A
+  hint is untrusted: the file is hand-editable and travels, so an absolute path
+  or a `..` is dropped on read and write and never resolved (`safe_hint`); an
+  absolute path replaces the root in a `join`.
+- **Adding a track adopts its folder.** A file in a folder earworm never edited
+  has no sidecar entry, so the add writes one (`~file`) before the list holds
+  it, and says so in the log: a hidden file appearing in somebody's music
+  folder is not something they should find out by looking. Without it the
+  entry would resolve only by its path and the first rename would lose it.
+- **Every command on the screen carries an id, never a position.** `J` and `K`
+  reorder rows under the cursor, so `Msg::Custom` carries a `focus` id and the
+  cursor follows the entry; a refresh with none keeps the entry it was on. The
+  list holds each id once, so an id names one row.
+- **`View::Playlist` has its own keys and none of the track list's.** `e` there
+  would write tags into a folder the list does not own, and `s`, `r` or `c`
+  would act on tracks that are not in the worker's list at all. Enter jumps to
+  the source folder, which is where edits are made, and says so for a missing
+  track. `can_playlist` is exclusive with `can_command`, `can_browse` and
+  `can_find` on `View`. `the_playlist_screen_takes_its_own_keys_and_none_of_the_track_commands`.
+- **`D` on a custom row deletes the list and never audio.** It asks first, names
+  the count, and the flash says no audio was touched. The exit test deletes a
+  list built from two folders and checks every file, both sidecars and the
+  library row.
+- **The in-library `.m3u8` is the one playlist file allowed `../`.** Its entries
+  are `../Folder/file`, relative to the store, so it holds wherever `--dir` is
+  and every other `.m3u8` still names bare filenames. It is for playback inside
+  the library: a car stereo or a phone will not follow `../`, which is what
+  export is for. It is written when the list is played, and a list with nothing
+  on disk refuses rather than handing cliamp an empty file. `play` itself has no
+  test: it reaches the real cliamp store.
+- **The `▶` follows the list that was played, not the folder its track is in.**
+  cliamp reports a track and never a playlist, so `App.on_air` remembers the
+  list `p` handed over and the folders it draws on (`Msg::OnAir`), and
+  `row_on_air` marks the list while the track sits in one of them. Playing a
+  folder sends `OnAir(None)`. Switching playlists inside cliamp is invisible
+  from here, so the marker can stay on a list until its track leaves those
+  folders.
+- **`P` is not in the track list's help table.** That table is 21 rows and a
+  24-row terminal has no room for a 22nd, which dropped the play indicator and
+  broke a test somewhere else. The key is offered in the status bar's hints
+  instead, which give way.
+- **Not covered:** driving the new keys through a pty. The harness lost keys in
+  this environment, so the screens were checked once live and the rest through
+  `TestBackend` and key tests.
+
 ### Splitting a video by its chapters
 
 - **The choice is asked, never assumed, and only with a gate.** A video with
