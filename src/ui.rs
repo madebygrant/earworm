@@ -1511,6 +1511,25 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
+// Dropped from the library's bar in this order when it is short.
+const LIBRARY_OPTIONAL: [&str; 2] = ["   t find a track", "   R resync all"];
+
+// The whole library's health in one line, and how many files are missing, which is what colours it.
+fn library_text(app: &App) -> Option<(String, usize)> {
+    if app.library.is_empty() {
+        return None;
+    }
+    let (tracks, missing, synced) = app.library_totals();
+    let mut text = format!("{tracks} tracks");
+    if missing > 0 {
+        text.push_str(&format!("  ·  {missing} missing"));
+    }
+    if let Some(at) = synced {
+        text.push_str(&format!("  ·  last sync {}", manifest::ago(at)));
+    }
+    Some((text, missing))
+}
+
 fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     let p = app.theme;
     let width = area.width as usize;
@@ -1574,9 +1593,11 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         hints.push(("   esc library".to_string(), Style::new().fg(p.muted)));
     } else if app.view == View::Library {
         hints.push(("   enter open".to_string(), Style::new().fg(p.accent)));
+        // The ones that never drop first, then the ones in `LIBRARY_OPTIONAL`, so a short bar shrinks from the right.
+        hints.push(("   n new URL".to_string(), Style::new().fg(p.muted)));
+        hints.push(("   N create custom playlist".to_string(), Style::new().fg(p.muted)));
         hints.push(("   t find a track".to_string(), Style::new().fg(p.muted)));
         hints.push(("   R resync all".to_string(), Style::new().fg(p.muted)));
-        hints.push(("   n new URL".to_string(), Style::new().fg(p.muted)));
     } else if !app.tracks.is_empty() && app.picking.is_none() {
         if app.can_command() {
             extra.push(("   e edit".to_string(), Style::new().fg(p.accent)));
@@ -1621,9 +1642,24 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     /* Room for the widest two statuses plus their counts, or the tally goes
        and the hint that displaced it is one `h` away anyway. */
     const TALLY_FLOOR: usize = 24;
+    // The library's totals line is what these give way to there, as the tally is on the track list.
+    let floor = match library_text(app) {
+        Some((text, _)) if app.view == View::Library => cols(&text) + 2,
+        _ => TALLY_FLOOR,
+    };
+    /* `n` starts a sync and is the key nothing else offers, so it stays. The search and the resync are
+       what a short bar loses, the search first: both are under `h`. */
+    if app.view == View::Library {
+        for optional in LIBRARY_OPTIONAL {
+            let total: usize = hints.iter().map(|(t, _)| cols(t)).sum();
+            if total + floor > width {
+                hints.retain(|(t, _)| t != optional);
+            }
+        }
+    }
     let taken: usize = hints.iter().map(|(t, _)| cols(t)).sum();
     let wanted: usize = extra.iter().map(|(t, _)| cols(t)).sum();
-    if taken + wanted + TALLY_FLOOR <= width {
+    if taken + wanted + floor <= width {
         // Ahead of `h keys`, which is the last word on every screen.
         let tail = hints.split_off(hints.len() - 1);
         hints.extend(extra);
@@ -1676,14 +1712,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
            whole library's health in one line, where the track view puts the
            run's summary: missing files are what a sync would fetch again. */
         None if app.view == View::Library && !app.library.is_empty() => {
-            let (tracks, missing, synced) = app.library_totals();
-            let mut text = format!("{tracks} tracks");
-            if missing > 0 {
-                text.push_str(&format!("  ·  {missing} missing"));
-            }
-            if let Some(at) = synced {
-                text.push_str(&format!("  ·  last sync {}", manifest::ago(at)));
-            }
+            let (text, missing) = library_text(app).unwrap_or_default();
             (
                 truncate(&text, room),
                 Style::new().fg(if missing > 0 { p.warn } else { p.muted }),
@@ -4695,6 +4724,33 @@ mod tests {
 
     /* The tally counts track statuses, and the library has no tracks: an
        opened-then-abandoned playlist used to leave its counts on the bar. */
+    #[test]
+    fn the_library_bar_keeps_the_new_url_and_custom_playlist_keys_and_drops_the_search_first() {
+        for width in [80u16, 100, 120, 160] {
+            let (tx, _rx) = std::sync::mpsc::channel();
+            let mut app = App::new(tx, "settings".into());
+            app.intro_done = true;
+            app.apply(Msg::Library { shelves: shelves(), show: true });
+            let mut terminal = Terminal::new(TestBackend::new(width, 12)).unwrap();
+            terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+            let buffer = terminal.backend().buffer().clone();
+            let bar: String = (0..width).map(|x| buffer[(x, 11)].symbol().to_string()).collect();
+            assert!(bar.contains("N create custom playlist"), "{width}: {bar:?}");
+            assert!(bar.contains("n new URL"), "{width}: {bar:?}");
+            assert!(bar.contains("h keys"), "{width}: {bar:?}");
+            assert!(bar.contains("51 tracks"), "{width}: {bar:?}");
+            // In the order of importance, so a short bar loses its right-hand end and nothing from the middle.
+            let at = |word: &str| bar.find(word);
+            assert!(at("enter open") < at("n new URL") && at("n new URL") < at("N create custom playlist"), "{width}: {bar:?}");
+            assert!(at("N create custom playlist") < at("h keys"), "{width}: {bar:?}");
+            if let Some(search) = at("t find a track") {
+                assert!(at("N create custom playlist").unwrap() < search && search < at("h keys").unwrap(), "{width}: {bar:?}");
+            }
+            // The search goes before the resync does, so the search never shows without it.
+            assert!(!(at("t find a track").is_some() && at("R resync all").is_none()), "{width}: {bar:?}");
+        }
+    }
+
     #[test]
     fn the_library_bar_does_not_tally_a_playlist_it_is_not_showing() {
         let (tx, _rx) = std::sync::mpsc::channel();
