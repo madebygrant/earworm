@@ -24,7 +24,7 @@ pub struct Cli {
     #[arg(short, long, default_value = "~/Music")]
     pub dir: String,
 
-    /// Audio format: opus, m4a, mp3, flac, vorbis or alac
+    /// Audio format: m4a, opus, mp3, flac, vorbis or alac
     #[arg(short, long, value_name = "NAME")]
     pub format: Option<String>,
 
@@ -208,15 +208,15 @@ impl FileConfig {
    added here without a working encoder fails in the fixtures that read this
    same column rather than in somebody's folder. */
 pub const FORMATS: [(&str, &str, &[&str]); 6] = [
-    ("opus", "opus", &["libopus", "opus"]),
     ("m4a", "m4a", &["aac", "libfdk_aac"]),
+    ("opus", "opus", &["libopus", "opus"]),
     ("mp3", "mp3", &["libmp3lame", "mp3"]),
     ("flac", "flac", &["flac"]),
     ("vorbis", "ogg", &["libvorbis", "vorbis"]),
     ("alac", "m4a", &["alac"]),
 ];
 
-pub const DEFAULT_FORMAT: &str = "opus";
+pub const DEFAULT_FORMAT: &str = "m4a";
 
 /// The palette earworm has always drawn in, and the first stop on the `^t`
 /// walk. A name rather than `Palette::default()` because the theme is now

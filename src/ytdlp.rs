@@ -311,6 +311,8 @@ pub fn run(
     run_with("yt-dlp", cfg, tracks, tx, refetch)
 }
 
+const NATIVE_M4A: &str = "bestaudio[ext=m4a]/bestaudio";
+
 /// Takes the binary for the same reason `scan_with` does: a test that
 /// asserted on a helper building these arguments would leave the call site
 /// free to pass anything, which is how the scan's format came to be right in
@@ -354,6 +356,11 @@ fn run_with(
         "0.5",
     ]);
     cmd.args(["--audio-format", &cfg.format]);
+    // YouTube's own AAC stream is copied into an m4a, where the Opus that `bestaudio` picks is re-encoded.
+    // Falls back to that Opus when a video has none. Before `cfg.extra`, so a `-f` of the user's still wins.
+    if cfg.format == "m4a" {
+        cmd.args(["-f", NATIVE_M4A]);
+    }
     cmd.arg("--progress-template")
         .arg("download:@P\t%(info.playlist_index|1)s\t%(progress._percent_str)s");
     cmd.arg("--print")
@@ -589,6 +596,7 @@ mod tests {
         };
 
         let on = args_for(true);
+        assert!(!on.contains(NATIVE_M4A), "an opus download asked for the AAC stream: {on}");
         assert!(on.contains("--embed-thumbnail"), "the default lost its art: {on}");
         assert!(on.contains("--write-thumbnail"), "{on}");
 
@@ -600,6 +608,34 @@ mod tests {
         assert!(!off.contains("--write-thumbnail"), "{off}");
         // The rest of the download is untouched by the flag.
         assert!(off.contains("--extract-audio"), "{off}");
+    }
+
+    // Measured: `-f bestaudio` on YouTube is Opus and an m4a of it is re-encoded; itag 140 is AAC and copies.
+    #[test]
+    fn an_m4a_download_asks_for_youtubes_own_aac_and_falls_back_to_the_best() {
+        let dir = std::env::temp_dir().join(format!("earworm-m4a-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (bin, log) = (dir.join("yt-dlp"), dir.join("log"));
+        std::fs::write(&bin, format!("#!/bin/sh\nfor a in \"$@\"; do echo \"$a\" >> \"{}\"; done\nexit 0\n", log.display())).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let mut cfg = crate::worker::tests::config(true);
+        cfg.dir = dir.join("music");
+        cfg.format = "m4a".into();
+        cfg.extra = vec!["-f".into(), "140".into()];
+        let mut tracks = vec![Track::new(1, "id".into(), "n".into(), dir.join("a.m4a"))];
+        let (tx, _rx) = std::sync::mpsc::channel();
+        run_with(&bin.display().to_string(), &cfg, &mut tracks, &tx, &HashSet::new()).unwrap();
+        let args: Vec<String> = std::fs::read_to_string(&log).unwrap().lines().map(String::from).collect();
+        let ours = args.iter().position(|a| a == NATIVE_M4A).expect("no format selector for m4a");
+        assert_eq!(args[ours - 1], "-f");
+        let theirs = args.iter().rposition(|a| a == "140").unwrap();
+        assert!(theirs > ours, "the user's own -f came first and lost: {args:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /* A single video has no `playlist_index`, which yt-dlp prints as `NA`: the

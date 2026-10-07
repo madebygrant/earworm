@@ -81,6 +81,46 @@ touched, earworm writes a `.earworm` there so the list can keep following it.
 `e` renames a list and `D` deletes it after asking, and the tracks stay in
 their folders. Lists live in `.playlists` under your library folder.
 
+## Exporting
+
+`E` on a library row copies it somewhere else: a USB stick or SD card, a synced
+cloud folder, or a folder you then move to a phone. It works on a folder or on
+a custom playlist. earworm asks for the destination, which must already exist
+and sit outside your library (the mounted volumes are listed in the prompt),
+then how to spell accents and, for a custom playlist, how to lay it out.
+
+- **Accents.** iPhone compares filenames byte for byte and needs the decomposed
+  spelling. Most other players want the composed one.
+- **Names.** Characters FAT and exFAT refuse (`? : * " < > |`), trailing dots
+  and spaces and reserved names like `CON` are replaced on the device only.
+  Your library's own filenames are not touched. Two names that collapse to one
+  get ` (2)`.
+- **A folder** lands as a folder of the same name with its playlist inside, in
+  the order earworm last wrote.
+- **A custom playlist** is either one folder of copies, which plays anywhere
+  and repeats audio the folders already hold, or each track in its own folder
+  with the playlist at the top pointing into them.
+- **A second export** copies only files whose size and modification time
+  differ, so it is cheap. It checks free space first, and quitting part-way
+  leaves no half-written file.
+- **Format.** The default is the files as they are. Pick another and earworm
+  re-encodes each track that is not already in it, for a player that cannot
+  read opus. Tags and the picture are carried across. A converted copy is a
+  generation further from the source, and a second export skips it by
+  modification time, since its size differs by design.
+- **Removing.** Nothing is deleted unless you say so. Each folder earworm
+  writes into gets a hidden `.earworm-export` listing the files it put there.
+  When a later export no longer includes one of those (a track you took off
+  the list, or a different format), it lists every one and asks. Files it did
+  not write are never offered and never replaced, so an unrelated `Music`
+  folder already on the stick is left alone and the export says which files it
+  skipped. A file that two exports both put there is claimed by neither.
+  Names are compared the way the device compares them, ignoring case and
+  accent form.
+
+macOS leaves a hidden `._name` beside everything it writes to exFAT. Export
+removes the ones it caused and no others.
+
 ## Giving one a URL
 
 `S` on a folder with no URL asks for one, then syncs. That sync is different

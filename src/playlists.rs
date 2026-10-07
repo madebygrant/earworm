@@ -53,7 +53,7 @@ pub fn safe_hint(hint: &Path) -> bool {
 }
 
 // A tab or newline would split a line, and a `#` first character would make it a header.
-fn writable(entry: &Entry) -> bool {
+pub fn writable(entry: &Entry) -> bool {
     let bad = |s: &str| s.contains(['\t', '\n']);
     !entry.id.is_empty()
         && !entry.id.starts_with('#')
@@ -87,9 +87,10 @@ pub fn load(root: &Path, name: &str) -> Option<Playlist> {
     (found.name == name).then_some(found)
 }
 
-/// The path cliamp's stored name is built from. Only its last component matters, and it is the list's name.
+/// The path cliamp's stored name is built from. Only its last component matters, so it is the stem of the
+// file the list lives in: the raw name could be `../Focus`, which would be the folder Focus's name there.
 pub fn key(root: &Path, name: &str) -> PathBuf {
-    folder(root).join(name)
+    file_for(root, name).with_extension("")
 }
 
 /// Gives a playlist another name, keeping its tracks and order.
@@ -159,7 +160,7 @@ pub fn broken(root: &Path) -> Vec<String> {
 /// Returns how many entries moved.
 // A local id resolves only in the folder named by its hint, so without this a renamed folder orphans them.
 pub fn rehome(root: &Path, old: &str, new: &str) -> Result<usize> {
-    let mut moved = 0;
+    let (mut moved, mut failure) = (0, None);
     for mut playlist in list(root) {
         let mut changed = false;
         for entry in &mut playlist.entries {
@@ -170,11 +171,17 @@ pub fn rehome(root: &Path, old: &str, new: &str) -> Result<usize> {
                 moved += 1;
             }
         }
+        // One list that cannot be saved must not leave the lists after it pointing at the old folder.
         if changed {
-            save(root, &playlist)?;
+            if let Err(err) = save(root, &playlist) {
+                failure.get_or_insert(err);
+            }
         }
     }
-    Ok(moved)
+    match failure {
+        Some(err) => Err(err),
+        None => Ok(moved),
+    }
 }
 
 /// Every custom playlist, in name order. A file that does not parse is left out.
@@ -204,10 +211,15 @@ pub fn save(root: &Path, playlist: &Playlist) -> Result<()> {
         bail!("that name is too long  ·  {MAX_NAME} bytes at most");
     }
     let path = file_for(root, &playlist.name);
-    if let Some(held) = std::fs::read_to_string(&path).ok().and_then(|t| parse(&t))
-        && held.name != playlist.name
-    {
-        bail!("\"{}\" already uses that file name  ·  give this one another name", held.name);
+    if let Ok(text) = std::fs::read_to_string(&path) {
+        match parse(&text) {
+            Some(held) if held.name != playlist.name => {
+                bail!("\"{}\" already uses that file name  ·  give this one another name", held.name);
+            }
+            // A hand edit that broke it is hidden, not gone: writing here would take every entry with it.
+            None => bail!("{} cannot be read  ·  fix it or delete it first", path.display()),
+            Some(_) => {}
+        }
     }
     write(root, playlist)
 }
@@ -251,6 +263,48 @@ mod tests {
 
     fn entry(id: &str, hint: &str) -> Entry {
         Entry { id: id.into(), hint: hint.into() }
+    }
+
+    // One list that cannot be saved used to stop the loop, leaving every list after it on the old folder name.
+    #[test]
+    fn rehoming_carries_on_past_a_list_that_cannot_be_saved() {
+        let dir = root("rehome");
+        std::fs::create_dir_all(folder(&dir)).unwrap();
+        // Hand-made, with a name `save` refuses, and sorting before the good one.
+        let long = "a".repeat(MAX_NAME + 20);
+        std::fs::write(folder(&dir).join("0.playlist"), format!("#earworm playlist\n#name\t{long}\nid\tOld/x.opus\n")).unwrap();
+        save(&dir, &Playlist { name: "Zed".into(), entries: vec![entry("id", "Old/x.opus")] }).unwrap();
+        assert_eq!(list(&dir).len(), 2, "the fixture did not parse");
+
+        assert!(rehome(&dir, "Old", "New").is_err());
+        assert_eq!(load(&dir, "Zed").unwrap().entries[0].hint, PathBuf::from("New/x.opus"), "stopped at the first failure");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // A list named `../Focus` used to give cliamp the name of the folder Focus, and `p` replaced that folder's playlist.
+    #[test]
+    fn a_lists_cliamp_key_stays_inside_the_store_whatever_it_is_called() {
+        let dir = root("key");
+        for name in ["../Focus", "a/b", "..", "Road trip: 2026"] {
+            let key = key(&dir, name);
+            assert_eq!(key.parent(), Some(folder(&dir).as_path()), "{name:?} left the store: {key:?}");
+            assert_ne!(key.file_name().map(|n| n.to_string_lossy().to_string()), Some("Focus".into()));
+        }
+        assert_ne!(key(&dir, "../Focus"), dir.join("Focus"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // `say_broken` tells the user the file is hidden, and then a new list of the same name wrote over it.
+    #[test]
+    fn saving_over_a_file_that_does_not_parse_is_refused_and_leaves_it_alone() {
+        let dir = root("broken");
+        std::fs::create_dir_all(folder(&dir)).unwrap();
+        let path = file_for(&dir, "Road Trip");
+        std::fs::write(&path, "#earworm playlist hand-edited and no name line\nabc\tA/x.opus\n").unwrap();
+        let err = save(&dir, &Playlist { name: "Road Trip".into(), entries: Vec::new() }).unwrap_err();
+        assert!(err.to_string().contains("cannot be read"), "{err}");
+        assert!(std::fs::read_to_string(&path).unwrap().contains("abc"), "the entries were overwritten");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

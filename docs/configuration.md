@@ -44,7 +44,7 @@ acoustid_key = "..."                # or use ACOUSTID_API_KEY
 | Flag | Effect |
 | --- | --- |
 | `-d`, `--dir` | output directory (default `~/Music`) |
-| `-f`, `--format` | opus, m4a, mp3, flac, vorbis or alac (default opus) |
+| `-f`, `--format` | m4a, opus, mp3, flac, vorbis or alac (default m4a) |
 | `--theme` | warm, light, cool, neon, or one you defined (default warm) |
 | `--no-convert` | leave tracks already on disk in the format they have |
 | `--no-loudness` | don't write loudness tags, whatever the config says |

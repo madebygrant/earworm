@@ -448,6 +448,7 @@ pub enum Cmd {
     /// The list and never the audio: the worker confirms first, and the tracks stay in their folders.
     DeletePlaylist(String),
     PlayPlaylist(String),
+    Export(crate::export::Target),
 }
 
 /* A question the UI asks on its own account. Nothing is blocked on the
@@ -573,6 +574,13 @@ pub enum Msg {
     /// A custom playlist's rows. `show` opens the screen, and a refresh after an edit does not: the user
     /// may have left it. `focus` is the id to land on, for a move that has to keep the cursor on its entry.
     Custom { name: String, rows: Vec<PlaylistRow>, show: bool, focus: Option<String> },
+    /// The open list's new order after a move or a removal. The screen already holds the labels, so nothing
+    /// is read from disk; an id it does not hold means the list changed behind its back and is ignored.
+    Order { name: String, ids: Vec<String>, focus: Option<String> },
+    /// Puts the library cursor on this row, for a list just made or renamed: the sort moves it to a new place.
+    Select(PathBuf),
+    /// A list changed its name, so the one cliamp is on keeps its marker.
+    Renamed { old: String, new: String },
     Ask(Prompt, Sender<Reply>),
     /// Hand the track list to the user to choose from before downloading.
     /// Not a `Prompt`: the answer is made with the list's own cursor, marks
@@ -1379,12 +1387,43 @@ impl App {
                 }
                 self.logs.push(line);
             }
+            Msg::Select(path) => {
+                if let Some(at) = self.library.iter().position(|s| s.path == path) {
+                    self.shelf = at;
+                }
+            }
+            Msg::Renamed { old, new } => {
+                if let Some((name, _)) = self.on_air.as_mut().filter(|(name, _)| *name == old) {
+                    *name = new;
+                }
+            }
             Msg::Library { shelves, show } => {
                 self.recheck = true;
+                // Kept on the same row by its path: a list made or deleted shifts every row after it.
+                let was = self.library.get(self.shelf).map(|s| s.path.clone());
                 self.library = shelves;
-                self.shelf = self.shelf.min(self.library.len().saturating_sub(1));
+                self.shelf = was
+                    .and_then(|path| self.library.iter().position(|s| s.path == path))
+                    .unwrap_or(self.shelf)
+                    .min(self.library.len().saturating_sub(1));
+                // A deleted list is not on air, whatever cliamp still plays.
+                if let Some((name, _)) = &self.on_air {
+                    let alive = self.library.iter().any(|s| s.kind == Some(crate::manifest::Kind::Custom) && s.name == *name);
+                    if !alive {
+                        self.on_air = None;
+                    }
+                }
                 if show {
                     self.view = View::Library;
+                }
+            }
+            Msg::Order { name, ids, focus } => {
+                if self.custom.name == name {
+                    let rows: Option<Vec<PlaylistRow>> =
+                        ids.iter().map(|id| self.custom.rows.iter().find(|r| &r.id == id).cloned()).collect();
+                    if let Some(rows) = rows {
+                        self.apply(Msg::Custom { name, rows, show: false, focus });
+                    }
                 }
             }
             Msg::Custom { name, rows, show, focus } => {
@@ -2021,9 +2060,17 @@ impl App {
             Sort::Name => {}
             /* Never synced sorts first, which is where it belongs: it is the
                folder furthest from matching the playlist upstream. */
-            Sort::Synced => rows.sort_by_key(|pos| self.library[*pos].synced.unwrap_or(0)),
+            // A list is built here and syncs from nothing, so it takes no part in either: it goes last by
+            // time, and its dead entries are not something a sync would fetch.
+            Sort::Synced => rows.sort_by_key(|pos| {
+                let s = &self.library[*pos];
+                (s.kind == Some(crate::manifest::Kind::Custom), s.synced.unwrap_or(0))
+            }),
             Sort::Missing => {
-                rows.sort_by_key(|pos| std::cmp::Reverse(self.library[*pos].missing));
+                rows.sort_by_key(|pos| {
+                    let s = &self.library[*pos];
+                    std::cmp::Reverse(if s.kind == Some(crate::manifest::Kind::Custom) { 0 } else { s.missing })
+                });
             }
         }
         rows
@@ -3087,6 +3134,89 @@ mod tests {
         app.custom_jump(true);
         app.apply(Msg::Custom { name: "Other".into(), rows: rows(&["x", "y"]), show: false, focus: None });
         assert_eq!(app.custom.cursor, 0);
+    }
+
+    fn list_row(name: &str) -> Shelf {
+        Shelf {
+            path: PathBuf::from("/music/.playlists").join(format!("{name}.playlist")),
+            name: name.into(),
+            kind: Some(crate::manifest::Kind::Custom),
+            ..Shelf::default()
+        }
+    }
+
+    // A list made or deleted shifts every row after it, and the highlight stayed on its index.
+    #[test]
+    fn a_library_refresh_keeps_the_cursor_on_the_same_row_not_the_same_index() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.apply(Msg::Library { shelves: vec![shelf("A"), shelf("C"), shelf("D")], show: false });
+        app.shelf = 2;
+        // A folder sorts in ahead of the row the cursor is on.
+        app.apply(Msg::Library { shelves: vec![shelf("A"), shelf("B"), shelf("C"), shelf("D")], show: false });
+        assert_eq!(app.selected_shelf().unwrap().name, "D");
+        // The row it was on is gone: the index is kept and clamped.
+        app.apply(Msg::Library { shelves: vec![shelf("A"), shelf("B")], show: false });
+        assert_eq!(app.shelf, 1);
+        // A list just made or renamed is asked for by path.
+        app.apply(Msg::Library { shelves: vec![list_row("Alpha"), shelf("A"), shelf("B")], show: false });
+        app.apply(Msg::Select(PathBuf::from("/music/.playlists/Alpha.playlist")));
+        assert_eq!(app.selected_shelf().unwrap().name, "Alpha");
+        app.apply(Msg::Select(PathBuf::from("/nowhere")));
+        assert_eq!(app.selected_shelf().unwrap().name, "Alpha", "a path that is not there moved the cursor");
+    }
+
+    #[test]
+    fn the_playing_marker_follows_a_renamed_list_and_goes_with_a_deleted_one() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.apply(Msg::Library { shelves: vec![list_row("Mix"), shelf("Focus")], show: false });
+        app.apply(Msg::OnAir(Some(("Mix".into(), vec![PathBuf::from("/music/Focus")]))));
+        // In the order the worker sends them: the name first, then the library that holds it.
+        app.apply(Msg::Renamed { old: "Mix".into(), new: "Road".into() });
+        app.apply(Msg::Library { shelves: vec![list_row("Road"), shelf("Focus")], show: false });
+        assert_eq!(app.on_air.as_ref().map(|(n, _)| n.as_str()), Some("Road"));
+        app.apply(Msg::Library { shelves: vec![shelf("Focus")], show: false });
+        assert!(app.on_air.is_none(), "a deleted list is still on air");
+    }
+
+    // Lists have no sync time and no missing downloads, so neither sort has anything to say about them.
+    #[test]
+    fn a_list_takes_no_part_in_the_sync_sorts() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        let mut dead = list_row("Dead");
+        dead.missing = 9;
+        let mut synced = shelf("Old");
+        synced.synced = Some(5);
+        let mut gappy = shelf("Gappy");
+        gappy.missing = 2;
+        app.apply(Msg::Library { shelves: vec![dead, gappy, synced], show: false });
+        let order = |app: &App| app.shelf_rows().into_iter().map(|p| app.library[p].name.clone()).collect::<Vec<_>>();
+        app.sort = Sort::Synced;
+        assert_eq!(order(&app), ["Gappy", "Old", "Dead"], "a list ranked as never synced");
+        app.sort = Sort::Missing;
+        assert_eq!(order(&app)[0], "Gappy", "a list's dead entries outranked a folder's");
+    }
+
+    #[test]
+    fn an_order_message_reorders_the_rows_it_holds_and_ignores_an_id_it_does_not() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.apply(Msg::Custom { name: "Mix".into(), rows: rows(&["a", "b", "c"]), show: true, focus: None });
+        let order = |ids: &[&str], focus: Option<&str>| Msg::Order {
+            name: "Mix".into(),
+            ids: ids.iter().map(|s| s.to_string()).collect(),
+            focus: focus.map(String::from),
+        };
+        app.apply(order(&["a", "c", "b"], Some("c")));
+        let ids: Vec<_> = app.custom.rows.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!((ids, app.custom_selected().unwrap().id.as_str()), (vec!["a", "c", "b"], "c"));
+
+        app.apply(order(&["a", "zz"], None));
+        assert_eq!(app.custom.rows.len(), 3, "an id the screen never held rebuilt the list");
+        app.apply(order(&["a", "b"], None));
+        assert_eq!(app.custom.rows.len(), 2);
     }
 
     #[test]

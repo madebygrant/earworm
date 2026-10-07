@@ -40,6 +40,12 @@ const HIDDEN: &str = "#hidden";
 /// One line per recording: `#isrc`, a tab, the video id, a space and the ISRC.
 // A header and not an entry column, which an older binary would read as part of the filename.
 const ISRC: &str = "#isrc";
+/// The video ids this folder was split into chapters for: the record of the choice, which has to exist before
+/// the first cut does, or a kill in between reads as a video that was never split.
+const SPLIT: &str = "#split";
+/// One line per chapter cut: `#chapter`, a tab, the id, then its start and end in seconds, space-separated.
+// Chapter ids are positions, so these spans are what says whether the chapter at a position is still the one cut.
+const CHAPTER: &str = "#chapter";
 
 /// Marks an id earworm invented rather than one YouTube gave it.
 /* A folder earworm did not download has no video ids, and the first edit in
@@ -103,7 +109,29 @@ pub fn is_chapter(id: &str) -> bool {
 /// next sync does the same without asking again.
 pub fn is_split(folder: &Path, video: &str) -> bool {
     let prefix = format!("{video}#");
-    entries(folder).iter().any(|(id, _)| id.starts_with(&prefix))
+    let was = load(folder);
+    was.splits.iter().any(|v| v == video) || was.entries.iter().any(|(id, _)| id.starts_with(&prefix))
+}
+
+/// Records that this video was split, before anything is cut.
+pub fn set_split(folder: &Path, video: &str) -> std::io::Result<()> {
+    let was = load(folder);
+    if was.splits.iter().any(|v| v == video) {
+        return Ok(());
+    }
+    let mut splits = was.splits.clone();
+    splits.push(video.to_string());
+    let headers = Headers { splits, ..Headers::of(&was) };
+    body(folder, &headers, was.entries.into_iter())
+}
+
+/// Records the span a chapter was cut from, replacing any earlier one for the same id.
+pub fn set_chapter(folder: &Path, id: &str, start: f64, end: f64) -> std::io::Result<()> {
+    let was = load(folder);
+    let mut chapters: Vec<(String, f64, f64)> = was.chapters.iter().filter(|(known, _, _)| known != id).cloned().collect();
+    chapters.push((id.to_string(), start, end));
+    let headers = Headers { chapters, ..Headers::of(&was) };
+    body(folder, &headers, was.entries.into_iter())
 }
 
 /// Whether a folder holds one record or a collection of them.
@@ -259,6 +287,10 @@ pub struct Sidecar {
     pub hidden: bool,
     /// Video id and ISRC, for the tracks a lookup gave one.
     pub isrcs: Vec<(String, String)>,
+    /// Videos that were split into their chapters.
+    pub splits: Vec<String>,
+    /// Chapter id with the span it was cut from.
+    pub chapters: Vec<(String, f64, f64)>,
     /// In the order the file holds them, files that have since been deleted
     /// included. `read` drops both the order and the deleted ones.
     pub entries: Vec<(String, PathBuf)>,
@@ -274,6 +306,8 @@ struct Headers {
     kind: Option<Kind>,
     hidden: bool,
     isrcs: Vec<(String, String)>,
+    splits: Vec<String>,
+    chapters: Vec<(String, f64, f64)>,
 }
 
 impl Headers {
@@ -288,6 +322,8 @@ impl Headers {
             kind: was.kind,
             hidden: was.hidden,
             isrcs: was.isrcs.clone(),
+            splits: was.splits.clone(),
+            chapters: was.chapters.clone(),
         }
     }
 }
@@ -301,6 +337,8 @@ pub fn load(folder: &Path) -> Sidecar {
         playlist: None,
         hidden: false,
         isrcs: Vec::new(),
+        splits: Vec::new(),
+        chapters: Vec::new(),
         entries: Vec::new(),
     };
     let Ok(text) = std::fs::read_to_string(path(folder)) else {
@@ -318,6 +356,15 @@ pub fn load(folder: &Path) -> Sidecar {
             ISRC => {
                 if let Some((id, isrc)) = value.trim().split_once(' ') {
                     found.isrcs.push((id.to_string(), isrc.trim().to_string()));
+                }
+            }
+            SPLIT => found.splits.push(value.trim().to_string()),
+            CHAPTER => {
+                let mut parts = value.split_whitespace();
+                if let (Some(id), Some(start), Some(end)) = (parts.next(), parts.next(), parts.next())
+                    && let (Ok(start), Ok(end)) = (start.parse(), end.parse())
+                {
+                    found.chapters.push((id.to_string(), start, end));
                 }
             }
             // A header this reader predates, which is why they carry a `#`.
@@ -511,6 +558,12 @@ fn body(
     for (id, isrc) in headers.isrcs.iter().filter(|(id, isrc)| isrc_line_ok(id, isrc)) {
         body.push_str(&format!("{ISRC}\t{id} {isrc}\n"));
     }
+    for video in headers.splits.iter().filter(|v| !v.is_empty() && !v.contains(['\t', '\n'])) {
+        body.push_str(&format!("{SPLIT}\t{video}\n"));
+    }
+    for (id, start, end) in headers.chapters.iter().filter(|(id, _, _)| !id.contains(['\t', '\n', ' '])) {
+        body.push_str(&format!("{CHAPTER}\t{id} {start:.2} {end:.2}\n"));
+    }
     for (id, file) in entries {
         let Some(name) = file.file_name().map(|n| n.to_string_lossy().to_string()) else {
             continue;
@@ -533,6 +586,36 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn a_split_and_its_spans_are_headers_that_survive_every_writer_and_an_older_reader_skips() {
+        let dir = scratch("split");
+        let file = dir.join("01 - A.opus");
+        std::fs::write(&file, "x").unwrap();
+        write(&dir, "u", [("vid#01".to_string(), file.clone())].into_iter()).unwrap();
+        set_split(&dir, "vid").unwrap();
+        set_split(&dir, "vid").unwrap();
+        set_chapter(&dir, "vid#01", 0.0, 61.5).unwrap();
+        set_chapter(&dir, "vid#01", 0.0, 62.0).unwrap();
+        // Every other writer carries them.
+        write_synced(&dir, "u", [("vid#01".to_string(), file.clone())].into_iter()).unwrap();
+        hide(&dir).unwrap();
+        let held = load(&dir);
+        assert_eq!(held.splits, ["vid"], "written once");
+        assert_eq!(held.chapters, [("vid#01".to_string(), 0.0, 62.0)]);
+        // A video with the header and no entry yet is split all the same.
+        let bare = scratch("split-bare");
+        std::fs::write(path(&bare), "#url\tu\n").unwrap();
+        assert!(!is_split(&bare, "vid"));
+        set_split(&bare, "vid").unwrap();
+        assert!(is_split(&bare, "vid"));
+        // An older binary reads a `#` key as nothing, so these lines add no entry for it.
+        let text = std::fs::read_to_string(path(&dir)).unwrap();
+        let entries: Vec<&str> = text.lines().filter(|l| !l.starts_with('#')).collect();
+        assert_eq!(entries, ["vid#01\t01 - A.opus"], "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&bare);
     }
 
     // A header, never a third column: an older binary splits an entry on its first tab,

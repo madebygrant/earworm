@@ -7,7 +7,7 @@ earworm                                  # asks for a URL
 earworm 'https://youtube.com/playlist?list=...'
 earworm URL --dir ~/Music/new
 earworm URL --no-pick                    # don't stop to choose, fetch it all
-earworm URL --format flac                # opus by default
+earworm URL --format flac                # m4a by default
 earworm URL -- --cookies-from-browser firefox    # extra args go to yt-dlp
 earworm --resync                         # every playlist already downloaded
 earworm --list                           # what's on disk, then exit

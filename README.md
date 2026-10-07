@@ -61,6 +61,11 @@ download from a music library:
 - **Custom playlists.** Build a list from tracks in any of your folders with
   `N` and `P`, reorder it, and play it in cliamp. It follows a track when you
   edit it, and deleting a list never touches audio.
+- **Export to a device.** `E` copies a folder or a custom playlist to a stick,
+  card or synced folder, with names every filesystem accepts and a playlist
+  file beside the audio. A second export copies only what changed, and nothing
+  on the device is deleted unless you ask, and then every file is named first.
+  It can re-encode for players that cannot read opus. [Details](docs/library.md#exporting).
 - **A song on two playlists downloads once.** A video another folder already
   holds is copied across instead of fetched again, and the pick screen marks a
   likely duplicate with `≈`.
@@ -85,7 +90,7 @@ turns out to be 361 tracks of seminar recordings.
 | [docs/install.md](docs/install.md) | tools, the AcoustID key, `--check` |
 | [docs/configuration.md](docs/configuration.md) | the config file, every flag |
 | [docs/workflow.md](docs/workflow.md) | picks, filters, fixing tags, retry |
-| [docs/formats.md](docs/formats.md) | opus, mp3, flac, and what converts |
+| [docs/formats.md](docs/formats.md) | m4a, opus, mp3, flac, and what converts |
 | [docs/chapters.md](docs/chapters.md) | cutting an album upload into tracks by its chapters |
 | [docs/loudness.md](docs/loudness.md) | ReplayGain and R128 tags, so tracks play at one volume |
 | [docs/lyrics.md](docs/lyrics.md) | embedded lyrics from LRCLIB, and what is sent to it |

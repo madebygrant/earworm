@@ -4,6 +4,7 @@ mod cheats;
 mod config;
 mod custom;
 mod deps;
+mod export;
 mod icons;
 mod lookup;
 mod manifest;
@@ -971,6 +972,14 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('R') if app.can_browse() => app.send(Cmd::ResyncAll),
         KeyCode::Char('n') if app.can_browse() => app.send(Cmd::Url),
         KeyCode::Char('N') if app.can_browse() => app.send(Cmd::NewPlaylist),
+        KeyCode::Char('E') if app.can_browse() => match app.custom_row() {
+            Some(name) => app.send(Cmd::Export(crate::export::Target::List(name))),
+            None => {
+                if let Some(folder) = app.selected_shelf().map(|s| s.path.clone()) {
+                    app.send(Cmd::Export(crate::export::Target::Folder(folder)));
+                }
+            }
+        },
         _ => {}
     }
 }
@@ -1563,6 +1572,20 @@ mod tests {
         app.busy = false;
         handle_key(&mut app, KeyCode::Char('N'), KeyModifiers::NONE);
         assert!(matches!(cmds.try_recv(), Ok(Cmd::NewPlaylist)));
+    }
+
+    #[test]
+    fn e_exports_a_custom_row_by_name_and_a_folder_by_path() {
+        use crate::export::Target;
+        let (mut app, cmds) = custom_library();
+        handle_key(&mut app, KeyCode::Char('E'), KeyModifiers::NONE);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::Export(Target::List(n))) if n == "Mix"));
+
+        let (mut app, cmds) = custom_library();
+        app.library[0].kind = None;
+        app.library[0].path = std::path::PathBuf::from("/music/Focus");
+        handle_key(&mut app, KeyCode::Char('E'), KeyModifiers::NONE);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::Export(Target::Folder(p))) if p == std::path::Path::new("/music/Focus")));
     }
 
     fn open_list() -> (App, std::sync::mpsc::Receiver<Cmd>) {

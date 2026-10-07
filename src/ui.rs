@@ -1736,6 +1736,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("name", "e", "rename this playlist"),
             ("", "D", "remove this playlist, or delete a custom list"),
             ("new", "N", "a custom playlist from tracks you pick"),
+            ("", "E", "copy this to a stick, card or folder"),
             ("find", "/", "filter by name or track"),
             ("", "t", "every matching track, across the library"),
             ("", "o", "order: name, last synced, most missing"),
@@ -3742,6 +3743,8 @@ mod tests {
     fn library_screen_at(width: u16, shelf: usize) -> Vec<String> {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(tx, "settings".into());
+        // The fixtures are `.opus`, and a folder off the format adds a line to the pane.
+        app.format = "opus".into();
         app.apply(Msg::Library {
             shelves: shelves(),
             show: true,

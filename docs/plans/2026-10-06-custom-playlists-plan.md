@@ -182,6 +182,13 @@ Exit:
 - A track named with `?` lands under a safe name, and the `.m3u8` names that
   safe name.
 
+Status 2026-10-07: built, in `src/export.rs` with `E` on the library. Folders
+and custom playlists, composed or decomposed per export, both playlist layouts
+(`Folders` points from a root `.m3u8` rather than with `../`, which needs no
+player support), incremental copy, free-space check through `df`, and the
+`._` cleanup. Exit tests pass. Not tested: the free-space check and the
+prompts. Not driven through a pty, and not run against a real device.
+
 ## 5. Mirroring and format on export
 
 Why late: it deletes things and it multiplies the work. Both belong after
@@ -194,6 +201,13 @@ plain export has been trusted for a while.
 - Transcode on export for devices that can't play opus, reusing `transcode`.
 
 Exit: a mirror test that deletes only the files it named in its confirmation.
+
+Status 2026-10-07: built in `src/export.rs`. Mirror lists and asks before
+removing, and only files recorded as its own in a hidden `.earworm-export`
+on the device (changed after the review of 2026-10-07); transcode reuses
+`tag::transcode` and carries tags and cover by hand. Tests cover the mirror's
+limits, the shared-folder layout and a conversion plus its skip on a second
+export. Not run against a real device, and the prompts have no test.
 
 ## 6. Documentation
 

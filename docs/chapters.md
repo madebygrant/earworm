@@ -39,7 +39,9 @@ chapter then goes through the usual lookup and tagging, so it ends up named
 the title is the chapter's.
 
 You still get the pick screen, so you can leave chapters out. A chapter you
-skip is not cut, and the full-length file stays until all of them are.
+skip is not cut, and the full-length file goes once every chapter you did pick
+has its own file. If you want a skipped chapter later it is downloaded again,
+the way an unpicked track is anywhere else.
 
 Chapters that yt-dlp invents to fill a gap before the first one, such as the
 second at the start of an album upload, are dropped when they are under ten
@@ -55,24 +57,29 @@ chapter's length, and one that comes out the wrong length counts as failed.
 ## Syncing again
 
 A folder that holds a video's chapters is split again on the next sync, with no
-question: the chapter entries in its `.earworm` are the record that it was
-split. Tracks already there are left alone, including ones you renamed.
+question: its `.earworm` records that the video was split, before the first cut
+is made. Tracks already there are left alone, including ones you renamed.
 
-A chapter whose cut failed, or one you skipped, is cut on the next sync from the
-full-length file, which was kept for that. So is the rest of a split that was
+A chapter whose cut failed is cut on the next sync from the full-length file,
+which was kept for that. So is the rest of a split that was
 stopped part way: each chapter is recorded as it is cut, and the next sync
 carries on from the full-length file instead of starting again. `r` does not retry a cut. It only
 tags again, and says so in the log.
 
-If the uploader changes the chapters, the tracks already cut keep their names
-and any new ones are added. Chapters are matched by position, so a reordered
-list will not follow.
+If the uploader changes the chapters, the tracks already cut keep their names.
+earworm records the span each chapter was cut from, so a chapter is matched to
+its file by those times and not by position: one added in front finds the others
+where they were, and only the new one is cut. A chapter whose times changed is
+cut again, which downloads the video once more, and the old file stays in the
+folder as it was. A folder split before the spans were recorded is still
+matched by position. If the list gets shorter, the files for the dropped
+chapters stay where they are.
 
 If the uploader later removes the chapters, a folder already split stays split:
 the tracks on disk are kept as they are and the video is not downloaded again.
 
 If earworm is stopped after the download but before the first chapter is cut,
-the folder holds the whole video and the next sync asks the question again.
+the next sync carries on and cuts from the whole video. It does not ask again.
 
 Each chapter carries the video's cover picture until the lookup finds a better
 one. A folder you name `[playlist]` stays a playlist when you split it.

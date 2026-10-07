@@ -31,7 +31,7 @@ fn load(dir: &Path, name: &str) -> Result<Playlist> {
 
 /// The screen's rows for a list, with the label read from the file's tags when it is there.
 pub fn rows_of(dir: &Path, list: &Playlist) -> Vec<PlaylistRow> {
-    let others = Others::at(dir, Path::new(""));
+    let others = Others::everything(dir);
     let resolved = worker::resolve_entries(&others, dir, &list.entries);
     list.entries
         .iter()
@@ -63,9 +63,52 @@ fn show(dir: &Path, tx: &Sender<Msg>, list: &Playlist, open: bool, focus: Option
     refresh_library(dir, tx);
 }
 
+// Moves and removals send the order alone: the screen has the labels, and re-reading every tag on each
+// keypress made a long list sluggish.
+fn order(tx: &Sender<Msg>, list: &Playlist, focus: Option<String>) {
+    let ids = list.entries.iter().map(|e| e.id.clone()).collect();
+    let _ = tx.send(Msg::Order { name: list.name.clone(), ids, focus });
+}
+
+// An entry follows its id, and the hint is only the fallback for a file nothing lists. So whenever the list is
+// read, each entry that resolves gets the hint it has now and the id its folder's sidecar knows it by: a
+// `~` id is dropped when a sync matches the file to a video, and a hint that is never refreshed then points
+// at the old name once the file is edited. Saved only when something changed.
+fn refreshed(dir: &Path, mut list: Playlist) -> Playlist {
+    let others = Others::everything(dir);
+    let files = worker::resolve_entries(&others, dir, &list.entries);
+    let mut changed = false;
+    let mut taken: std::collections::HashSet<String> = list.entries.iter().map(|e| e.id.clone()).collect();
+    for (entry, file) in list.entries.iter_mut().zip(files) {
+        let Some(file) = file else {
+            continue;
+        };
+        if let (Ok(rel), Some(name)) = (file.strip_prefix(dir), file.file_name()) {
+            if let Some(home) = rel.components().next() {
+                let hint = Path::new(home.as_os_str()).join(name);
+                if hint != entry.hint && playlists::safe_hint(&hint) {
+                    entry.hint = hint;
+                    changed = true;
+                }
+            }
+        }
+        let known = others.all().iter().flat_map(|o| &o.sidecar.entries).find(|(_, p)| *p == file).map(|(id, _)| id.clone());
+        if let Some(id) = known.filter(|id| *id != entry.id && !taken.contains(id)) {
+            taken.insert(id.clone());
+            entry.id = id;
+            changed = true;
+        }
+    }
+    if changed {
+        // Not worth failing the open for: the list is as good as it was.
+        let _ = playlists::save(dir, &list);
+    }
+    list
+}
+
 pub fn open(dir: &Path, tx: &Sender<Msg>, name: &str) -> Result<()> {
     say_broken(dir, tx);
-    show(dir, tx, &load(dir, name)?, true, None);
+    show(dir, tx, &refreshed(dir, load(dir, name)?), true, None);
     Ok(())
 }
 
@@ -83,6 +126,7 @@ pub fn new(dir: &Path, tx: &Sender<Msg>, asker: &Asker) -> Result<()> {
     say_broken(dir, tx);
     playlists::save(dir, &Playlist { name: name.clone(), entries: Vec::new() })?;
     refresh_library(dir, tx);
+    let _ = tx.send(Msg::Select(playlists::path_of(dir, &name)));
     let _ = tx.send(Msg::Flash(format!("made {name}  ·  t finds tracks and P adds them")));
     Ok(())
 }
@@ -100,7 +144,13 @@ fn id_for(folder: &Path, file: &str) -> Result<(String, bool)> {
     if !folder.join(file).is_file() {
         bail!("{file} is not in {}", folder.display());
     }
-    let id = manifest::local_id(file);
+    // A renamed file keeps its old `~` id, so a new file may be named like the one the id was made for.
+    let mut id = manifest::local_id(file);
+    let mut n = 2;
+    while sidecar.entries.iter().any(|(held, _)| *held == id) {
+        id = format!("{} ({n})", manifest::local_id(file));
+        n += 1;
+    }
     let entries = sidecar.entries.iter().cloned().chain([(id.clone(), folder.join(file))]);
     manifest::write(folder, sidecar.url.as_deref().unwrap_or(""), entries)
         .with_context(|| format!("recording {file} in {}", manifest::path(folder).display()))?;
@@ -152,10 +202,16 @@ pub fn add(dir: &Path, tx: &Sender<Msg>, asker: &Asker, picks: &[(std::path::Pat
         }
         if list.entries.iter().any(|e| e.id == id) {
             already += 1;
-        } else {
-            list.entries.push(Entry { id, hint: home.join(file) });
-            added += 1;
+            continue;
         }
+        let entry = Entry { id, hint: home.join(file) };
+        // `save` drops what it cannot write, so counting it as added would be a claim about nothing.
+        if !playlists::writable(&entry) {
+            let _ = tx.send(Msg::Log(format!("playlist: {file} has a name a list cannot hold")));
+            continue;
+        }
+        list.entries.push(entry);
+        added += 1;
     }
     playlists::save(dir, &list)?;
     adopted.sort();
@@ -184,7 +240,7 @@ pub fn move_entry(dir: &Path, tx: &Sender<Msg>, name: &str, id: &str, up: bool) 
         list.entries.swap(at, to);
         playlists::save(dir, &list)?;
     }
-    show(dir, tx, &list, false, Some(id.to_string()));
+    order(tx, &list, Some(id.to_string()));
     Ok(())
 }
 
@@ -192,7 +248,9 @@ pub fn remove_entry(dir: &Path, tx: &Sender<Msg>, name: &str, id: &str) -> Resul
     let mut list = load(dir, name)?;
     list.entries.retain(|e| e.id != id);
     playlists::save(dir, &list)?;
-    show(dir, tx, &list, false, None);
+    order(tx, &list, None);
+    // A removal changes the list's count in the library; a move does not, so only this one refreshes.
+    refresh_library(dir, tx);
     Ok(())
 }
 
@@ -208,7 +266,10 @@ pub fn rename(dir: &Path, tx: &Sender<Msg>, asker: &Asker, name: &str) -> Result
     playlists::rename(dir, name, &new)?;
     // cliamp's stored copy is keyed on the old name and nothing else will name it again.
     crate::player::forget_list(&playlists::key(dir, name));
+    // Before the library, whose refresh would otherwise see the old name gone and clear the marker.
+    let _ = tx.send(Msg::Renamed { old: name.to_string(), new: new.clone() });
     refresh_library(dir, tx);
+    let _ = tx.send(Msg::Select(playlists::path_of(dir, &new)));
     let _ = tx.send(Msg::Flash(format!("renamed to {new}")));
     Ok(())
 }
@@ -229,8 +290,8 @@ pub fn delete(dir: &Path, tx: &Sender<Msg>, asker: &Asker, name: &str) -> Result
 
 /// The message and the folders the list's files sit in, which is how a playing track is tied back to the list.
 pub fn play(dir: &Path, name: &str) -> Result<(String, Vec<std::path::PathBuf>)> {
-    let list = load(dir, name)?;
-    let others = Others::at(dir, Path::new(""));
+    let list = refreshed(dir, load(dir, name)?);
+    let others = Others::everything(dir);
     let files = worker::resolve_entries(&others, dir, &list.entries);
     let m3u8 = playlists::write_m3u8(dir, &list, &files)?;
     let said = crate::player::load_list(&m3u8, &playlists::key(dir, name))?;
@@ -351,6 +412,82 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    // Hiding takes a row off the library and nothing else, and it is documented to keep playlists playing.
+    #[test]
+    fn a_hidden_folders_track_still_resolves_after_it_is_renamed() {
+        let dir = root("hidden");
+        let a = folder(&dir, "A", &[("a1", "01 - One.opus")]);
+        let picks = vec![(a.clone(), "01 - One.opus".to_string())];
+        answering(in_new_playlist("Mix"), |tx, asker| add(&dir, tx, asker, &picks)).0.unwrap();
+        manifest::hide(&a).unwrap();
+        std::fs::rename(a.join("01 - One.opus"), a.join("01 - Renamed.opus")).unwrap();
+        manifest::write(&a, "u", [("a1".to_string(), a.join("01 - Renamed.opus"))].into_iter()).unwrap();
+        manifest::hide(&a).unwrap();
+
+        let list = playlists::load(&dir, "Mix").unwrap();
+        assert_eq!(rows_of(&dir, &list)[0].path, Some(a.join("01 - Renamed.opus")), "a hidden folder lost its entry");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // A sync that matches an adopted file to a video drops its `~` id, and the hint then went stale on the next edit.
+    #[test]
+    fn opening_a_list_moves_a_dropped_local_id_and_a_stale_hint_onto_what_the_sidecar_now_says() {
+        let dir = root("promote");
+        let loose = dir.join("Loose");
+        std::fs::create_dir_all(&loose).unwrap();
+        std::fs::write(loose.join("Song.opus"), "audio").unwrap();
+        let picks = vec![(loose.clone(), "Song.opus".to_string())];
+        answering(in_new_playlist("Mix"), |tx, asker| add(&dir, tx, asker, &picks)).0.unwrap();
+        // The URL is attached and the sync matches the file: the `~` line becomes a video id.
+        manifest::write(&loose, "u", [("vid1".to_string(), loose.join("Song.opus"))].into_iter()).unwrap();
+        let (tx, _rx) = channel();
+        open(&dir, &tx, "Mix").unwrap();
+        assert_eq!(playlists::load(&dir, "Mix").unwrap().entries[0].id, "vid1");
+
+        // Now the edit renames it, and the entry still follows.
+        std::fs::rename(loose.join("Song.opus"), loose.join("01 - Song.opus")).unwrap();
+        manifest::write(&loose, "u", [("vid1".to_string(), loose.join("01 - Song.opus"))].into_iter()).unwrap();
+        let list = playlists::load(&dir, "Mix").unwrap();
+        assert_eq!(rows_of(&dir, &list)[0].path, Some(loose.join("01 - Song.opus")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // A renamed adopted file keeps `~Song.opus`, so a new file called Song.opus used to get the same id.
+    #[test]
+    fn a_new_file_named_like_a_renamed_one_gets_an_id_of_its_own() {
+        let dir = root("repeat");
+        let loose = dir.join("Loose");
+        std::fs::create_dir_all(&loose).unwrap();
+        std::fs::write(loose.join("Song.opus"), "first").unwrap();
+        let (first, fresh) = id_for(&loose, "Song.opus").unwrap();
+        assert!((first.as_str(), fresh) == ("~Song.opus", true));
+        std::fs::rename(loose.join("Song.opus"), loose.join("01 - Song.opus")).unwrap();
+        manifest::write(&loose, "", [(first.clone(), loose.join("01 - Song.opus"))].into_iter()).unwrap();
+
+        std::fs::write(loose.join("Song.opus"), "second").unwrap();
+        let (second, _) = id_for(&loose, "Song.opus").unwrap();
+        assert_ne!(second, first, "two files share one id");
+        assert!(manifest::is_local(&second));
+        let held = manifest::entries(&loose);
+        assert!(held.iter().any(|(id, p)| *id == first && p.ends_with("01 - Song.opus")), "{held:?}");
+        assert!(held.iter().any(|(id, p)| *id == second && p.ends_with("Song.opus")), "{held:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_name_a_list_cannot_hold_is_not_counted_as_added() {
+        let dir = root("tab");
+        let a = folder(&dir, "A", &[]);
+        std::fs::write(a.join("Odd\tName.opus"), "audio").unwrap();
+        let picks = vec![(a.clone(), "Odd\tName.opus".to_string())];
+        let (result, rx) = answering(in_new_playlist("Mix"), |tx, asker| add(&dir, tx, asker, &picks));
+        result.unwrap();
+        let flashes: Vec<String> = rx.try_iter().filter_map(|m| if let Msg::Flash(f) = m { Some(f) } else { None }).collect();
+        assert!(flashes.iter().any(|f| f.starts_with("added 0 to Mix")), "{flashes:?}");
+        assert!(playlists::load(&dir, "Mix").unwrap().entries.is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn adding_a_track_twice_says_it_was_already_there_and_adds_nothing() {
         let dir = root("twice");
@@ -406,7 +543,7 @@ mod tests {
         let (tx, rx) = channel();
         move_entry(&dir, &tx, "Mix", "a3", true).unwrap();
         assert_eq!(ids(&dir), ["a1", "a3", "a2"]);
-        let focus = rx.try_iter().find_map(|m| if let Msg::Custom { focus, .. } = m { focus } else { None });
+        let focus = rx.try_iter().find_map(|m| if let Msg::Order { focus, .. } = m { focus } else { None });
         assert_eq!(focus.as_deref(), Some("a3"), "the cursor would stay on whatever moved into the row");
 
         // At the edge it is a no-op and not an error or a wrap.

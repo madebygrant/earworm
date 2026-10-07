@@ -666,7 +666,12 @@ than at the start of every session.
   same video in three folders always copies from the same one. The rest of the
   library is read once per pass through `Others`, lazily: the id index, the ISRC
   check and the reopened folder all ask it, where each reading every sidecar
-  itself made a `--resync` cost the square of the library. A source counts
+  itself made one pass cost the square of the library. `Others` is still built
+  per pass, so a `--resync` of N folders reads N sidecars N times: a second
+  folder has to see what the first just fetched, and the reads are small, so
+  it was not worth a cache that has to know when to go stale. Nor does
+  `library` stop statting every file whenever a pass has a download the id
+  index could not account for. A source counts
   only when `format_on_disk` matches `cfg.format`, or the copy would put a
   second format in the folder for `convert` to undo, and `~` and chapter ids
   are skipped for the reason `write_archive` skips them. `--resync` passes no
@@ -717,7 +722,10 @@ than at the start of every session.
   rewrite decides which ids still exist. The file's tag is the truth and the
   sidecar follows it: `tag::apply` removes an ISRC only when the hit has none
   *and* its title differs from the file's, because an AcoustID or Apple hit
-  never carries one and would otherwise strip a correct tag. The identify and
+  never carries one and would otherwise strip a correct tag. "Differs" is
+  `same_title`: composed, lowercased, and a trailing bracket group ignored,
+  since Deezer says `Autobahn (2009 Remaster)` where the others say `Autobahn`
+  and the right ISRC went with that. The identify and
   `T` paths then read the file back and call `drop_isrc` if the line is stale. A track already on disk reads its ISRC
   off the tag in `tag_tracks` and `open_shelf`, so an old file is compared and
   a reopened folder shows what a sync did. Pinned by
@@ -728,12 +736,21 @@ than at the start of every session.
   compares against other folders' `#isrc` lines, so it costs no tag read. A
   track with an ISRC drops its title-based marker first, since the ISRC is the
   stronger answer and a contradicted guess should not outlive it. The same video in two folders
-  is what a copy makes and is not a twin.
+  is what a copy makes and is not a twin. An ISRC match replaces a title
+  guess, and a guess is dropped without one only when the other side is known
+  to hold a different ISRC (`title_guess_contradicted`): most files have none,
+  and a missing ISRC contradicts nothing. A `copy from` row is never a guess
+  (`a_title_guess_survives_an_isrc_that_nothing_contradicts`).
 - **Three call sites in `pipeline` carry this and nothing tests them.**
   `library_index` and `mark_twins` before `Msg::Tracks`, `copy_known` after
   `ask_which`, and `flag_isrc_twins` before `sync_manifest`. Reaching them needs
   a live scan, as with the lines in the albums section. What is tested is one
   level down. Moving `copy_known` above the gate would copy tracks nobody picked.
+  `copy_known` writes the manifest itself once it has copied anything: the
+  copy is named after the source, not the scan's prediction, so a run quit
+  during the download left a file no sidecar line named, and the next scan
+  downloaded the track again beside it
+  (`a_copy_is_recorded_in_the_sidecar_as_soon_as_it_is_made`).
 
 ### Custom playlists
 
@@ -759,7 +776,23 @@ than at the start of every session.
   names, and `rename_shelf` calls `playlists::rehome` to keep the hint true. A
   hint is untrusted: the file is hand-editable and travels, so an absolute path
   or a `..` is dropped on read and write and never resolved (`safe_hint`); an
-  absolute path replaces the root in a `join`.
+  absolute path replaces the root in a `join`. Resolution reads hidden folders
+  too (`Others::everything`): hiding takes a row off the library and the
+  duplicate checks, and a list that goes on playing the folder's files is what
+  the hide promises. `refreshed` runs whenever a list is opened or played and
+  gives each entry that resolves the hint it has now and the id its folder's
+  sidecar knows it by, because a sync that matches an adopted file to a video
+  drops the `~` line and a hint that is never refreshed then points at the old
+  name after the next edit
+  (`opening_a_list_moves_a_dropped_local_id_and_a_stale_hint_onto_what_the_sidecar_now_says`,
+  `a_hidden_folders_track_still_resolves_after_it_is_renamed`).
+- **A `~` id is unique within its folder.** `id_for` counts up (`~Song.opus
+  (2)`) when the id is taken, because a renamed adopted file keeps its old id
+  and a new file may be named like the one it was made for; two lines with one
+  id made the list resolve to whichever file came first
+  (`a_new_file_named_like_a_renamed_one_gets_an_id_of_its_own`). `contents()`
+  in `worker.rs` still builds its ids from filenames, which is the same
+  collision on the read side and is left as it was.
 - **Adding a track adopts its folder.** A file in a folder earworm never edited
   has no sidecar entry, so the add writes one (`~file`) before the list holds
   it, and says so in the log: a hidden file appearing in somebody's music
@@ -783,7 +816,11 @@ than at the start of every session.
   are `../Folder/file`, relative to the store, so it holds wherever `--dir` is
   and every other `.m3u8` still names bare filenames. It is for playback inside
   the library: a car stereo or a phone will not follow `../`, which is what
-  export is for. It is written when the list is played, and a list with nothing
+  export is for. `save` refuses a file that does not parse, since `say_broken`
+  tells the user it is hidden and a new list of that name would otherwise write
+  over its entries
+  (`saving_over_a_file_that_does_not_parse_is_refused_and_leaves_it_alone`). It
+  is written when the list is played, and a list with nothing
   on disk refuses rather than handing cliamp an empty file. `play` itself has no
   test: it reaches the real cliamp store.
 - **The `▶` follows the list that was played, not the folder its track is in.**
@@ -792,7 +829,69 @@ than at the start of every session.
   `row_on_air` marks the list while the track sits in one of them. Playing a
   folder sends `OnAir(None)`. Switching playlists inside cliamp is invisible
   from here, so the marker can stay on a list until its track leaves those
-  folders.
+  folders. A rename sends `Msg::Renamed` before the library refresh, or the
+  refresh sees the old name gone and clears the marker; a deleted list clears
+  it from the refresh itself
+  (`the_playing_marker_follows_a_renamed_list_and_goes_with_a_deleted_one`).
+- **The library cursor follows its row by path.** `Msg::Library` looks the
+  row up again after a refresh, since lists sort in among the folders and a
+  list made or deleted shifts every row after it, and `Msg::Select` puts it on
+  a list just made or renamed. A row that is gone keeps its index, clamped
+  (`a_library_refresh_keeps_the_cursor_on_the_same_row_not_the_same_index`).
+  The sync sorts leave lists out: they have no sync time and their dead
+  entries are not something a sync fetches (`a_list_takes_no_part_in_the_sync_sorts`).
+- **A move or a removal sends `Msg::Order`, never `Msg::Custom`.** `Custom`
+  re-reads the tags of every entry, which on a long list made `J` and `K`
+  sluggish. `Order` carries ids only and the screen reorders the rows it
+  holds; an id it does not hold means the file changed behind it, so the
+  message is ignored and the next open loads the list fresh. A move leaves the
+  library alone, since its counts cannot change; a removal refreshes it once.
+- **Export copies and never deletes, and names are mapped on the way out
+  only.** `export::plan_*` build the whole plan (source, destination, playlist
+  text) before anything is written, so the mapping, the collisions and the
+  layout are tested without a device. `portable::name` then `unique` decide
+  each filename: `clean()` stays as it is, or the library's files would be
+  renamed on their next edit. A file is skipped when size and modification
+  time (to 2s, FAT's resolution) match, so `put` sets the time after copying.
+  Copies go through a hidden `SCRATCH` name and a rename, so a kill leaves
+  nothing a later export reads as a track. The `._` file macOS writes on exFAT
+  is removed only when this call caused it, checked before the write.
+  The destination must exist and sit outside `--dir` (`check`), or a typo
+  makes a new folder and a path inside the library re-reads its own export.
+  `Msg::Stage` carries progress and `cancel` is the quit flag. Nothing tests
+  the free-space check, which shells out to `df`, or the prompts in `run`.
+- **A mirror offers only what this export recorded, and never replaces what
+  it did not write.** Each folder on the device holds a hidden `.earworm-export`
+  with an `owner<TAB>name` line per file earworm put there (`RECORD`; the owner
+  is `folder:<name>` or `list:<name>`). `leftovers` offers a recorded name only
+  when the plan no longer writes it and no other owner's line claims it, and
+  `remove` re-checks the record and that the path is under the destination.
+  `execute` leaves alone a file that exists and is not recorded under this
+  owner, and `write_text` does the same for a playlist file, so an unrelated
+  `Music/` already on the stick is neither offered nor overwritten. The
+  folder-layout list can be mirrored for the same reason: it names a track as
+  the folder's own export does (`folder_names`), so two exports never give one
+  device name to two tracks, and a file both put there is claimed by neither's
+  mirror. Every comparison goes through `key` (composed, lowercased), because
+  APFS, FAT and exFAT call two spellings one file: compared byte for byte, a
+  rename that only changed case offered the file just written, and answering
+  yes deleted the only copy. The question is asked before the copy and acted
+  on after, and not at all if the copy was stopped. The record is a file on
+  the user's device that an older earworm cannot know about, and a stick moved
+  to another machine keeps it.
+  `a_rename_that_changes_only_case_or_accent_form_is_never_offered_for_removal`,
+  `a_device_folder_earworm_did_not_write_is_neither_offered_nor_overwritten`,
+  `a_list_and_a_folder_of_one_name_never_offer_each_others_files`.
+- **A re-encoded copy is skipped on its time and its codec, not its size.** The
+  size differs from the source by design, so `already_there` drops that test
+  for it, and reads the codec instead because alac and m4a share an extension;
+  breaking the first makes every second export convert again, and the second
+  keeps an alac file for an m4a export
+  (`a_second_export_in_another_codec_under_one_extension_is_redone`)
+  (`a_converted_track_takes_the_new_extension_and_a_second_export_leaves_it`).
+  `reencode` carries tags and the picture across itself, as `swap_in` does,
+  and a track already in the target format is copied. The format list is
+  `FORMATS`, so a codec ffmpeg lacks fails per track and is logged.
 - **`P` is not in the track list's help table.** That table is 21 rows and a
   24-row terminal has no room for a 22nd, which dropped the play indicator and
   broke a test somewhere else. The key is offered in the status bar's hints
@@ -810,12 +909,30 @@ than at the start of every session.
   folder holds no chapters of it. `--resync` and `--no-pick` pass no gate, so
   the unattended answer is the video as it was, the same reasoning as the
   `false` literal `resync` passes.
-- **The sidecar's chapter entries are the whole record of the choice.** A
-  header would have to be carried by every writer of the manifest; the `vid#NN`
-  entries already are, and `write_manifest` preserves entries the current
-  tracks do not cover. `manifest::is_split` reads them. A folder that holds the
-  whole file is never asked again, which is also how a declined split stays
-  declined.
+- **The choice is a `#split` header, written before the first cut, and the
+  `vid#NN` entries count too.** The entries alone were the record, which left a
+  window: stopped after the download and before the first cut was recorded,
+  the folder held the whole video and nothing said it was to be split, so the
+  next sync read it as a video that was never split and kept it as one track
+  for good, where this section used to claim it asked again
+  (`the_choice_to_split_is_recorded_before_anything_is_cut`). The header is
+  carried by every writer through `Headers::of`. `manifest::is_split` reads
+  both. A folder that holds the whole file is never asked again, which is also
+  how a declined split stays declined.
+- **A chapter is matched to its file by the span it was cut from, not by its
+  position.** An id is `{video}#{nn}`, so a chapter the creator inserts moved
+  every later position onto the wrong file: the video was fetched again, cut at
+  the new last position, and the full file then deleted. `#chapter` headers
+  record each cut's start and end (`set_chapter`, after each cut), and
+  `chapter_tracks` gives a chapter the file whose span is within a second of
+  its own, whatever id that file was cut under; a position whose recorded span
+  no longer matches is cut again and the old file is left alone, since deleting
+  it would be deleting a track somebody may have edited. A folder split before
+  the spans existed has none and keeps trusting the position, and records the
+  current ones from the first sync after. A listing that shrinks leaves the
+  dropped chapters' entries and files where they are
+  (`a_chapter_inserted_upstream_takes_the_file_its_span_matches_and_cuts_only_the_new_one`,
+  `a_position_whose_span_moved_is_cut_again_and_the_old_file_is_left_alone`).
 - **A chapter id is `{video}#{nn}`, and `is_chapter` checks the whole shape.**
   A bare `#` matched `~Song #2.mp3`, a local id, and one such file made
   `retry` skip its download for every track in a synced folder. It is guarded
@@ -844,9 +961,14 @@ than at the start of every session.
   before the lookup: it reads as `Have` and is never identified, which is what
   any downloaded track in that state does.
 - **The full file goes last, and only if no chapter failed.** `fetch_split`
-  removes it once every track has a file of its own that is not the video's.
-  A failed chapter can be recorded against the video's own path, which is on
-  disk and is not its cut, so the test is on `Failed` as well as on the file.
+  removes it once every track has a file of its own that is not the video's
+  (`whole_is_done`). A failed chapter can be recorded against the video's own
+  path, which is on disk and is not its cut, so the test is on `Failed` as well
+  as on the file. A chapter the pick gate left out is not a reason to keep it:
+  kept, the whole video sat in the folder for good, in no sidecar and no
+  playlist, and every gated sync asked about that chapter again. It downloads
+  again if it is ever wanted, as an unpicked track does anywhere
+  (`the_full_file_stays_while_a_chapter_failed_and_goes_when_the_rest_are_done_or_unpicked`).
   A chapter whose name would equal the video's gets `(chapter)` added in
   `chapter_tracks`, because the cut reads the file it would write over.
 - **A split folder stays split when the chapters vanish upstream.**
@@ -854,17 +976,20 @@ than at the start of every session.
   chapters: with none, it rebuilds the tracks from the sidecar's `vid#nn`
   entries (`held_chapters`), so the video is not fetched again beside the cuts
   and the `.m3u8` keeps every chapter. A folder never split with no chapters is
-  the plain video.
+  the plain video. Only when the listing is that one video: a playlist whose
+  first track happens to be a split video's id keeps its own tracks
+  (`held_chapters_replace_a_single_video_and_never_a_playlist`).
 - **A cut carries nothing of the video but audio and its picture.** `-map_metadata
   -1` leaves the chapter list, so `tag::cut` also drops chapters, and
   `fetch_split` copies the full file's picture onto each cut: it is the fallback
   art for a chapter the lookup cannot place. A cut that fails keeps its reason:
   `tag_tracks` leaves a `Failed` track with no file alone, or "no file" replaces
   `cut: ...`, and the cut error also goes to the log.
-- **The kill window the sidecar cannot cover.** Stopped after the download and
-  before the first cut is recorded, the folder holds the whole video and no
-  chapter entry, so the next sync reads it as a video that was never split and
-  asks again. Nothing is lost.
+- **The kill window is closed by the header.** The one still open is stopped
+  after the download and before `set_split` runs, which is a few microseconds
+  after the file lands; the next sync then sees a whole video it asks about
+  again. `settle_split` also sweeps a killed cut's scratch file whenever the
+  folder is split, not only when something is cut.
 - **A split promotes the kind only when nothing has answered.** A `[playlist]`
   name or an earlier header is somebody's choice, and the name wins on
   reopening anyway, so overriding it made the run and the library disagree.
@@ -901,14 +1026,24 @@ than at the start of every session.
   Everything else is `REPLAYGAIN_TRACK_GAIN` in dB against -18 plus a peak.
   Opus players ignore ReplayGain, and writing both would give them two
   answers. `the_two_reference_levels_are_not_swapped` pins the numbers.
-- **`write_loudness` skips a file that already has the track tag.** A resync
-  then costs a tag read and no ffmpeg, and a value another tool wrote stays.
+- **`write_loudness` skips a file whose track gain reads back.** A resync then
+  costs a tag read and no ffmpeg, and a value another tool wrote stays. One that
+  does not parse (`-3,2 dB`) is measured and replaced: left, it kept the track
+  out of every album mean for good and logged the skip on every sync
+  (`a_gain_that_reads_back_is_kept_and_one_that_does_not_is_measured_again`).
   Album gain is the opposite: it is rewritten when the computed value differs,
-  because adding a track changes it for every file.
+  because adding a track changes it for every file. That includes an album gain
+  another tool wrote, which earworm cannot tell from its own; the alternative
+  is an album gain that goes stale when a track is added, and this was
+  chosen. The album peak is written only when every track has a peak, since
+  the largest of a few understates it
+  (`an_album_peak_is_written_only_when_every_track_has_one`).
 - **Album gain is read back from the track tags, not measured again.**
   `stored_loudness` inverts the gain, so the album pass decodes nothing. It
   depends on the track pass having run first, which is why it sits after
-  `tag_tracks` in `pipeline` and only when the folder is an album.
+  `tag_tracks` in `pipeline` and `retry`, and only when the folder is an
+  album: a retried track changes the mean for every file. Nothing tests the
+  `retry` call, which needs a live download.
 - **Opus albums have no peak.** R128 has no peak tag to write, and inventing
   one in a ReplayGain tag would give opus players a second answer.
 - **`measure` writes ffmpeg's stderr to a file.** The summary is on stderr,
@@ -934,7 +1069,10 @@ than at the start of every session.
   length alone lets a cover of the same song through and lyrics are never
   overwritten once written. No duration means no lookup at all. An exact match
   that says instrumental ends the lookup: searching on could attach another
-  record's words.
+  record's words. The album sent is the file's own: `real_album` blanks it
+  when it equals the playlist name, which is the album fill and would only
+  ever miss. An error on `get` falls through to the search unless it was the
+  strike that paused the breaker.
 - **A miss and an outage are different answers, and `Lookup` says which.**
   `lrclib_json` reads a 404 as `Missing` and anything else as `Down`;
   `get_json` cannot, which is why the lyrics calls do not use it. Both leave
@@ -967,6 +1105,11 @@ than at the start of every session.
 - **`cliamp playlist import` refuses a name it already holds,** exit 1, without
   replacing or duplicating. So a refresh is delete-then-import, and the delete
   failing is the ordinary first-time case rather than an error worth reporting.
+- **A custom list's cliamp key is the stem of its own file.** `playlists::key`
+  is built from `file_for`, not the raw name: a list called `../Focus` used to
+  hand cliamp the name of the folder Focus, and `p` replaced that folder's
+  playlist. It also makes the colon rule below hold for lists
+  (`a_lists_cliamp_key_stays_inside_the_store_whatever_it_is_called`).
 - **The stored name is `earworm - <folder> (<tag>)`, never the bare folder
   name.** That delete is unconditional, so a bare name would destroy a
   same-named playlist the user built in cliamp by hand, and cliamp's store is
@@ -1144,12 +1287,19 @@ than at the start of every session.
   `ffprobe` confirms on a real download: the file tags `ENCODER=Lavf`, the
   muxer, where a re-encode names the encoder instead, and the bitrate is
   YouTube's itag rather than an ffmpeg default. Every other format is ffmpeg
-  re-encoding that same Opus, **`m4a` included**: an earworm `.m4a` is not
-  YouTube's AAC, it is Opus transcoded to AAC. That makes `m4a`, `mp3` and
-  `vorbis` on disk two generations deep where `opus`, `flac` and `alac` are
-  one, and it is why `m4a` is refetched rather than converted. It is also why
-  an `opus` *target* is refetched from anything: a download remuxes, so it
-  costs one generation against the two any conversion would. The first
+  re-encoding that same Opus, except a download to `m4a`, which asks for
+  `bestaudio[ext=m4a]/bestaudio` (`NATIVE_M4A`): YouTube's own AAC is then
+  copied (measured: itag 140 lands at exactly 128k, where the Opus route
+  re-encodes to about 170k), and a video without one falls back to the Opus.
+  So an `.m4a` downloaded before that change, or converted from another format, is Opus
+  transcoded to AAC, and one downloaded since is usually one generation. `mp3`
+  and `vorbis` on disk are always two generations deep, and an `m4a` file is
+  refetched rather than converted because nothing on disk says which kind it is. It is also why
+  an `opus` or `m4a` *target* is refetched from anything: a download copies
+  YouTube's own stream, so it costs one generation against the two any
+  conversion would (a video with no AAC stream costs two either way). `alac`
+  to `m4a` is the exception and converts: both are `.m4a`, so the refetch
+  lands on the path the old file holds and yt-dlp skips or rewrites it. The first
   version of this table had both wrong; docs/history.md says on what
   assumption.
 - **`alac` and `m4a` share an extension, so the codec has to be read.**
@@ -1216,6 +1366,20 @@ than at the start of every session.
   containers is inconsistent in exactly the way this codebase has already paid
   for once. `-vn` drops the picture for the same reason and `set_cover` puts
   it back.
+- **`tag::Kept` is the one list of what survives a file swap.** It reads the
+  identity fields, the lyrics, the ISRC and the picture before the file can
+  change, and `write` puts them on the replacement; `swap_in` and export's
+  `reencode` both go through it, so a tag added to the tool is carried by
+  adding it there. Loudness is left out on purpose: R128 and ReplayGain are
+  different tags against different reference levels, and the next sync
+  measures the new file. Before it, a conversion carried artist, title, album,
+  year and the picture and nothing else: lyrics somebody typed were gone for
+  good, which breaks "lyrics are never replaced", and on the refetch path the
+  ISRC went too, leaving a `#isrc` line the file no longer backed. `swap_in`
+  also drops that line if the replacement still has no ISRC. Pinned by
+  `a_swap_carries_the_lyrics_and_the_isrc_too` and
+  `a_converted_export_keeps_the_lyrics_and_the_isrc`; the sidecar-drop line has
+  no test, since `Kept::write` keeps the ISRC whenever there was one.
 - **A lossy source never becomes a 24-bit lossless file.** ffmpeg decodes
   opus to float and then writes 24-bit flac or alac, which is twice the size
   to store the decoder's own rounding: on a real folder that was 436MB against
@@ -2039,6 +2203,13 @@ than at the start of every session.
   switch a feature off and the file is the only way to hold one on.
 
 ## Testing the TUI
+
+**A skipped fixture test is a pass.** Dozens of tests print "no ffmpeg,
+skipping" and return when ffmpeg cannot make their file, so on a machine
+without the encoders the suite is green and proves nothing.
+`the_encoders_the_fixture_tests_skip_without_are_all_there` fails there
+instead, naming what is missing; `EARWORM_NO_FFMPEG=1` says the machine is
+meant to be without.
 
 Render into `TestBackend` and assert on the buffer, as the gradient,
 status-bar and spinner tests do. Cheaper than a pty for anything reachable by
