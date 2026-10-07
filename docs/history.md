@@ -127,3 +127,30 @@ fan upload of the video).
   the video has all of them null. That is one request per video, so it is only
   affordable for the rows `mark_twins` has already flagged, never for a
   whole playlist.
+
+## Exporting to a device
+
+Measured 2026-10-07 on a 30MB exFAT disk image mounted at `/Volumes`, with
+macOS and cliamp v2.3.0.
+
+- `std::fs::copy`, a plain read-and-write copy and `cp` all leave a `._name`
+  AppleDouble file beside every file they write, and one for each directory.
+  The cause is not the source's attributes: a source with no extended
+  attributes does it too, because macOS tagged every file this process created
+  with `com.apple.provenance`, and exFAT has nowhere to put an attribute but a
+  `._` file. Measured from a process started by Claude Code, and macOS decides
+  the tag from the process's lineage, so earworm started from a plain terminal
+  may leave none. Not yet re-measured there; the cleanup only removes a `._`
+  that exists, so it is safe either way. Copying data only does not avoid it. Deleting `._name` afterwards
+  works, and `dot_clean -m` does the same for a whole folder. So export removes
+  the one `._` it caused for each file it wrote, and never any other.
+- macOS writes `? : * " |` and a trailing dot or space into exFAT names
+  without complaint, and reads them back as written. So the failure CLAUDE.md
+  guessed at, a filename that fails to copy, does not happen here. The risk is
+  the other direction: a stick written on macOS can hold names the exFAT
+  specification forbids, which Windows and some players may refuse. Not tested
+  on Windows. Export maps those characters for that reason,
+  and `clean()` is still left alone.
+- cliamp `playlist import` accepts `../Folder/file` entries and lists both
+  tracks (checked with real files). It does not check that an entry exists:
+  an import of two missing files reported two tracks.

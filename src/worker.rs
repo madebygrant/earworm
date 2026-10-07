@@ -13,6 +13,7 @@ use crate::config::{self, Config, composed, decomposed};
 use crate::lookup;
 use crate::manifest;
 use crate::player;
+use crate::playlists;
 use crate::tag::{self, CoverState};
 use crate::ytdlp;
 
@@ -1473,6 +1474,7 @@ impl Others {
                 .flatten()
                 .map(|e| e.path())
                 .filter(|p| p.is_dir() && p.file_name() != self.here.as_deref())
+                .filter(|p| !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')))
                 .collect();
             folders.sort();
             folders
@@ -1508,6 +1510,34 @@ fn library_index(others: &Others, format: &str, wanted: &HashSet<&str>) -> HashM
         }
     }
     found
+}
+
+// Where each entry of a custom playlist is now, or `None` for one that is gone.
+// The id resolves it, so a rename of the file or its folder breaks nothing. A video id is global and
+// the entry's folder only breaks a tie; a `~` id is a filename, so it only means something in its own folder.
+fn resolve_entries(others: &Others, root: &Path, entries: &[playlists::Entry]) -> Vec<Option<PathBuf>> {
+    let mut held: HashMap<&str, Vec<(&str, &PathBuf)>> = HashMap::new();
+    for other in others.all() {
+        for (id, file) in &other.sidecar.entries {
+            held.entry(id.as_str()).or_default().push((other.name.as_str(), file));
+        }
+    }
+    entries
+        .iter()
+        .map(|entry| {
+            let home = entry.hint.components().next().map(|c| c.as_os_str().to_string_lossy().to_string());
+            let in_home = |folder: &str| home.as_deref() == Some(folder);
+            let found = held.get(entry.id.as_str()).and_then(|files| {
+                let mut live = files.iter().filter(|(_, file)| file.is_file());
+                let chosen = live.clone().find(|(folder, _)| in_home(folder));
+                if manifest::is_local(&entry.id) { chosen } else { chosen.or_else(|| live.next()) }.map(|(_, file)| (*file).clone())
+            });
+            // The last resort, for a file no sidecar lists, and never one that leaves `--dir`.
+            found.or_else(|| {
+                Some(root.join(&entry.hint)).filter(|p| playlists::safe_hint(&entry.hint) && p.is_file())
+            })
+        })
+        .collect()
 }
 
 // A copy and not a hardlink, so editing a tag in one folder leaves the other alone. Named after the
@@ -2537,6 +2567,11 @@ fn rename_shelf(
     player::forget(folder);
     std::fs::rename(folder, &to)
         .with_context(|| format!("renaming {} to {name}", folder.display()))?;
+
+    // A custom playlist names its tracks by folder, so a local id would be orphaned by the move.
+    if let Err(err) = playlists::rehome(&cfg.dir, &current, &name) {
+        let _ = tx.send(Msg::Log(format!("custom playlists: {err}")));
+    }
 
     /* The .m3u8 is named after its folder and `last_playlist` finds it that
        way. Its entries are relative, so the move itself left them valid. */
@@ -4491,6 +4526,12 @@ pub mod tests {
             [("id1".to_string(), from.join("01 - A.opus"))].into_iter(),
         )
         .unwrap();
+        // A custom playlist that names this folder, which the move must not orphan.
+        let mine = playlists::Playlist {
+            name: "Mix".into(),
+            entries: vec![playlists::Entry { id: "~01 - A.opus".into(), hint: "Chill Evenings/01 - A.opus".into() }],
+        };
+        playlists::save(&root, &mine).unwrap();
 
         let mut cfg = config(true);
         cfg.dir = root.clone();
@@ -4529,6 +4570,11 @@ pub mod tests {
         assert_eq!(after.name.as_deref(), Some("Evenings"));
         assert_eq!(after.url.as_deref(), Some("https://example.com"), "the URL went");
         assert_eq!(after.entries.len(), 1, "the entries went");
+        assert_eq!(
+            playlists::load(&root, "Mix").unwrap().entries[0].hint,
+            PathBuf::from("Evenings/01 - A.opus"),
+            "a custom playlist still names the old folder"
+        );
 
         // And the library the UI is about to draw is the renamed one.
         let shelves: Vec<Shelf> = rx
@@ -10236,6 +10282,137 @@ mod duplicate_tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(screen.contains("Creep") && !screen.contains('≈'), "{screen}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod playlist_tests {
+    use super::*;
+    use crate::playlists::Entry;
+
+    fn root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("earworm-resolve-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn folder(dir: &Path, name: &str, files: &[(&str, &str)]) {
+        let folder = dir.join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        for (_, file) in files {
+            std::fs::write(folder.join(file), "audio").unwrap();
+        }
+        let entries = files.iter().map(|(id, file)| (id.to_string(), folder.join(file)));
+        manifest::write(&folder, "u", entries).unwrap();
+    }
+
+    fn entry(id: &str, hint: &str) -> Entry {
+        Entry { id: id.into(), hint: hint.into() }
+    }
+
+    fn cfg_in(dir: &Path) -> Config {
+        let mut cfg = crate::worker::tests::config(false);
+        cfg.dir = dir.to_path_buf();
+        cfg
+    }
+
+    fn resolve(dir: &Path, entries: &[Entry]) -> Vec<Option<PathBuf>> {
+        let cfg = cfg_in(dir);
+        resolve_entries(&Others::new(&cfg, Path::new("")), dir, entries)
+    }
+
+    // The exit test for the storage decision: an edit renames the file and the entry still finds it.
+    #[test]
+    fn an_entry_still_resolves_after_its_file_and_its_folder_are_renamed() {
+        let dir = root("rename");
+        folder(&dir, "A", &[("vid1", "01 - Old.opus")]);
+        let entries = [entry("vid1", "A/01 - Old.opus")];
+        assert_eq!(resolve(&dir, &entries), [Some(dir.join("A/01 - Old.opus"))]);
+
+        // What `write_track` does: the file moves and the sidecar follows.
+        std::fs::rename(dir.join("A/01 - Old.opus"), dir.join("A/01 - New.opus")).unwrap();
+        manifest::write(&dir.join("A"), "u", [("vid1".to_string(), dir.join("A/01 - New.opus"))].into_iter()).unwrap();
+        assert_eq!(resolve(&dir, &entries), [Some(dir.join("A/01 - New.opus"))]);
+
+        // And what `rename_shelf` does: the whole folder moves.
+        std::fs::rename(dir.join("A"), dir.join("Renamed")).unwrap();
+        assert_eq!(resolve(&dir, &entries), [Some(dir.join("Renamed/01 - New.opus"))]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_video_in_two_folders_prefers_the_one_the_entry_came_from() {
+        let dir = root("two");
+        folder(&dir, "A", &[("vid", "01 - A.opus")]);
+        folder(&dir, "B", &[("vid", "01 - B.opus")]);
+        assert_eq!(resolve(&dir, &[entry("vid", "B/01 - B.opus")]), [Some(dir.join("B/01 - B.opus"))]);
+        // The home folder lost it, so the other copy answers rather than the entry going dead.
+        std::fs::remove_file(dir.join("B/01 - B.opus")).unwrap();
+        assert_eq!(resolve(&dir, &[entry("vid", "B/01 - B.opus")]), [Some(dir.join("A/01 - A.opus"))]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // Two folders can both hold a local file with one name, and it is only that folder's.
+    #[test]
+    fn a_local_id_only_means_something_in_its_own_folder() {
+        let dir = root("local");
+        folder(&dir, "A", &[("~Song.opus", "Song.opus")]);
+        folder(&dir, "B", &[("~Song.opus", "Song.opus")]);
+        assert_eq!(resolve(&dir, &[entry("~Song.opus", "B/Song.opus")]), [Some(dir.join("B/Song.opus"))]);
+        std::fs::remove_file(dir.join("B/Song.opus")).unwrap();
+        assert_eq!(resolve(&dir, &[entry("~Song.opus", "B/Song.opus")]), [None], "it borrowed A's song");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_chapter_resolves_and_a_gone_entry_is_none_not_a_guess() {
+        let dir = root("chapter");
+        folder(&dir, "A", &[("vid#02", "02 - Cut.opus")]);
+        std::fs::write(dir.join("A/unlisted.opus"), "audio").unwrap();
+        let got = resolve(
+            &dir,
+            &[entry("vid#02", "A/02 - Cut.opus"), entry("gone", "A/missing.opus"), entry("unlisted", "A/unlisted.opus")],
+        );
+        assert_eq!(got, [Some(dir.join("A/02 - Cut.opus")), None, Some(dir.join("A/unlisted.opus"))]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_playlist_store_is_not_a_folder_to_read_from() {
+        let dir = root("store");
+        folder(&dir, ".playlists", &[("vid", "x.opus")]);
+        assert_eq!(resolve(&dir, &[entry("vid", "Gone/x.opus")]), [None]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn a_hint_that_leaves_the_library_is_never_resolved() {
+        let dir = root("escape");
+        let outside = std::env::temp_dir().join(format!("earworm-outside-{}.opus", std::process::id()));
+        std::fs::write(&outside, "not music").unwrap();
+        let up = format!("../{}", outside.file_name().unwrap().to_string_lossy());
+        let got = resolve(&dir, &[entry("a", &up), entry("b", &outside.to_string_lossy()), entry("c", "")]);
+        assert_eq!(got, [None, None, None]);
+        std::fs::remove_file(&outside).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // The case `an_entry_still_resolves_after_its_file_and_its_folder_are_renamed` leaves out: a local id.
+    #[test]
+    fn a_local_entry_follows_its_folder_through_rehome() {
+        let dir = root("rehome");
+        folder(&dir, "A", &[("~Song.opus", "Song.opus")]);
+        let list = playlists::Playlist { name: "Mix".into(), entries: vec![entry("~Song.opus", "A/Song.opus")] };
+        playlists::save(&dir, &list).unwrap();
+
+        std::fs::rename(dir.join("A"), dir.join("Renamed")).unwrap();
+        let stale = playlists::load(&dir, "Mix").unwrap().entries;
+        assert_eq!(resolve(&dir, &stale), [None], "the old hint should not resolve");
+
+        assert_eq!(playlists::rehome(&dir, "A", "Renamed").unwrap(), 1);
+        let fresh = playlists::load(&dir, "Mix").unwrap().entries;
+        assert_eq!(resolve(&dir, &fresh), [Some(dir.join("Renamed/Song.opus"))]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

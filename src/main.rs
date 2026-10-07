@@ -7,6 +7,8 @@ mod icons;
 mod lookup;
 mod manifest;
 mod player;
+mod playlists;
+mod portable;
 mod tag;
 mod theme;
 mod ui;

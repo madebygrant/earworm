@@ -67,6 +67,25 @@ duplicates plan, and every later wave reads it.
 Exit: the four decisions recorded here, and the three investigations answered
 in docs/history.md.
 
+Status 2026-10-07: done. Decided:
+
+- Entries are video ids resolved through the library, with the last known
+  relative path as a hint. A `~` id is made once and survives a rename, but two
+  folders can hold the same one, so it only resolves in its own folder.
+- The store is `<dir>/.playlists/<name>.playlist`, with `#` headers. The
+  in-library `.m3u8` uses `../Folder/file`; cliamp imports that (history.md).
+- v1 has no tag edits from a custom playlist. Enter jumps to the source folder.
+- Export means "copy to a directory". USB sticks, SD cards and synced folders
+  are the same code. An iPhone or Android phone does not mount, so for those v1
+  produces a folder to move across by other means.
+- Custom playlist layout on the device is a per-export choice: a self-contained
+  folder of copies, or `../` references.
+- The investigations changed one premise: macOS does not fail on the FAT
+  characters, it writes them. The portable-name mapping is still needed, for
+  the other direction (history.md). Copying onto exFAT also leaves `._` files
+  that a data-only copy does not avoid, so export removes the one it caused
+  per file.
+
 ## 2. Shared groundwork
 
 Why here: both building a playlist and exporting one need to resolve ids to
@@ -86,6 +105,26 @@ filesystem.
   invisible" rule. Add round-trip tests.
 
 Exit: unit tests for the index, the filename mapping and a store round-trip.
+
+Status 2026-10-07: done, in `src/worker.rs` (`resolve_entries`, which reuses
+`Others`), `src/portable.rs` and `src/playlists.rs`. Nothing calls them yet, so
+the build warns about dead code until wave 3.
+
+Review findings fixed: a hint that is absolute or steps out of `--dir` is
+dropped on read and write and never resolved; a name that would not round-trip
+(edge spaces) or is too long is refused; a suffix from `unique` cannot push a
+name past 255 bytes; an unparseable `.playlist` is reported by `broken` and can
+be deleted; renaming a folder rewrites the hints of the custom playlists that
+name it (`rehome`).
+
+Still open for wave 3:
+
+- A file in a folder earworm never edited has no sidecar entry, so a `~` id for
+  it resolves only through its hint and breaks on the first rename. Adding such
+  a track has to write the sidecar entry first.
+- The `._` finding in history.md still needs measuring from a plain terminal.
+- `Others` skips every dot-prefixed folder while `library()` still lists them,
+  which also changed which folders `copy_known` may copy from.
 
 ## 3. Building custom playlists
 
