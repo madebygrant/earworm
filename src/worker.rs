@@ -1872,7 +1872,7 @@ fn normalised(text: &str) -> String {
 /* Only a leading run of digits followed by a separator: a title that opens
    with a number, `1979` or `99 Luftballons`, keeps it, because there is no
    separator after it. */
-fn strip_number(stem: &str) -> &str {
+pub(crate) fn strip_number(stem: &str) -> &str {
     let rest = stem.trim_start_matches(|c: char| c.is_ascii_digit());
     if rest.len() == stem.len() {
         return stem;
@@ -3115,8 +3115,12 @@ fn serve(
                 report(tx, custom::new(&cfg.dir, tx, &asker));
                 None
             }
-            Cmd::AddToPlaylist(picks) => {
-                report(tx, custom::add(&cfg.dir, tx, &asker, &picks));
+            Cmd::AddToPlaylist(picks, into) => {
+                report(tx, custom::add(&cfg.dir, tx, &asker, &picks, into.as_deref()));
+                None
+            }
+            Cmd::EditPlaylist { name, add, remove } => {
+                report(tx, custom::edit(&cfg.dir, tx, &name, &add, &remove));
                 None
             }
             Cmd::OpenPlaylist(name) => {

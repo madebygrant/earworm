@@ -10,6 +10,7 @@ use ratatui::widgets::{Widget as _,
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{self, App, Confirm, Player, Prompt, Shelf, Status, View};
+use crate::config::composed;
 use crate::icons::Icons;
 use crate::manifest;
 
@@ -72,9 +73,14 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     .areas(frame.area());
 
     draw_background(frame, p);
+    if app.view == View::Found {
+        app.found_cache = app.found_hits();
+    }
     draw_header(frame, app, header);
     // The pick wins: it says what the keys do, and it carries the filter.
-    if app.picking.is_some() {
+    if app.view == View::Pick {
+        draw_picker_bar(frame, app, rule);
+    } else if app.picking.is_some() {
         draw_pick_bar(frame, app, rule);
     } else if app.filtering() {
         draw_filter_bar(frame, app, rule);
@@ -326,7 +332,22 @@ fn recolour(frame: &mut Frame) {
    instead of driven, which is one row and no state. */
 fn draw_confirm(frame: &mut Frame, app: &App, what: Confirm) {
     let p = app.theme;
-    let Confirm::Quit = what;
+    if what == Confirm::Discard {
+        let (add, remove) = app.pick_changes();
+        let said = match (add.len(), remove.len()) {
+            (a, 0) => format!(" {a} marked {}", if a == 1 { "track" } else { "tracks" }),
+            (a, r) => format!(" {a} to add, {r} to take off"),
+        };
+        let lines = vec![
+            Line::from(Span::styled(said, Style::new().fg(p.text))),
+            Line::from(dim(" leaving now drops them", p)),
+            Line::default(),
+            Line::from(vec![Span::styled(" y  leave", Style::new().fg(p.warn)), dim("     esc  keep picking", p)]),
+        ];
+        let width = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 3;
+        popup(frame, "leave the picker?", lines, width, p);
+        return;
+    }
     let (done, total) = app.progress();
     let mut lines = vec![Line::from(Span::styled(
         format!(" {done} of {total} finished so far"),
@@ -516,7 +537,7 @@ fn draw_filter_bar(frame: &mut Frame, app: &App, area: Rect) {
         // Every track in the library is what a search was asked of, not the
         // tracks of whichever playlist happens to be open behind it.
         View::Found => (
-            app.found_rows().len(),
+            app.found_cache.len(),
             app.library
                 .iter()
                 .filter(|s| app.kind_shows(s))
@@ -525,7 +546,7 @@ fn draw_filter_bar(frame: &mut Frame, app: &App, area: Rect) {
         ),
         View::Tracks => (app.shown(), app.tracks.len()),
         // No filter here: the list is the playlist's own order.
-        View::Playlist => (0, 0),
+        View::Playlist | View::Pick => (0, 0),
     };
     let caret = if app.typing_filter { "\u{2588}" } else { "" };
     let word = match (app.view, app.only, app.review) {
@@ -548,7 +569,16 @@ fn draw_filter_bar(frame: &mut Frame, app: &App, area: Rect) {
     } else {
         format!(" {word}  /{}{}", app.filter, caret)
     };
-    let right = if app.typing_filter {
+    // The keys differ while the box is open, so the band says which ones are live.
+    let right = if app.view == View::Found && app.typing_filter {
+        "↑ ↓ move  ·  tab mark  ·  enter results  ·  esc back ".to_string()
+    } else if app.view == View::Found {
+        let marked = match app.found_marks.len() {
+            0 => String::new(),
+            n => format!("{n} marked  ·  "),
+        };
+        format!("{marked}{shown} of {total} tracks  ·  enter open  ·  Tab mark  ·  P add  ·  esc library ")
+    } else if app.typing_filter {
         "enter keeps  ·  esc clears ".to_string()
     } else {
         format!("{shown} of {total} shown  ·  esc clears ")
@@ -574,6 +604,20 @@ fn draw_pick_bar(frame: &mut Frame, app: &App, area: Rect) {
     );
 }
 
+fn draw_picker_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let pick = &app.pick;
+    let only = if pick.only_marked { "  ·  MARKED ONLY" } else { "" };
+    let left = format!(" ADD TO {}{only}  {}\u{2588}", pick.name, pick.query);
+    let (add, remove) = app.pick_changes();
+    let marked = if pick.existing {
+        format!("{} in list  ·  +{} −{}", pick.held.len(), add.len(), remove.len())
+    } else {
+        format!("{} marked", pick.marks.len())
+    };
+    let right = format!("{marked}  ·  {} of {} ", pick.hits.len(), pick.total);
+    draw_band(frame, area, left, right, app.theme);
+}
+
 fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     let p = app.theme;
     let mut spans = vec![Span::styled(" earworm", Style::new().fg(p.accent))];
@@ -592,16 +636,17 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         View::Library if !app.busy => "library".to_string(),
         View::Found if !app.busy => "search".to_string(),
         View::Playlist if !app.busy => "custom playlist".to_string(),
+        View::Pick if !app.busy => "pick tracks".to_string(),
         _ => app.stage.clone(),
     };
     spans.push(Span::styled(stage, Style::new().fg(p.text)));
 
-    if app.view == View::Found {
+    if app.view == View::Found && !app.filter.trim().is_empty() {
         /* How many folders the matches are spread over, which is the thing
            the flat list cannot say and the reason to look at it at all. */
-        let rows = app.found_rows();
+        let rows = &app.found_cache;
         let folders: std::collections::HashSet<usize> =
-            rows.iter().map(|(shelf, _)| *shelf).collect();
+            rows.iter().map(|h| h.shelf).collect();
         let tracks = if rows.len() == 1 { "track" } else { "tracks" };
         let plural = if folders.len() == 1 { "playlist" } else { "playlists" };
         spans.push(dim("  ·  ", p));
@@ -701,6 +746,133 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
         View::Library => draw_library(frame, app, area),
         View::Found => draw_found(frame, app, area),
         View::Playlist => draw_playlist(frame, app, area),
+        View::Pick => draw_picker(frame, app, area),
+    }
+}
+
+// Fits `text` in `width` columns with the first match in view. A plain truncation can cut the match off
+// the end of a long title, so the text is scrolled to put it in the first part of the row.
+fn fit(text: &str, at: &[usize], width: usize) -> (String, Vec<usize>) {
+    if width == 0 {
+        return (String::new(), Vec::new());
+    }
+    let plain = || (truncate(text, width), at.to_vec());
+    let chars: Vec<char> = text.chars().collect();
+    let Some(&first) = at.first().filter(|f| **f < chars.len()) else {
+        return plain();
+    };
+    let w = |c: &char| UnicodeWidthChar::width(*c).unwrap_or(0);
+    if cols(text) <= width || chars[..=first].iter().map(w).sum::<usize>() < width {
+        return plain();
+    }
+    // About a third of the row precedes the match, so there is context on both sides.
+    let (mut start, mut before) = (first, 0);
+    while start > 0 && before + w(&chars[start - 1]) <= width / 3 {
+        start -= 1;
+        before += w(&chars[start]);
+    }
+    let rest: String = chars[start..].iter().collect();
+    let shown = format!("…{}", truncate(&rest, width.saturating_sub(1)));
+    let moved = at.iter().filter(|p| **p >= start).map(|p| p - start + 1).collect();
+    (shown, moved)
+}
+
+// The text with the matched characters bold and underlined, so the match does not rest on colour.
+fn lit_spans(text: &str, at: &[usize], base: Style) -> Vec<Span<'static>> {
+    let hot = base.add_modifier(Modifier::BOLD | Modifier::UNDERLINED);
+    let mut spans = Vec::new();
+    let (mut run, mut lit) = (String::new(), false);
+    for (i, c) in text.chars().enumerate() {
+        let now = at.contains(&i);
+        if now != lit && !run.is_empty() {
+            spans.push(Span::styled(std::mem::take(&mut run), if lit { hot } else { base }));
+        }
+        lit = now;
+        run.push(c);
+    }
+    if !run.is_empty() {
+        spans.push(Span::styled(run, if lit { hot } else { base }));
+    }
+    spans
+}
+
+// Every addable track, best match first. Only the visible rows are built: the library can hold thousands.
+// The match is underlined as well as bold so it does not rest on colour, and a mark is a glyph.
+fn draw_picker(frame: &mut Frame, app: &mut App, area: Rect) {
+    let p = app.theme;
+    let len = app.pick.hits.len();
+    if len == 0 {
+        let esc = if app.pick.existing { "esc cancels" } else { "esc keeps the list empty" };
+        let said = match (app.pick.total, app.pick.query.is_empty()) {
+            _ if app.pick.only_marked && app.pick.marks.len() == 0 => " nothing is marked   F2 shows every track".to_string(),
+            _ if app.pick.only_marked => format!(" no marked track matches {}   F2 shows every track", app.pick.query),
+            (0, _) => format!(" no tracks in the library yet   {esc}"),
+            _ => format!(" no track matches {}   {esc}", app.pick.query),
+        };
+        frame.render_widget(Paragraph::new(Line::from(dim(said, p))), area);
+        return;
+    }
+    let width = area.width as usize;
+    let height = area.height as usize;
+    app.viewport = height;
+    app.pick.scroll = app::scroll_to(app.pick.scroll, app.pick.cursor, len, height);
+    let from = app.pick.scroll.min(len.saturating_sub(1));
+    let window = &app.pick.hits[from..(from + height).min(len)];
+
+    let folder_w = window
+        .iter()
+        .map(|h| cols(&app.library[h.shelf].name))
+        .max()
+        .unwrap_or(0)
+        .min(width / 3);
+    // Cursor, mark, a gap before the folder and a column for the scrollbar.
+    let label_w = width.saturating_sub(3 + folder_w + 2).max(8);
+
+    let lines: Vec<Line> = window
+        .iter()
+        .enumerate()
+        .map(|(i, hit)| {
+            let shelf = &app.library[hit.shelf];
+            let (folder, file) = (&shelf.path, &shelf.files[hit.file].0);
+            let held = app.pick.held.has(folder, file);
+            let marked = app.pick.marks.has(folder, file);
+            let selected = from + i == app.pick.cursor;
+            let base = if marked { row_style(selected, p).add_modifier(Modifier::BOLD) } else { row_style(selected, p) };
+            let (shown, label_at) = fit(&hit.label, &hit.at, label_w);
+            let mut spans = vec![
+                Span::styled(if selected { "▌" } else { " " }, Style::new().fg(p.cursor)),
+                // `•` stays on the list, `✓` is being added and `−` is being taken off, so they differ by shape.
+                Span::styled(
+                    match (held, marked) {
+                        (true, true) => "• ",
+                        (true, false) => "− ",
+                        (false, true) => "✓ ",
+                        _ => "  ",
+                    },
+                    Style::new().fg(p.accent),
+                ),
+            ];
+            spans.extend(lit_spans(&shown, &label_at, base));
+            let pad = label_w.saturating_sub(cols(&shown));
+            // Composed, because `folder_at` counts the composed name's characters.
+            let folder = truncate(&composed(&shelf.name), folder_w);
+            spans.push(Span::raw(" ".repeat(pad + 1)));
+            spans.extend(lit_spans(&folder, &hit.folder_at, Style::new().fg(p.muted)));
+            Line::from(spans)
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), area);
+
+    if len > height {
+        let mut bar_state = ScrollbarState::new(len).position(app.pick.cursor);
+        frame.render_stateful_widget(
+            Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                .begin_symbol(None)
+                .end_symbol(None)
+                .thumb_style(Style::new().fg(p.rule)),
+            area,
+            &mut bar_state,
+        );
     }
 }
 
@@ -709,7 +881,7 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
 fn draw_playlist(frame: &mut Frame, app: &mut App, area: Rect) {
     let p = app.theme;
     if app.custom.rows.is_empty() {
-        let said = " nothing here yet   t finds tracks in any playlist, P adds one   esc goes back";
+        let said = " nothing here yet   a picks tracks, P adds one from a search   esc goes back";
         frame.render_widget(Paragraph::new(Line::from(dim(said, p))), area);
         return;
     }
@@ -748,9 +920,9 @@ fn draw_playlist(frame: &mut Frame, app: &mut App, area: Rect) {
    whole library at once, which is what a fifty-folder library needs. */
 fn draw_found(frame: &mut Frame, app: &mut App, area: Rect) {
     let p = app.theme;
-    let rows = app.found_rows();
-    if rows.is_empty() {
-        let said = match app.filter.is_empty() {
+    let hits = std::mem::take(&mut app.found_cache);
+    if hits.is_empty() {
+        let said = match app.filter.trim().is_empty() {
             true => " type to search every folder   esc goes back".to_string(),
             false => format!(" no track matches {}   esc goes back", app.filter),
         };
@@ -758,58 +930,55 @@ fn draw_found(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     }
     let width = area.width as usize;
-    app.viewport = area.height as usize;
+    let height = area.height as usize;
+    app.viewport = height;
 
     /* One folder column for the list, so the titles beside it line up: the
        folder is the answer the screen exists to give, and a ragged column
        makes it the thing that is hardest to read. */
-    let longest = rows
-        .iter()
-        .map(|(shelf, _)| cols(&app.library[*shelf].name))
-        .max()
-        .unwrap_or(0);
-    let name_width = longest.min(width.saturating_sub(20).max(10));
+    let longest = hits.iter().map(|h| cols(&app.library[h.shelf].name)).max().unwrap_or(0);
+    // A narrow terminal gives the title more of the row than the folder.
+    let name_width = longest.min(width.saturating_sub(20).max(10)).min((width * 2 / 5).max(10));
 
-    let at = rows.iter().position(|row| Some(*row) == app.found);
-    let items: Vec<ListItem> = rows
+    let at = hits.iter().position(|h| Some((h.shelf, h.file)) == app.found);
+    app.found_scroll = app::scroll_to(app.found_scroll, at.unwrap_or(0), hits.len(), height);
+    // Only the visible rows are built: a loose query can match the whole library.
+    let from = app.found_scroll.min(hits.len() - 1);
+    let items: Vec<ListItem> = hits[from..(from + height).min(hits.len())]
         .iter()
-        .map(|row| {
-            let (shelf, file) = *row;
-            let shelf = &app.library[shelf];
-            let (name, here) = &shelf.files[file];
-            let folder = truncate(&shelf.name, name_width);
+        .map(|hit| {
+            let shelf = &app.library[hit.shelf];
+            let here = shelf.files[hit.file].1;
+            // Composed, because `folder_at` counts the composed name's characters.
+            let folder = truncate(&composed(&shelf.name), name_width);
             let pad = name_width.saturating_sub(cols(&folder));
-            // The number and extension are the filename's, not the track's.
-            let title = name.rsplit_once('.').map_or(name.as_str(), |(stem, _)| stem);
-            let selected = app.found == Some(*row);
-            ListItem::new(Line::from(vec![
+            let selected = app.found == Some((hit.shelf, hit.file));
+            // The same label the picker shows: no extension, no playlist number, the match underlined.
+            let (title, title_at) = fit(&hit.label, &hit.at, width.saturating_sub(name_width + 5));
+            let mut spans = vec![
                 Span::styled(if selected { "▌" } else { " " }, Style::new().fg(p.cursor)),
                 // Same mark the library preview uses, for the same reason.
-                Span::styled(
-                    if *here { "  " } else { " !" },
-                    Style::new().fg(if *here { p.muted } else { p.warn }),
-                ),
-                dim(format!("{folder}{:pad$}", ""), p),
-                Span::styled(
-                    format!("  {}", truncate(title, width.saturating_sub(name_width + 5))),
-                    row_style(selected, p),
-                ),
-            ]))
+                if app.found_marks.has(&shelf.path, &shelf.files[hit.file].0) {
+                    Span::styled("✓ ", Style::new().fg(p.accent))
+                } else {
+                    Span::styled(
+                        if here { "  " } else { " !" },
+                        Style::new().fg(if here { p.muted } else { p.warn }),
+                    )
+                },
+            ];
+            spans.extend(lit_spans(&folder, &hit.folder_at, Style::new().fg(p.muted)));
+            spans.push(Span::raw(" ".repeat(pad + 2)));
+            spans.extend(lit_spans(&title, &title_at, row_style(selected, p)));
+            ListItem::new(Line::from(spans))
         })
         .collect();
+    frame.render_widget(List::new(items), area);
+    let rows = hits.len();
+    app.found_cache = hits;
 
-    app.found_scroll = app::scroll_to(
-        app.found_scroll,
-        at.unwrap_or(0),
-        rows.len(),
-        area.height as usize,
-    );
-    let mut state = ListState::default().with_offset(app.found_scroll);
-    state.select(at);
-    frame.render_stateful_widget(List::new(items), area, &mut state);
-
-    if rows.len() > area.height as usize {
-        let mut bar_state = ScrollbarState::new(rows.len()).position(at.unwrap_or(0));
+    if rows > height {
+        let mut bar_state = ScrollbarState::new(rows).position(at.unwrap_or(0));
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(None)
@@ -893,8 +1062,15 @@ fn draw_library(frame: &mut Frame, app: &mut App, area: Rect) {
             (Some(kind), false) => format!("no {}s match {}", kind.label(), app.filter),
             (None, _) => format!("nothing matches {}", app.filter),
         };
+        // `t` is fuzzy where this filter is not, so it can find what no folder name or filename here spells.
+        let tracks = app.found_hits().len();
+        let hint = if tracks > 0 && !app.filter.trim().is_empty() {
+            format!("   t finds {tracks} {}", if tracks == 1 { "track" } else { "tracks" })
+        } else {
+            String::new()
+        };
         frame.render_widget(
-            Paragraph::new(Line::from(dim(format!(" {said}   esc clears it"), p))),
+            Paragraph::new(Line::from(dim(format!(" {said}{hint}   esc clears it"), p))),
             area,
         );
         return;
@@ -1582,12 +1758,34 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             Style::new().fg(p.cursor),
         ));
     }
-    if app.view == View::Found {
+    if app.view == View::Found && app.typing_filter {
+        hints.push(("   enter results".to_string(), Style::new().fg(p.accent)));
+        hints.push(("   ↑ ↓ move".to_string(), Style::new().fg(p.muted)));
+        hints.push(("   esc back".to_string(), Style::new().fg(p.muted)));
+    } else if app.view == View::Found {
         hints.push(("   enter open".to_string(), Style::new().fg(p.accent)));
-        hints.push(("   / search".to_string(), Style::new().fg(p.muted)));
+        hints.push(("   tab mark".to_string(), Style::new().fg(p.muted)));
+        hints.push(("   P add to playlist".to_string(), Style::new().fg(p.muted)));
+        hints.push(("   / edit".to_string(), Style::new().fg(p.muted)));
         hints.push(("   esc library".to_string(), Style::new().fg(p.muted)));
+    } else if app.view == View::Pick {
+        let (add, remove) = app.pick_changes();
+        let enter = match (app.pick.existing, add.len(), remove.len()) {
+            (false, 0, _) => "   enter add".to_string(),
+            (false, n, _) => format!("   enter add {n}"),
+            (true, 0, 0) => "   enter no changes".to_string(),
+            (true, a, r) => format!("   enter +{a} −{r}"),
+        };
+        hints.push((enter, Style::new().fg(p.accent)));
+        hints.push(("   tab mark".to_string(), Style::new().fg(p.muted)));
+        hints.push(("   ^a all".to_string(), Style::new().fg(p.muted)));
+        let esc = if app.pick.existing { "   esc cancel" } else { "   esc keep empty" };
+        hints.push((esc.to_string(), Style::new().fg(p.muted)));
+        hints.push(("   F2 marked".to_string(), Style::new().fg(p.muted)));
+        hints.push(("   F1 keys".to_string(), Style::new().fg(p.muted)));
     } else if app.view == View::Playlist {
         hints.push(("   enter go to source".to_string(), Style::new().fg(p.accent)));
+        hints.push(("   a add tracks".to_string(), Style::new().fg(p.muted)));
         hints.push(("   J K move".to_string(), Style::new().fg(p.muted)));
         hints.push(("   x remove".to_string(), Style::new().fg(p.muted)));
         hints.push(("   esc library".to_string(), Style::new().fg(p.muted)));
@@ -1637,7 +1835,10 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         Player::Stopped => hints.push(("   ♪ cliamp off".to_string(), Style::new().fg(p.muted))),
         Player::Missing => {}
     }
-    hints.push(("   h keys".to_string(), Style::new().fg(p.muted)));
+    // `h` types a letter in the picker, which has its own F1 hint, and in the search box.
+    if app.view != View::Pick && !(app.view == View::Found && app.typing_filter) {
+        hints.push(("   h keys".to_string(), Style::new().fg(p.muted)));
+    }
 
     /* Room for the widest two statuses plus their counts, or the tally goes
        and the hint that displaced it is one `h` away anyway. */
@@ -1742,6 +1943,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
     if app.view == View::Playlist {
         rows.extend([
             ("open", "enter", "go to this track's own folder"),
+            ("add", "a", "pick more tracks from the library"),
             ("edit", "J K", "move this track down, up"),
             ("", "x", "take it off this list, never off disk"),
         ]);
@@ -1749,6 +1951,19 @@ fn draw_help(frame: &mut Frame, app: &App) {
             rows.push(("play", "p", "hand this list to cliamp"));
         }
         rows.extend([("view", "l", "yt-dlp output"), ("back", "Esc", "the library"), ("quit", "q  ^c", "")]);
+    } else if app.view == View::Pick {
+        rows = vec![
+            ("move", "↑ ↓  ^p ^n", ""),
+            ("", "PgDn PgUp", "by a screenful"),
+            ("find", "type", "fuzzy match on the track name"),
+            ("", "^u  ^w", "clear the query, last word"),
+            ("mark", "Tab", "or unmark the track under the cursor"),
+            ("", "^a", "everything showing, or none of it"),
+            ("view", "F2", "only the marked tracks, to review them"),
+            ("add", "Enter", "the marked tracks, or this one; an open list drops what you unmarked"),
+            ("back", "Esc", "leave without adding"),
+            ("quit", "^c", ""),
+        ];
     } else if app.view == View::Found {
         rows.extend([
             ("add", "P", "this track to a custom playlist"),
@@ -1764,7 +1979,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("", "O", "this folder in the file manager"),
             ("name", "e", "rename this playlist"),
             ("", "D", "remove this playlist, or delete a custom list"),
-            ("new", "N", "a custom playlist from tracks you pick"),
+            ("new", "N", "a custom playlist, picking its tracks"),
             ("", "E", "copy this to a stick, card or folder"),
             ("find", "/", "filter by name or track"),
             ("", "t", "every matching track, across the library"),
@@ -3262,7 +3477,7 @@ mod tests {
         app.filter = "a - b".into();
         let shown = band(&mut app);
         assert!(shown.contains("SEARCH ALBUMS  /a - b"), "{shown:?}");
-        assert!(shown.contains("12 of 12 shown"), "{shown:?}");
+        assert!(shown.contains("12 of 12 tracks"), "{shown:?}");
     }
 
     /* A kind with no query has no text for "nothing matches" to quote, so
@@ -3452,9 +3667,12 @@ mod tests {
         let rows = screen(90, "track 1");
         let all = rows.join("\n");
         assert!(rows[0].contains("search"), "{:?}", rows[0]);
-        /* The count the flat list cannot give itself: 1, 10 through 19, and
-           the folder they are all in. */
-        assert!(rows[0].contains("11 tracks in 1 playlist"), "{:?}", rows[0]);
+        /* The count the flat list cannot give itself. Fuzzy, so `track 1` also takes
+           tracks that merely hold a 1 somewhere; the closest comes first. */
+        let found: usize = rows[0].split("search  ·  ").nth(1).and_then(|t| t.split(' ').next()).and_then(|n| n.parse().ok()).unwrap_or(0);
+        assert!(found >= 11, "fuzzy matches at least the 11 substring ones: {:?}", rows[0]);
+        assert!(rows[0].contains("in 1 playlist"), "{:?}", rows[0]);
+        assert!(rows[2].contains("Artist - Track 1"), "the best match is not first: {:?}", rows[2]);
         assert!(rows[1].contains("SEARCH"), "{:?}", rows[1]);
         assert!(all.contains("Focus"), "no folder column: {all}");
         assert!(all.contains("Artist - Track 1"), "{all}");
@@ -3493,8 +3711,281 @@ mod tests {
         terminal.backend().buffer().clone()
     }
 
+    fn picker_buffer(width: u16, query: &str, mark_first: bool) -> ratatui::buffer::Buffer {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        let shelf = Shelf {
+            path: std::path::PathBuf::from("/music/Kraftwerk"),
+            name: "Kraftwerk".into(),
+            files: vec![("01 - Autobahn.opus".into(), true), ("02 - Radioactivity.opus".into(), true)],
+            ..Shelf::default()
+        };
+        app.apply(Msg::Library { shelves: vec![shelf], show: true });
+        app.apply(Msg::PickTracks("Mix".into()));
+        for c in query.chars() {
+            app.pick_type(c);
+        }
+        if mark_first {
+            app.pick_mark();
+        }
+        let mut terminal = Terminal::new(TestBackend::new(width, 10)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        terminal.backend().buffer().clone()
+    }
+
+    #[test]
+    fn the_picker_band_counts_marks_and_matches_and_a_mark_is_a_glyph() {
+        let buffer = picker_buffer(100, "", true);
+        let band = row_text(&buffer, 1);
+        assert!(band.contains("ADD TO Mix"), "{band}");
+        assert!(band.contains("1 marked") && band.contains("2 of 2"), "{band}");
+        let first = row_text(&buffer, 2);
+        assert!(first.contains("✓") && first.contains("Autobahn") && first.contains("Kraftwerk"), "{first}");
+        assert!(!row_text(&buffer, 3).contains("✓"));
+    }
+
+    #[test]
+    fn matched_characters_are_underlined_and_the_rest_are_not() {
+        let buffer = picker_buffer(100, "bahn", false);
+        let row = row_text(&buffer, 2);
+        let at = col_of(&row, "bahn").expect("the matched track is listed");
+        for x in at..at + 4 {
+            assert!(buffer[(x as u16, 2)].modifier.contains(ratatui::style::Modifier::UNDERLINED), "column {x}");
+        }
+        let plain = col_of(&row, "Auto").unwrap();
+        assert!(!buffer[(plain as u16, 2)].modifier.contains(ratatui::style::Modifier::UNDERLINED));
+    }
+
+    #[test]
+    fn the_picker_bar_does_not_offer_h_for_keys_and_says_esc_cancels_on_an_open_list() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        app.apply(Msg::PickTracks("Mix".into()));
+        let bar = |app: &mut App| {
+            let mut t = Terminal::new(TestBackend::new(100, 8)).unwrap();
+            t.draw(|f| super::draw(f, app)).unwrap();
+            row_text(t.backend().buffer(), 7)
+        };
+        let new = bar(&mut app);
+        assert!(new.contains("F1 keys") && !new.contains("h keys") && new.contains("esc keep empty"), "{new}");
+        app.pick.existing = true;
+        let open = bar(&mut app);
+        assert!(open.contains("esc cancel") && !open.contains("keep empty"), "{open}");
+    }
+
+    #[test]
+    fn a_match_late_in_a_long_title_is_scrolled_into_view() {
+        let title = "A very long title that runs well past the edge of the row and ends with Needle";
+        let at: Vec<usize> = (title.len() - 6..title.len()).collect();
+        let (shown, moved) = super::fit(title, &at, 30);
+        assert!(super::cols(&shown) <= 30, "{shown:?}");
+        let lit: String = shown.chars().enumerate().filter(|(i, _)| moved.contains(i)).map(|(_, c)| c).collect();
+        assert_eq!(lit, "Needle", "{shown:?}");
+        // No room at all draws nothing rather than a lone ellipsis.
+        assert_eq!(super::fit(title, &at, 0).0, "");
+        // A match that already shows is left where it is.
+        let (plain, same) = super::fit(title, &[0, 1], 30);
+        assert!(plain.starts_with("A very") && same == [0, 1]);
+    }
+
+    #[test]
+    fn enter_says_what_it_will_do() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        let shelf = Shelf {
+            path: std::path::PathBuf::from("/music/K"),
+            name: "K".into(),
+            files: vec![("01 - A.opus".into(), true), ("02 - B.opus".into(), true)],
+            ..Shelf::default()
+        };
+        app.apply(Msg::Library { shelves: vec![shelf], show: true });
+        app.apply(Msg::PickTracks("Mix".into()));
+        let bar = |app: &mut App| {
+            let mut t = Terminal::new(TestBackend::new(100, 8)).unwrap();
+            t.draw(|f| super::draw(f, app)).unwrap();
+            row_text(t.backend().buffer(), 7)
+        };
+        assert!(bar(&mut app).contains("enter add 1"), "the row under the cursor");
+        app.pick_mark_all();
+        assert!(bar(&mut app).contains("enter add 2"));
+    }
+
+    #[test]
+    fn the_search_screen_underlines_what_matched() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        let shelf = Shelf {
+            path: std::path::PathBuf::from("/music/Kraftwerk"),
+            name: "Kraftwerk".into(),
+            files: vec![("01 - Autobahn.opus".into(), true)],
+            ..Shelf::default()
+        };
+        app.apply(Msg::Library { shelves: vec![shelf], show: true });
+        app.filter = "bahn".into();
+        app.find_tracks();
+        let mut terminal = Terminal::new(TestBackend::new(90, 8)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let row = row_text(&buffer, 2);
+        let at = col_of(&row, "bahn").expect("the track is listed");
+        for x in at..at + 4 {
+            assert!(buffer[(x as u16, 2)].modifier.contains(ratatui::style::Modifier::UNDERLINED), "column {x}");
+        }
+        assert!(!row.contains(".opus") && !row.contains("01 -"), "{row}");
+    }
+
+    #[test]
+    fn a_decomposed_folder_name_is_underlined_where_it_matched() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        // The accent is a combining mark here, which the matcher sees composed.
+        let shelf = Shelf {
+            path: std::path::PathBuf::from("/music/b"),
+            name: "Beyonce\u{301} Hits".into(),
+            files: vec![("01 - Halo.opus".into(), true)],
+            ..Shelf::default()
+        };
+        app.apply(Msg::Library { shelves: vec![shelf], show: true });
+        app.filter = "hits".into();
+        app.find_tracks();
+        let mut terminal = Terminal::new(TestBackend::new(90, 8)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let at = col_of(&row_text(&buffer, 2), "Hits").expect("the folder is listed");
+        let underlined = |x: usize| buffer[(x as u16, 2)].modifier.contains(ratatui::style::Modifier::UNDERLINED);
+        assert!((at..at + 4).all(underlined), "Hits is not underlined");
+        assert!(!underlined(at - 2), "the underline is shifted onto the letters before it");
+        assert_eq!(app.found_cache.len(), app.found_hits().len(), "the frame's answer is the one the keys use");
+    }
+
+    #[test]
+    fn a_long_search_draws_only_the_window_and_follows_the_cursor_to_the_end() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        let files: Vec<(String, bool)> = (1..=500).map(|n| (format!("{n:03} - Song {n:03}.opus"), true)).collect();
+        let shelf = Shelf { path: std::path::PathBuf::from("/music/big"), name: "Big".into(), files, ..Shelf::default() };
+        app.apply(Msg::Library { shelves: vec![shelf], show: true });
+        app.filter = "song".into();
+        app.find_tracks();
+        app.found_jump(true);
+        let mut terminal = Terminal::new(TestBackend::new(90, 10)).unwrap();
+        terminal.draw(|f| super::draw(f, &mut app)).unwrap();
+        let all: String = (0..10).map(|y| row_text(terminal.backend().buffer(), y)).collect::<Vec<_>>().join("\n");
+        assert!(all.contains("Song 500"), "the cursor row is off screen: {all}");
+        assert!(!all.contains("Song 001"));
+    }
+
+    #[test]
+    fn the_search_hints_name_the_keys_that_work_in_the_box_and_out_of_it() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        let shelf = Shelf {
+            path: std::path::PathBuf::from("/music/K"),
+            name: "K".into(),
+            files: vec![("01 - Autobahn.opus".into(), true)],
+            ..Shelf::default()
+        };
+        app.apply(Msg::Library { shelves: vec![shelf], show: true });
+        app.filter = "auto".into();
+        app.find_tracks();
+        let screen = |app: &mut App| {
+            let mut t = Terminal::new(TestBackend::new(110, 8)).unwrap();
+            t.draw(|f| super::draw(f, app)).unwrap();
+            (row_text(t.backend().buffer(), 1), row_text(t.backend().buffer(), 7))
+        };
+        app.typing_filter = true;
+        let (band, bar) = screen(&mut app);
+        assert!(band.contains("enter results") && band.contains("esc back"), "{band}");
+        assert!(bar.contains("enter results") && !bar.contains("h keys") && !bar.contains("enter open"), "{bar}");
+        app.typing_filter = false;
+        let (band, bar) = screen(&mut app);
+        assert!(band.contains("enter open") && band.contains("P add") && !band.contains("esc clears"), "{band}");
+        assert!(bar.contains("enter open") && bar.contains("P add to playlist") && bar.contains("h keys"), "{bar}");
+    }
+
+    #[test]
+    fn the_search_shows_marks_and_hides_its_count_until_there_is_a_query() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        let shelf = Shelf {
+            path: std::path::PathBuf::from("/music/K"),
+            name: "K".into(),
+            files: vec![("01 - Autobahn.opus".into(), true)],
+            ..Shelf::default()
+        };
+        app.apply(Msg::Library { shelves: vec![shelf], show: true });
+        app.find_tracks();
+        let screen = |app: &mut App| {
+            let mut t = Terminal::new(TestBackend::new(110, 8)).unwrap();
+            t.draw(|f| super::draw(f, app)).unwrap();
+            (row_text(t.backend().buffer(), 0), row_text(t.backend().buffer(), 1), row_text(t.backend().buffer(), 2))
+        };
+        let (header, _, _) = screen(&mut app);
+        assert!(!header.contains("0 tracks"), "{header}");
+        app.filter = "auto".into();
+        app.typing_filter = false;
+        app.snap();
+        app.found_mark();
+        let (header, band, row) = screen(&mut app);
+        assert!(header.contains("1 track in 1 playlist"), "{header}");
+        assert!(band.contains("1 marked") && band.contains("1 of 1 tracks"), "{band}");
+        assert!(row.contains("✓"), "{row}");
+    }
+
+    #[test]
+    fn a_library_with_no_matching_folder_points_at_t_when_it_would_find_tracks() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        let shelf = Shelf {
+            path: std::path::PathBuf::from("/music/K"),
+            name: "K".into(),
+            files: vec![("01 - Autobahn.opus".into(), true)],
+            ..Shelf::default()
+        };
+        app.apply(Msg::Library { shelves: vec![shelf], show: true });
+        app.filter = "autbn".into();
+        let mut t = Terminal::new(TestBackend::new(100, 8)).unwrap();
+        t.draw(|f| super::draw(f, &mut app)).unwrap();
+        let all: String = (0..8).map(|y| row_text(t.backend().buffer(), y)).collect::<Vec<_>>().join("\n");
+        assert!(all.contains("nothing matches autbn") && all.contains("t finds 1 track"), "{all}");
+    }
+
+    #[test]
+    fn a_narrow_terminal_gives_the_title_more_of_the_row_than_the_folder() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        let shelf = Shelf {
+            path: std::path::PathBuf::from("/music/x"),
+            name: "A folder with a very long name indeed".into(),
+            files: vec![("01 - Radioactivity.opus".into(), true)],
+            ..Shelf::default()
+        };
+        app.apply(Msg::Library { shelves: vec![shelf], show: true });
+        app.filter = "radio".into();
+        app.find_tracks();
+        let mut t = Terminal::new(TestBackend::new(40, 8)).unwrap();
+        t.draw(|f| super::draw(f, &mut app)).unwrap();
+        assert!(row_text(t.backend().buffer(), 2).contains("Radioactivity"));
+    }
+
+    #[test]
+    fn a_narrow_terminal_still_draws_the_picker() {
+        let buffer = picker_buffer(24, "auto", false);
+        assert!(row_text(&buffer, 2).contains("Auto"));
+    }
+
     fn row_text(buffer: &ratatui::buffer::Buffer, y: u16) -> String {
-        (0..120).map(|x| buffer[(x, y)].symbol().to_string()).collect()
+        (0..buffer.area.width).map(|x| buffer[(x, y)].symbol().to_string()).collect()
     }
 
     /* The column, not the byte: the selected row opens with `▌`, which is

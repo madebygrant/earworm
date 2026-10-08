@@ -59,7 +59,7 @@ download from a music library:
   folder earworm did not download. `icons = "nerd"` draws larger Nerd Font glyphs, and `icons = "text"` goes
   back to words.
 - **Custom playlists.** Build a list from tracks in any of your folders with
-  `N` and `P`, reorder it, and play it in cliamp. It follows a track when you
+  `N` (which opens a fuzzy track picker) and `P`, reorder it, and play it in cliamp. It follows a track when you
   edit it, and deleting a list never touches audio.
 - **Export to a device.** `E` copies a folder or a custom playlist to a stick,
   card or synced folder, with names every filesystem accepts and a playlist

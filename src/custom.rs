@@ -127,7 +127,7 @@ pub fn new(dir: &Path, tx: &Sender<Msg>, asker: &Asker) -> Result<()> {
     playlists::save(dir, &Playlist { name: name.clone(), entries: Vec::new() })?;
     refresh_library(dir, tx);
     let _ = tx.send(Msg::Select(playlists::path_of(dir, &name)));
-    let _ = tx.send(Msg::Flash(format!("made {name}  ·  t finds tracks and P adds them")));
+    let _ = tx.send(Msg::PickTracks(name));
     Ok(())
 }
 
@@ -157,12 +157,16 @@ fn id_for(folder: &Path, file: &str) -> Result<(String, bool)> {
     Ok((id, true))
 }
 
-pub fn add(dir: &Path, tx: &Sender<Msg>, asker: &Asker, picks: &[(std::path::PathBuf, String)]) -> Result<()> {
+pub fn add(dir: &Path, tx: &Sender<Msg>, asker: &Asker, picks: &[(std::path::PathBuf, String)], into: Option<&str>) -> Result<()> {
     if picks.is_empty() {
         return Ok(());
     }
     say_broken(dir, tx);
     let lists = playlists::list(dir);
+    if let Some(name) = into {
+        let list = load(dir, name)?;
+        return append(dir, tx, list, picks, true, 0);
+    }
     let mut options: Vec<String> = lists.iter().map(|l| format!("{}  ({} tracks)", l.name, l.entries.len())).collect();
     options.push("a new playlist".into());
     let n = picks.len();
@@ -170,7 +174,7 @@ pub fn add(dir: &Path, tx: &Sender<Msg>, asker: &Asker, picks: &[(std::path::Pat
     let Some(choice) = asker.choose(&header, options) else {
         return Ok(());
     };
-    let mut list = if let Some(held) = lists.get(choice) {
+    let list = if let Some(held) = lists.get(choice) {
         held.clone()
     } else {
         let Some(name) = asker.input("Playlist name", "") else {
@@ -182,7 +186,10 @@ pub fn add(dir: &Path, tx: &Sender<Msg>, asker: &Asker, picks: &[(std::path::Pat
         }
         playlists::load(dir, &name).unwrap_or(Playlist { name, entries: Vec::new() })
     };
+    append(dir, tx, list, picks, false, 0)
+}
 
+fn append(dir: &Path, tx: &Sender<Msg>, mut list: Playlist, picks: &[(std::path::PathBuf, String)], open: bool, removed: usize) -> Result<()> {
     let (mut added, mut already, mut adopted) = (0, 0, Vec::new());
     for (folder, file) in picks {
         // Only a folder directly under `--dir`: the hint names it by its place there.
@@ -224,10 +231,43 @@ pub fn add(dir: &Path, tx: &Sender<Msg>, asker: &Asker, picks: &[(std::path::Pat
         [one] => format!("  ·  {one} now keeps a .earworm"),
         many => format!("  ·  {} folders now keep a .earworm", many.len()),
     };
-    refresh_library(dir, tx);
+    if added > 0 {
+        let _ = tx.send(Msg::FoundUnmark);
+    }
+    if open {
+        show(dir, tx, &refreshed(dir, list.clone()), true, None);
+    } else {
+        refresh_library(dir, tx);
+    }
     let kept = if already > 0 { format!("  ·  {already} already there") } else { String::new() };
-    let _ = tx.send(Msg::Flash(format!("added {added} to {}{kept}{said}", list.name)));
+    let took = match (added, removed) {
+        (_, 0) => format!("added {added} to {}", list.name),
+        (0, _) => format!("removed {removed} from {}", list.name),
+        _ => format!("added {added} to and removed {removed} from {}", list.name),
+    };
+    let _ = tx.send(Msg::Flash(format!("{took}{kept}{said}")));
     Ok(())
+}
+
+// The picker's answer for an open list: tracks to add and tracks to take off, both by folder and filename.
+// A removal drops the entry only, never the audio.
+pub fn edit(dir: &Path, tx: &Sender<Msg>, name: &str, add: &[(std::path::PathBuf, String)], remove: &[(std::path::PathBuf, String)]) -> Result<()> {
+    say_broken(dir, tx);
+    let mut list = load(dir, name)?;
+    let want: std::collections::HashSet<(std::path::PathBuf, String)> =
+        remove.iter().map(|(f, n)| (f.clone(), composed(n))).collect();
+    let files = worker::resolve_entries(&Others::everything(dir), dir, &list.entries);
+    let before = list.entries.len();
+    let mut files = files.into_iter();
+    list.entries.retain(|_| {
+        let gone = files.next().flatten().is_some_and(|p| match (p.parent(), p.file_name()) {
+            (Some(folder), Some(file)) => want.contains(&(folder.to_path_buf(), composed(&file.to_string_lossy()))),
+            _ => false,
+        });
+        !gone
+    });
+    let removed = before - list.entries.len();
+    append(dir, tx, list, add, true, removed)
 }
 
 pub fn move_entry(dir: &Path, tx: &Sender<Msg>, name: &str, id: &str, up: bool) -> Result<()> {
@@ -364,6 +404,48 @@ mod tests {
         vec![Reply::Choice(0), Reply::Text(name.into())]
     }
 
+    #[test]
+    fn an_edit_takes_unmarked_tracks_off_the_list_and_never_off_disk() {
+        let dir = root("edit");
+        let a = folder(&dir, "A", &[("a1", "01 - One.opus")]);
+        let b = folder(&dir, "B", &[("b1", "01 - Two.opus"), ("b2", "02 - Three.opus")]);
+        playlists::save(&dir, &Playlist { name: "Mix".into(), entries: Vec::new() }).unwrap();
+        let first = vec![(a.clone(), "01 - One.opus".to_string()), (b.clone(), "01 - Two.opus".to_string())];
+        let (result, _rx) = answering(Vec::new(), |tx, asker| add(&dir, tx, asker, &first, Some("Mix")));
+        result.unwrap();
+        let remove = vec![(a.clone(), "01 - One.opus".to_string())];
+        let added = vec![(b.clone(), "02 - Three.opus".to_string())];
+        let (result, rx) = answering(Vec::new(), |tx, _| edit(&dir, tx, "Mix", &added, &remove));
+        result.unwrap();
+        let ids: Vec<String> = playlists::load(&dir, "Mix").unwrap().entries.into_iter().map(|e| e.id).collect();
+        assert_eq!(ids, ["b1", "b2"]);
+        assert!(a.join("01 - One.opus").is_file(), "the audio was touched");
+        assert!(rx.try_iter().any(|m| matches!(m, Msg::Flash(t) if t.contains("added 1") && t.contains("removed 1"))));
+    }
+
+    #[test]
+    fn a_new_list_is_saved_empty_and_opens_the_picker() {
+        let dir = root("newpick");
+        let (result, rx) = answering(vec![Reply::Text("Mix".into())], |tx, asker| new(&dir, tx, asker));
+        result.unwrap();
+        assert!(playlists::load(&dir, "Mix").unwrap().entries.is_empty());
+        assert!(rx.try_iter().any(|m| matches!(m, Msg::PickTracks(name) if name == "Mix")));
+    }
+
+    #[test]
+    fn an_add_with_a_target_writes_to_that_list_with_no_question_asked() {
+        let dir = root("target");
+        let a = folder(&dir, "A", &[("a1", "01 - One.opus")]);
+        playlists::save(&dir, &Playlist { name: "Mix".into(), entries: Vec::new() }).unwrap();
+        let picks = vec![(a, "01 - One.opus".to_string())];
+        let (result, rx) = answering(Vec::new(), |tx, asker| add(&dir, tx, asker, &picks, Some("Mix")));
+        result.unwrap();
+        assert_eq!(playlists::load(&dir, "Mix").unwrap().entries.len(), 1);
+        let msgs: Vec<Msg> = rx.try_iter().collect();
+        assert!(!msgs.iter().any(|m| matches!(m, Msg::Ask(..))));
+        assert!(msgs.iter().any(|m| matches!(m, Msg::Custom { show: true, .. })), "the list should open");
+    }
+
     // The plan's exit test: two folders, a source edit that renames its file, and every entry still resolves.
     #[test]
     fn a_playlist_built_from_two_folders_survives_an_edit_that_renames_a_source() {
@@ -371,7 +453,7 @@ mod tests {
         let a = folder(&dir, "A", &[("a1", "01 - One.opus")]);
         let b = folder(&dir, "B", &[("b1", "01 - Two.opus")]);
         let picks = vec![(a.clone(), "01 - One.opus".to_string()), (b.clone(), "01 - Two.opus".to_string())];
-        let (result, _rx) = answering(in_new_playlist("Mix"), |tx, asker| add(&dir, tx, asker, &picks));
+        let (result, _rx) = answering(in_new_playlist("Mix"), |tx, asker| add(&dir, tx, asker, &picks, None));
         result.unwrap();
         let list = playlists::load(&dir, "Mix").unwrap();
         assert_eq!(list.entries.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(), ["a1", "b1"]);
@@ -397,7 +479,7 @@ mod tests {
         assert!(!manifest::path(&loose).exists());
 
         let picks = vec![(loose.clone(), "Song.opus".to_string())];
-        let (result, rx) = answering(in_new_playlist("Mix"), |tx, asker| add(&dir, tx, asker, &picks));
+        let (result, rx) = answering(in_new_playlist("Mix"), |tx, asker| add(&dir, tx, asker, &picks, None));
         result.unwrap();
         assert!(manifest::path(&loose).is_file(), "nothing recorded the file, so a rename would lose it");
         let list = playlists::load(&dir, "Mix").unwrap();
@@ -418,7 +500,7 @@ mod tests {
         let dir = root("hidden");
         let a = folder(&dir, "A", &[("a1", "01 - One.opus")]);
         let picks = vec![(a.clone(), "01 - One.opus".to_string())];
-        answering(in_new_playlist("Mix"), |tx, asker| add(&dir, tx, asker, &picks)).0.unwrap();
+        answering(in_new_playlist("Mix"), |tx, asker| add(&dir, tx, asker, &picks, None)).0.unwrap();
         manifest::hide(&a).unwrap();
         std::fs::rename(a.join("01 - One.opus"), a.join("01 - Renamed.opus")).unwrap();
         manifest::write(&a, "u", [("a1".to_string(), a.join("01 - Renamed.opus"))].into_iter()).unwrap();
@@ -437,7 +519,7 @@ mod tests {
         std::fs::create_dir_all(&loose).unwrap();
         std::fs::write(loose.join("Song.opus"), "audio").unwrap();
         let picks = vec![(loose.clone(), "Song.opus".to_string())];
-        answering(in_new_playlist("Mix"), |tx, asker| add(&dir, tx, asker, &picks)).0.unwrap();
+        answering(in_new_playlist("Mix"), |tx, asker| add(&dir, tx, asker, &picks, None)).0.unwrap();
         // The URL is attached and the sync matches the file: the `~` line becomes a video id.
         manifest::write(&loose, "u", [("vid1".to_string(), loose.join("Song.opus"))].into_iter()).unwrap();
         let (tx, _rx) = channel();
@@ -480,7 +562,7 @@ mod tests {
         let a = folder(&dir, "A", &[]);
         std::fs::write(a.join("Odd\tName.opus"), "audio").unwrap();
         let picks = vec![(a.clone(), "Odd\tName.opus".to_string())];
-        let (result, rx) = answering(in_new_playlist("Mix"), |tx, asker| add(&dir, tx, asker, &picks));
+        let (result, rx) = answering(in_new_playlist("Mix"), |tx, asker| add(&dir, tx, asker, &picks, None));
         result.unwrap();
         let flashes: Vec<String> = rx.try_iter().filter_map(|m| if let Msg::Flash(f) = m { Some(f) } else { None }).collect();
         assert!(flashes.iter().any(|f| f.starts_with("added 0 to Mix")), "{flashes:?}");
@@ -493,11 +575,11 @@ mod tests {
         let dir = root("twice");
         let a = folder(&dir, "A", &[("a1", "01 - One.opus"), ("a2", "02 - Two.opus")]);
         let first = vec![(a.clone(), "01 - One.opus".to_string())];
-        answering(in_new_playlist("Mix"), |tx, asker| add(&dir, tx, asker, &first)).0.unwrap();
+        answering(in_new_playlist("Mix"), |tx, asker| add(&dir, tx, asker, &first, None)).0.unwrap();
 
         // Now `Mix` exists, so it is the first choice.
         let again = vec![(a.clone(), "01 - One.opus".to_string()), (a.clone(), "02 - Two.opus".to_string())];
-        let (result, rx) = answering(vec![Reply::Choice(0)], |tx, asker| add(&dir, tx, asker, &again));
+        let (result, rx) = answering(vec![Reply::Choice(0)], |tx, asker| add(&dir, tx, asker, &again, None));
         result.unwrap();
         assert_eq!(playlists::load(&dir, "Mix").unwrap().entries.len(), 2);
         let flashes: Vec<String> = rx.try_iter().filter_map(|m| if let Msg::Flash(f) = m { Some(f) } else { None }).collect();
@@ -510,7 +592,7 @@ mod tests {
         let dir = root("cancel");
         let a = folder(&dir, "A", &[("a1", "01 - One.opus")]);
         let picks = vec![(a.clone(), "01 - One.opus".to_string())];
-        let (result, _rx) = answering(vec![Reply::Cancel], |tx, asker| add(&dir, tx, asker, &picks));
+        let (result, _rx) = answering(vec![Reply::Cancel], |tx, asker| add(&dir, tx, asker, &picks, None));
         result.unwrap();
         assert!(playlists::list(&dir).is_empty());
         assert!(!dir.join(".playlists").exists());
@@ -524,7 +606,7 @@ mod tests {
         std::fs::create_dir_all(&elsewhere).unwrap();
         std::fs::write(elsewhere.join("x.opus"), "audio").unwrap();
         let picks = vec![(elsewhere.clone(), "x.opus".to_string())];
-        let (result, _rx) = answering(in_new_playlist("Mix"), |tx, asker| add(&dir, tx, asker, &picks));
+        let (result, _rx) = answering(in_new_playlist("Mix"), |tx, asker| add(&dir, tx, asker, &picks, None));
         result.unwrap();
         assert!(playlists::load(&dir, "Mix").unwrap().entries.is_empty());
         assert!(!manifest::path(&elsewhere).exists(), "adopted a folder outside the library");
@@ -537,7 +619,7 @@ mod tests {
         let dir = root("order");
         let a = folder(&dir, "A", &[("a1", "01.opus"), ("a2", "02.opus"), ("a3", "03.opus")]);
         let picks: Vec<_> = ["01.opus", "02.opus", "03.opus"].iter().map(|f| (a.clone(), f.to_string())).collect();
-        answering(in_new_playlist("Mix"), |tx, asker| add(&dir, tx, asker, &picks)).0.unwrap();
+        answering(in_new_playlist("Mix"), |tx, asker| add(&dir, tx, asker, &picks, None)).0.unwrap();
         let ids = |dir: &Path| playlists::load(dir, "Mix").unwrap().entries.into_iter().map(|e| e.id).collect::<Vec<_>>();
 
         let (tx, rx) = channel();
@@ -563,7 +645,7 @@ mod tests {
         let a = folder(&dir, "A", &[("a1", "01 - One.opus")]);
         let b = folder(&dir, "B", &[("b1", "01 - Two.opus")]);
         let picks = vec![(a.clone(), "01 - One.opus".to_string()), (b.clone(), "01 - Two.opus".to_string())];
-        answering(in_new_playlist("Mix"), |tx, asker| add(&dir, tx, asker, &picks)).0.unwrap();
+        answering(in_new_playlist("Mix"), |tx, asker| add(&dir, tx, asker, &picks, None)).0.unwrap();
 
         // Keeping it, or backing out, changes nothing.
         for no in [Reply::Choice(1), Reply::Cancel] {
@@ -601,7 +683,7 @@ mod tests {
         let dir = root("rename");
         let a = folder(&dir, "A", &[("a1", "01.opus")]);
         let picks = vec![(a, "01.opus".to_string())];
-        answering(in_new_playlist("Old"), |tx, asker| add(&dir, tx, asker, &picks)).0.unwrap();
+        answering(in_new_playlist("Old"), |tx, asker| add(&dir, tx, asker, &picks, None)).0.unwrap();
         let (result, _rx) = answering(vec![Reply::Text("New".into())], |tx, asker| rename(&dir, tx, asker, "Old"));
         result.unwrap();
         assert!(playlists::load(&dir, "Old").is_none());

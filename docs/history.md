@@ -1,9 +1,11 @@
 # What proved it
 
-Evidence behind rules in CLAUDE.md, and trade-offs taken with eyes open. It
-lives here rather than there because CLAUDE.md is read at the start of every
-session and this is read when somebody doubts a rule, which is rarer and worth
-the extra click. Nothing here is a rule. Every rule stayed where it was.
+Evidence behind the rules in `docs/rules/`, and trade-offs taken with eyes open.
+It lives here rather than there because the rules are read before touching their
+area and this is read when somebody doubts a rule, which is rarer and worth the
+extra click. Nothing here is a rule. Every rule stayed where it was. Where
+this file or a code comment says CLAUDE.md, the rule is in the file for its
+area in `docs/rules/`.
 
 ## Decomposed filenames in the `.m3u8`
 

@@ -356,6 +356,8 @@ pub enum View {
     /// One custom playlist's tracks, in its order. Its own screen with its own cursor, so a key here never
     /// reaches the track list's commands, which would write tags to a file in another folder.
     Playlist,
+    // Every track in the library, fuzzy-filtered, for filling a custom playlist.
+    Pick,
 }
 
 /// One track of a custom playlist as the screen shows it.
@@ -378,6 +380,26 @@ pub struct CustomView {
     pub rows: Vec<PlaylistRow>,
     pub cursor: usize,
     pub scroll: usize,
+}
+
+// The track picker behind `N`. UI state only: the worker is not waiting on it.
+#[derive(Default)]
+pub struct PickView {
+    // The list the marked tracks go into.
+    pub name: String,
+    pub query: String,
+    pub hits: Vec<crate::picker::Hit>,
+    pub marks: crate::picker::Marks,
+    // Tracks the list held when the picker opened. They start marked, and unmarking one takes it off the list.
+    pub held: crate::picker::Marks,
+    pub cursor: usize,
+    pub scroll: usize,
+    // Opened from an existing list's screen, which is where Esc returns to.
+    pub existing: bool,
+    // Shows only the marked rows, to review a selection the query has scrolled out of sight.
+    pub only_marked: bool,
+    // Addable tracks in the library, whatever the query.
+    pub total: usize,
 }
 
 /// Work the UI asks of the worker once the run itself has finished.
@@ -438,7 +460,10 @@ pub enum Cmd {
     NewPlaylist,
     /// Put tracks into a custom playlist, chosen from the list or newly named. A folder and a filename each,
     /// and never a row position: the worker works out the ids, and adopts a folder that has none.
-    AddToPlaylist(Vec<(PathBuf, String)>),
+    // The picker's answer for an open list: what to add and what to take off, by folder and filename.
+    EditPlaylist { name: String, add: Vec<(PathBuf, String)>, remove: Vec<(PathBuf, String)> },
+    // With a list named, the chooser is skipped and the worker opens that list afterwards.
+    AddToPlaylist(Vec<(PathBuf, String)>, Option<String>),
     /// Open a custom playlist's screen, by name as `Open` is by folder.
     OpenPlaylist(String),
     /// Move one entry a place. By id, because the rows move under the cursor.
@@ -458,6 +483,8 @@ pub enum Cmd {
 pub enum Confirm {
     /// Quitting with a download still going, which takes yt-dlp with it.
     Quit,
+    // Leaving the track picker with marks that would be lost.
+    Discard,
 }
 
 pub enum Prompt {
@@ -579,6 +606,10 @@ pub enum Msg {
     Order { name: String, ids: Vec<String>, focus: Option<String> },
     /// Puts the library cursor on this row, for a list just made or renamed: the sort moves it to a new place.
     Select(PathBuf),
+    /// A search's marked tracks were added to a list, so they are not marks any more.
+    FoundUnmark,
+    /// A list was just made: open the track picker with it as the target.
+    PickTracks(String),
     /// A list changed its name, so the one cliamp is on keeps its marker.
     Renamed { old: String, new: String },
     Ask(Prompt, Sender<Reply>),
@@ -970,6 +1001,13 @@ pub struct App {
     pub shelf: usize,
     /// The custom playlist's screen, which has its own cursor like the library does.
     pub custom: CustomView,
+    pub pick: PickView,
+    // The search screen's matches, computed once per frame by `draw` so the header, the band and the list read one answer.
+    pub found_cache: Vec<crate::picker::Hit>,
+    // Tracks marked on the search screen for `P`, by folder and filename like the picker's.
+    pub found_marks: crate::picker::Marks,
+    // Set when Enter opens a result's folder, so Esc comes back to the results and not the library.
+    pub from_found: bool,
     pub cursor: usize,
     /// Narrows what the track list shows. A view over `tracks` and nothing
     /// more: `cursor` stays a position in `tracks` and `marked` stays a set of
@@ -1118,6 +1156,10 @@ impl App {
             scroll: 0,
             shelf_scroll: 0,
             found_scroll: 0,
+            pick: PickView::default(),
+            found_cache: Vec::new(),
+            found_marks: crate::picker::Marks::default(),
+            from_found: false,
             waiting: std::collections::VecDeque::new(),
             confirm: None,
             run_started: None,
@@ -1181,6 +1223,7 @@ impl App {
             && self.console.is_none()
             && self.picking.is_none()
             && !self.typing_filter
+            && self.view != View::Pick
             && !self.show_help
             && self.reward.is_none()
     }
@@ -1387,6 +1430,8 @@ impl App {
                 }
                 self.logs.push(line);
             }
+            Msg::PickTracks(name) => self.open_picker(name),
+            Msg::FoundUnmark => self.found_marks.clear(),
             Msg::Select(path) => {
                 if let Some(at) = self.library.iter().position(|s| s.path == path) {
                     self.shelf = at;
@@ -1402,6 +1447,9 @@ impl App {
                 // Kept on the same row by its path: a list made or deleted shifts every row after it.
                 let was = self.library.get(self.shelf).map(|s| s.path.clone());
                 self.library = shelves;
+                if self.view == View::Pick {
+                    self.pick_refresh();
+                }
                 self.shelf = was
                     .and_then(|path| self.library.iter().position(|s| s.path == path))
                     .unwrap_or(self.shelf)
@@ -1796,9 +1844,34 @@ impl App {
             self.say("still working  ·  q quits");
         } else if self.library.is_empty() {
             self.say("nothing behind this  ·  q quits");
+        } else if std::mem::take(&mut self.from_found) && !self.filter.trim().is_empty() {
+            // Opened from a search result, so Esc goes back to the results.
+            self.view = View::Found;
+            self.found_snap();
         } else {
             self.view = View::Library;
         }
+    }
+
+    // Toggles the result under the cursor. A file that is gone cannot be added, so it is not marked.
+    pub fn found_mark(&mut self) {
+        let Some((shelf, (name, here))) = self.found_at() else {
+            return;
+        };
+        if !here {
+            self.say("that file is not on disk");
+            return;
+        }
+        let (folder, name) = (shelf.path.clone(), name.clone());
+        self.found_marks.toggle(&folder, &name);
+    }
+
+    // The marks in the order made, or the result under the cursor when nothing is marked.
+    pub fn found_picks(&self) -> Vec<(PathBuf, String)> {
+        if self.found_marks.len() > 0 {
+            return self.found_marks.picks();
+        }
+        self.found_at().map(|(s, (n, _))| vec![(s.path.clone(), n.clone())]).unwrap_or_default()
     }
 
     /* Esc unwinds one step at a time: the filter first, since a hidden list is
@@ -1832,6 +1905,28 @@ impl App {
        in the tool that one keypress can lose, so it asks first and says what
        it would cost. A second `q` answers it, so anyone who meant it types
        `qq` and never reads the box. */
+    // Whether leaving the picker would lose anything the user did.
+    pub fn pick_has_changes(&self) -> bool {
+        let (add, remove) = self.pick_changes();
+        if self.pick.existing {
+            !add.is_empty() || !remove.is_empty()
+        } else {
+            self.pick.marks.len() > 0
+        }
+    }
+
+    // Esc on the picker: back to the list it came from, or to the library with the new list kept empty.
+    pub fn close_picker(&mut self) {
+        if self.pick.existing {
+            self.view = View::Playlist;
+            self.say("no changes");
+        } else {
+            let name = std::mem::take(&mut self.pick.name);
+            self.view = View::Library;
+            self.say(format!("kept {name} empty  ·  t finds tracks and P adds them"));
+        }
+    }
+
     pub fn ask_quit(&mut self) {
         if self.working() {
             self.confirm = Some(Confirm::Quit);
@@ -2084,24 +2179,147 @@ impl App {
        nothing typed is a list of the whole library, which is what the
        library screen already is. */
     pub fn found_rows(&self) -> Vec<(usize, usize)> {
-        let needle = self.filter.to_lowercase();
-        if needle.is_empty() {
+        self.found_hits().iter().map(|h| (h.shelf, h.file)).collect()
+    }
+
+    // Ranked by the picker's matcher, so the two screens answer one query the same way. The kind too, or `t`
+    // answers a different question from the rows. A custom playlist's tracks are found in their own folders.
+    pub fn found_hits(&self) -> Vec<crate::picker::Hit> {
+        if self.filter.trim().is_empty() {
             return Vec::new();
         }
-        // The kind too, or `t` answers a different question from the rows.
-        self.library
+        crate::picker::find(&self.library, &self.filter, |s| self.kind_shows(s), crate::picker::Files::All)
+    }
+
+    pub fn can_pick(&self) -> bool {
+        self.view == View::Pick && self.prompt.is_none() && !self.busy
+    }
+
+    pub fn open_picker(&mut self, name: String) {
+        self.pick = PickView { name, ..PickView::default() };
+        self.show_picker();
+    }
+
+    pub fn reopen_picker(&mut self) {
+        let mut held = crate::picker::Marks::default();
+        for path in self.custom.rows.iter().filter_map(|r| r.path.as_ref()) {
+            if let (Some(folder), Some(file)) = (path.parent(), path.file_name()) {
+                held.toggle(folder, &file.to_string_lossy());
+            }
+        }
+        let marks = held.clone();
+        self.pick = PickView { name: self.custom.name.clone(), existing: true, held, marks, ..PickView::default() };
+        self.show_picker();
+    }
+
+    fn show_picker(&mut self) {
+        self.typing_filter = false;
+        self.view = View::Pick;
+        self.pick_refresh();
+    }
+
+    // Recomputed on a query change and on a library refresh, never per frame.
+    pub fn pick_refresh(&mut self) {
+        self.pick.hits = crate::picker::rows(&self.library, &self.pick.query);
+        if self.pick.only_marked {
+            let hits = std::mem::take(&mut self.pick.hits);
+            self.pick.hits = hits
+                .into_iter()
+                .filter(|h| {
+                    let (folder, file) = self.pick_target(h);
+                    self.pick.marks.has(folder, file)
+                })
+                .collect();
+        }
+        self.pick.total = self
+            .library
             .iter()
-            .enumerate()
-            // A custom playlist's tracks are already found in the folders they came from.
-            .filter(|(_, s)| self.kind_shows(s) && s.kind != Some(crate::manifest::Kind::Custom))
-            .flat_map(|(shelf, s)| {
-                s.files
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, (name, _))| name.to_lowercase().contains(&needle))
-                    .map(move |(file, _)| (shelf, file))
-            })
-            .collect()
+            .filter(|s| s.kind != Some(crate::manifest::Kind::Custom))
+            .map(|s| s.files.iter().filter(|(_, here)| *here).count())
+            .sum();
+        self.pick.cursor = self.pick.cursor.min(self.pick.hits.len().saturating_sub(1));
+    }
+
+    // A new query is a new question, so the cursor goes back to the best match.
+    fn pick_requery(&mut self) {
+        self.pick.cursor = 0;
+        self.pick.scroll = 0;
+        self.pick_refresh();
+    }
+
+    pub fn pick_toggle_marked_only(&mut self) {
+        self.pick.only_marked = !self.pick.only_marked;
+        self.pick_requery();
+    }
+
+    pub fn pick_type(&mut self, c: char) {
+        self.pick.query.push(c);
+        self.pick_requery();
+    }
+
+    pub fn pick_backspace(&mut self) {
+        self.pick.query.pop();
+        self.pick_requery();
+    }
+
+    pub fn pick_word_back(&mut self) {
+        let cut = self.pick.query.trim_end().rfind(' ').map_or(0, |i| i + 1);
+        self.pick.query.truncate(cut);
+        self.pick_requery();
+    }
+
+    pub fn pick_clear(&mut self) {
+        self.pick.query.clear();
+        self.pick_requery();
+    }
+
+    pub fn pick_move(&mut self, down: bool, by: usize) {
+        let last = self.pick.hits.len().saturating_sub(1);
+        self.pick.cursor = if down { (self.pick.cursor + by).min(last) } else { self.pick.cursor.saturating_sub(by) };
+    }
+
+    // The folder and file name of a hit.
+    fn pick_target(&self, hit: &crate::picker::Hit) -> (&Path, &str) {
+        let shelf = &self.library[hit.shelf];
+        (&shelf.path, &shelf.files[hit.file].0)
+    }
+
+    // Toggles the row under the cursor and leaves the cursor where it is.
+    pub fn pick_mark(&mut self) {
+        let Some(hit) = self.pick.hits.get(self.pick.cursor) else {
+            return;
+        };
+        let (folder, file) = self.pick_target(hit);
+        let (folder, file) = (folder.to_path_buf(), file.to_string());
+        self.pick.marks.toggle(&folder, &file);
+        if self.pick.only_marked {
+            self.pick_refresh();
+        }
+    }
+
+    pub fn pick_mark_all(&mut self) {
+        let items: Vec<(&Path, &str)> = self.pick.hits.iter().map(|h| self.pick_target(h)).collect();
+        let mut marks = self.pick.marks.clone();
+        marks.toggle_all(items.iter().copied());
+        self.pick.marks = marks;
+        if self.pick.only_marked {
+            self.pick_refresh();
+        }
+    }
+
+    // What Enter sends: tracks to add and tracks to take off. A new list adds the marks, or the cursor row when
+    // nothing is marked. An open list starts with its own tracks marked, so only the difference counts.
+    pub fn pick_changes(&self) -> (Vec<(PathBuf, String)>, Vec<(PathBuf, String)>) {
+        if self.pick.existing {
+            let add = self.pick.marks.picks().into_iter().filter(|(f, n)| !self.pick.held.has(f, n)).collect();
+            let remove = self.pick.held.picks().into_iter().filter(|(f, n)| !self.pick.marks.has(f, n)).collect();
+            return (add, remove);
+        }
+        if self.pick.marks.len() > 0 {
+            return (self.pick.marks.picks(), Vec::new());
+        }
+        let cursor = self.pick.hits.get(self.pick.cursor).map(|h| self.pick_target(h));
+        (cursor.map(|(f, n)| vec![(f.to_path_buf(), n.to_string())]).unwrap_or_default(), Vec::new())
     }
 
     /// The result under the cursor, or `None` when the list is empty.
@@ -2121,6 +2339,8 @@ impl App {
        look for: an empty box would put up a list of nothing and the filter
        band would say so with no way to read it as anything but a bug. */
     pub fn find_tracks(&mut self) {
+        // A new search is a new selection.
+        self.found_marks.clear();
         if self.filter.is_empty() {
             self.typing_filter = true;
             self.view = View::Found;
@@ -3229,6 +3449,28 @@ mod tests {
         assert!(!app.can_playlist() && !app.can_command() && !app.can_find(), "the predicates must be exclusive");
     }
 
+    #[test]
+    fn an_achievement_waits_while_the_picker_is_open() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        assert!(app.calm());
+        app.apply(Msg::PickTracks("Mix".into()));
+        assert!(!app.calm(), "a popup would swallow a keystroke of the query");
+    }
+
+    #[test]
+    fn the_picker_is_exclusive_with_every_other_screens_keys() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.apply(Msg::PickTracks("Mix".into()));
+        assert_eq!(app.view, View::Pick);
+        assert!(app.can_pick());
+        assert!(!app.can_playlist() && !app.can_command() && !app.can_find() && !app.can_browse());
+        app.view = View::Library;
+        assert!(!app.can_pick());
+    }
+
     // Its tracks are found in the folders they came from, so listing them again would show each twice.
     #[test]
     fn the_search_never_lists_a_custom_playlists_tracks_a_second_time() {
@@ -3329,6 +3571,25 @@ mod tests {
         assert_eq!(app.found, Some((2, 0)));
         app.found_jump(false);
         assert_eq!(app.found, Some((0, 0)));
+    }
+
+    // The picker and `t` are one matcher, so one query answers the same way on both.
+    #[test]
+    fn the_search_screen_is_fuzzy_ranked_and_matches_the_folder_like_the_picker() {
+        let mut app = library_app(vec![
+            stocked("Focus", &["01 - Creep.opus", "02 - Karma.opus"]),
+            stocked("Other", &["01 - Autobahn.opus"]),
+        ]);
+        app.filter = "autbn".into();
+        assert_eq!(app.found_rows(), vec![(1, 0)], "gaps in the query match");
+        app.filter = "focus".into();
+        assert_eq!(app.found_rows(), vec![(0, 0), (0, 1)], "the folder is matched too");
+        app.filter = "krma".into();
+        assert_eq!(app.found_hits()[0].label, "Karma", "the number is not part of the label");
+        // The same query on the picker lists the same tracks.
+        app.filter = "creep".into();
+        let picker: Vec<(usize, usize)> = crate::picker::rows(&app.library, "creep").iter().map(|h| (h.shelf, h.file)).collect();
+        assert_eq!(app.found_rows(), picker);
     }
 
     /// Same box, same answer: with the kind on, `t` must not turn up tracks

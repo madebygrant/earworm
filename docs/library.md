@@ -62,15 +62,30 @@ written into the file's tag.
 ## Custom playlists
 
 A custom playlist is a list you build from tracks already in your library, in
-any folders. `N` on the library names one. It shows in the library with a
-`◈` (or ` custom ` in text mode) and `built here` where a synced folder says
-when it was synced, and `a` can narrow to them.
+any folders. It shows in the library with a `◈` (or ` custom ` in text mode)
+and `built here` where a synced folder says when it was synced, and `a` can
+narrow to them.
 
-To fill one, press `P` on a track in the search results (`t`), or on a track
+`N` on the library names a list, then opens a picker over every track.
+
+- Type to fuzzy-match the track name and its folder, so `focus creep` finds
+  Creep in the Focus folder. Letters type, so help is `F1`.
+- Tab marks or unmarks the track under the cursor. `^a` marks everything
+  showing, or unmarks it if all of it is marked. `F2` shows only the marked
+  tracks, to review them.
+- Enter adds the marked tracks in the order you marked them, or the track under
+  the cursor if none are marked. Esc keeps the list empty, and asks first if
+  you have marks to lose.
+
+`a` on a custom playlist's own screen reopens the picker for it. Its tracks
+start marked as `•`. Unmark one (`−`) and Enter takes it off the list, never
+off disk, and a new mark (`✓`) adds it.
+
+To fill one later, press `P` on a track in the search results (`t`), or on a track
 list for the marked tracks, or the one under the cursor. A chooser lists your
 lists and a new one. A track already in the list is not added twice.
 
-Enter on a custom playlist opens it. `J` and `K` move a track, `x` takes it
+Enter on a custom playlist opens it. `a` there reopens the picker for that list. `J` and `K` move a track, `x` takes it
 off the list and never off disk, `p` plays it in cliamp, and Enter goes to the
 track's own folder, which is where you edit its tags. A track that is no longer
 on disk keeps its row with a `!`.
@@ -277,7 +292,19 @@ track you half remember narrows the library to whatever holds it. Nothing is
 read off disk to do it.
 
 `t` takes the same query and lists every match flat, with the folder each is
-in.
+in. Unlike `/`, it is a fuzzy match, the one the custom playlist picker uses:
+`autbn` finds Autobahn, the folder name counts, the closest match comes first
+and the matched letters are underlined.
+While the box is open, ↑ ↓ move through the results and Enter moves the keys
+to the list, where Enter opens the track's folder. Esc in the box clears the
+query and goes back to the library. Esc from a folder opened this way comes
+back to the results.
+
+Tab marks the result under the cursor (`✓`), and `P` adds the marked tracks, or
+the one under the cursor if none are marked, to a custom playlist. A file that
+is gone from disk cannot be marked. One or two letters must appear as typed,
+since a fuzzy match on so few letters would take almost every track. When `/`
+finds no folder but `t` would find tracks, the library says so.
 
 ```
  earworm  ·  search  ·  4 tracks in 3 playlists
