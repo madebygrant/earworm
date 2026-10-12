@@ -103,6 +103,11 @@ pub struct Cli {
     #[arg(long, conflicts_with = "url")]
     pub resync: bool,
 
+    /// Download the YouTube links in a markdown file as one playlist, named
+    /// by the file's `#` heading
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["url", "resync", "list", "check"])]
+    pub import: Option<String>,
+
     /// Print the playlists already under --dir and exit
     #[arg(long, conflicts_with = "url")]
     pub list: bool,
@@ -608,6 +613,8 @@ pub struct Config {
        the playlist being synced, and `Msg::Restart` territory rather than
        config, which is why every path that starts a run sets or clears it. */
     pub folder: Option<String>,
+    /// A markdown file of links from `--import`, which the worker reads in place of a URL.
+    pub import: Option<String>,
     /// Where a setting changed in the tool gets written back. `None` under
     /// --no-config, which asked for the file to be left out of the run and
     /// so cannot be the place a choice is remembered.
@@ -732,6 +739,7 @@ impl Config {
             url: cli.url.unwrap_or_default(),
             dir: expand(&dir),
             folder: None,
+            import: cli.import,
             format,
             convert: opt_in("no_convert", file.convert),
             loudness: opt_in("no_loudness", file.loudness),

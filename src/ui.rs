@@ -3228,7 +3228,7 @@ mod tests {
         app.apply(Msg::Ask(
             crate::app::Prompt::Input {
                 header: "YouTube playlist URL".into(),
-                note: "a playlist or a single video  ·  esc quits".into(),
+                note: "a playlist, a video or a file of links  ·  esc quits".into(),
                 value: String::new(),
                 escape: crate::app::Escape::Quit,
             },
@@ -3247,7 +3247,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(screen.contains("YouTube playlist URL"), "{screen}");
-        assert!(screen.contains("a playlist or a single video"), "{screen}");
+        assert!(screen.contains("a playlist, a video or a file of links"), "{screen}");
         assert!(screen.contains("esc quits"), "{screen}");
     }
 

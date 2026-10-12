@@ -9,6 +9,7 @@ earworm URL --dir ~/Music/new
 earworm URL --no-pick                    # don't stop to choose, fetch it all
 earworm URL --format flac                # m4a by default
 earworm URL -- --cookies-from-browser firefox    # extra args go to yt-dlp
+earworm --import 'mix.ytmusic.md'        # the links in a markdown file
 earworm --resync                         # every playlist already downloaded
 earworm --list                           # what's on disk, then exit
 earworm --check                          # is everything installed, then exit
@@ -25,6 +26,18 @@ downloaded. With nothing on disk yet it asks for a link. The prompt takes
 `youtube.com`, `youtu.be` and the `m.` and `music.` subdomains, with or
 without the `https://`, naming a video, playlist or channel. Anything else
 comes back for editing rather than being thrown away.
+
+The prompt also takes the path to a markdown file of YouTube links, which is
+what `--import` reads. Dragging the file into the terminal pastes its path.
+Every `watch?v=`, `youtu.be` and `watch_videos` link in it becomes one
+playlist, in the order the links first appear, and the folder is named after
+the file's `#` heading. `shorts/` and `live/` links count too. The download
+goes through YouTube's queue link, which holds 50 videos, so a file with more
+is refused rather than cut short. Run the same file again, or an edited copy
+with the same heading that still shares a track with it, and it syncs that
+folder. Any other folder of that name is left alone, and the import goes into
+`Name (2)` instead. A file with `music.youtube.com` links is locked like the links
+themselves.
 
 ## When a run finishes
 

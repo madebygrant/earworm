@@ -155,3 +155,20 @@
   the filename and the playlist name cannot drift apart.
 - **`summarise` feeds both the run and a retry.** `main` prints that summary on
   exit, so a retry building its own message drops the folder path.
+- **An imported file names its folder through `cfg.folder`, and every link
+  the prompt settles on sets it.** yt-dlp titles a `watch_videos` queue
+  "Untitled List", so without the pin every import lands in one folder of that
+  name. `Link::adopt` sets the folder from the heading, or clears it for a
+  plain link, which is what stops the next `n` writing into the last import's
+  folder (`an_import_off_the_command_line_names_its_folder_and_asks_nothing`,
+  `a_plain_link_after_an_import_does_not_write_into_its_folder`). A folder of
+  that name is synced only when its `#url` is a queue sharing a track with
+  this import; anything else, another import with the same heading included,
+  gets `Name (2)`. Syncing into it would rewrite its `#url` and `.m3u8` and
+  offer every track it held to `D`
+  (`an_import_never_takes_over_a_folder_it_did_not_make`). A file over 50
+  links is refused, not cut: YouTube's queue drops the rest silently, and a
+  re-import would offer whatever fell off the end to `D`. The import
+  rebuilds the links as a `www.youtube.com` queue, so the music lock is checked
+  on the file's own links, not on the URL it becomes
+  (`a_file_of_music_links_is_locked_like_the_links_themselves`).

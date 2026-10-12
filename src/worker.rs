@@ -12,6 +12,7 @@ use crate::cheats::{Feature, LOCKED, Unlocked};
 use crate::config::{self, Config, composed, decomposed};
 use crate::custom;
 use crate::export;
+use crate::import;
 use crate::lookup;
 use crate::manifest;
 use crate::player;
@@ -59,6 +60,20 @@ enum Start {
    question: its rows are the playlists the URL question was going to be
    about, and one of them can be opened without downloading anything. */
 fn ask_start(cfg: &mut Config, tx: &Sender<Msg>) -> Start {
+    // A file that will not import lands at the prompt with its path typed, saying why.
+    if let Some(path) = cfg.import.take() {
+        let link = settle(&path, &cfg.unlocked).ok().or_else(|| {
+            let _ = tx.send(Msg::Stage("waiting for a playlist URL".into()));
+            prompt_url(tx, Escape::Quit, &cfg.unlocked, &path)
+        });
+        return match link {
+            Some(link) => {
+                link.adopt(cfg, tx);
+                Start::Playlist
+            }
+            None => Start::Cancelled,
+        };
+    }
     /* A locked link from the command line lands at the prompt, typed out,
        rather than failing: the console can unlock it from there. */
     if !cfg.url.is_empty() {
@@ -68,8 +83,8 @@ fn ask_start(cfg: &mut Config, tx: &Sender<Msg>) -> Start {
         let _ = tx.send(Msg::Stage("waiting for a playlist URL".into()));
         let typed = cfg.url.clone();
         return match prompt_url(tx, Escape::Quit, &cfg.unlocked, &typed) {
-            Some(url) => {
-                cfg.url = url;
+            Some(link) => {
+                link.adopt(cfg, tx);
                 Start::Playlist
             }
             None => Start::Cancelled,
@@ -85,8 +100,8 @@ fn ask_start(cfg: &mut Config, tx: &Sender<Msg>) -> Start {
 
     let _ = tx.send(Msg::Stage("waiting for a playlist URL".into()));
     match prompt_url(tx, Escape::Quit, &cfg.unlocked, "") {
-        Some(url) => {
-            cfg.url = url;
+        Some(link) => {
+            link.adopt(cfg, tx);
             /* The only format question before the first download: the run
                adopts whatever this leaves behind. A URL from the command line
                returns above, having arrived fully specified. `start_url` asks
@@ -106,38 +121,93 @@ fn ask_start(cfg: &mut Config, tx: &Sender<Msg>) -> Start {
    handing back the text means fixing it instead of retyping it. `None` is a
    cancel, and `escape` is what the caller does with one: only the very first
    question has nothing to go back to. */
-fn prompt_url(tx: &Sender<Msg>, escape: Escape, unlocked: &Unlocked, typed: &str) -> Option<String> {
+fn prompt_url(tx: &Sender<Msg>, escape: Escape, unlocked: &Unlocked, typed: &str) -> Option<Link> {
     let asker = Asker {
         tx: tx.clone(),
         enabled: true,
     };
-    let mut header = if locked(typed, unlocked) {
-        LOCKED.to_string()
-    } else {
-        "YouTube playlist URL".to_string()
+    let mut header = match settle(typed, unlocked) {
+        Err(why) if !typed.trim().is_empty() => why,
+        _ => "YouTube playlist URL".to_string(),
     };
     let mut typed = typed.to_string();
     /* The first thing a new user is ever asked, on a screen with nothing else
        on it yet. Both facts they need before typing: that one video is a
        valid answer, and what the only other key does. */
     let note = match escape {
-        Escape::Quit => "a playlist or a single video  ·  esc quits",
-        _ => "a playlist or a single video",
+        Escape::Quit => "a playlist, a video or a file of links  ·  esc quits",
+        _ => "a playlist, a video or a file of links",
     };
     loop {
         let answer = asker.input_noted(&header, note, &typed, escape)?;
         // Asked of the answer, not the opening: the console can unlock mid-prompt.
-        header = match youtube_url(&answer) {
-            Some(url) if !locked(&url, unlocked) => return Some(url),
-            Some(_) => LOCKED.into(),
-            None if answer.trim().is_empty() => "Paste a YouTube link".into(),
-            None => "Not a YouTube link".into(),
-        };
+        match settle(&answer, unlocked) {
+            Ok(link) => return Some(link),
+            Err(why) => header = why,
+        }
         typed = answer;
     }
 }
 
-const HOSTS: [&str; 5] = [
+/// What the URL prompt settled on. `name` and `ids` come from an imported file:
+/// the heading names the folder, where yt-dlp would call the queue "Untitled List".
+#[derive(Debug, PartialEq, Eq)]
+struct Link {
+    url: String,
+    name: Option<String>,
+    ids: Vec<String>,
+}
+
+impl Link {
+    fn plain(url: String) -> Link {
+        Link { url, name: None, ids: Vec::new() }
+    }
+
+    // Sets the folder either way: a plain link must not write into the last run's.
+    fn adopt(self, cfg: &mut Config, tx: &Sender<Msg>) {
+        cfg.url = self.url;
+        cfg.folder = self.name.map(|name| import_folder(&cfg.dir, name, &self.ids, tx));
+    }
+}
+
+// Any other same-named folder would be taken over: its `#url` and `.m3u8` rewritten and every
+// track it held offered to `D`. An import sharing a track with this one is an edited copy of it.
+fn import_folder(dir: &Path, name: String, ids: &[String], tx: &Sender<Msg>) -> String {
+    let ours = |name: &str| {
+        let folder = dir.join(name);
+        !folder.exists()
+            || manifest::load(&folder)
+                .url
+                .and_then(|url| import::queue_ids(&url))
+                .is_some_and(|held| held.iter().any(|id| ids.contains(id)))
+    };
+    if ours(&name) {
+        return name;
+    }
+    let free = (2..).map(|n| format!("{name} ({n})")).find(|n| ours(n)).unwrap_or(name.clone());
+    let _ = tx.send(Msg::Log(format!("{name} is another playlist's folder  ·  importing into {free}")));
+    free
+}
+
+/// A link, or a markdown file of links, or the prompt header that says why not.
+fn settle(answer: &str, unlocked: &Unlocked) -> Result<Link, String> {
+    if let Some(url) = youtube_url(answer) {
+        if locked(&url, unlocked) {
+            return Err(LOCKED.into());
+        }
+        return Ok(Link::plain(url));
+    }
+    if answer.trim().is_empty() {
+        return Err("Paste a YouTube link".into());
+    }
+    let found = import::read(answer).map_err(|fault| fault.to_string())?;
+    if found.music && !unlocked.has(Feature::Music) {
+        return Err(LOCKED.into());
+    }
+    Ok(Link { url: found.url(), name: found.name, ids: found.ids })
+}
+
+pub(crate) const HOSTS: [&str; 5] = [
     "youtube.com",
     "www.youtube.com",
     "m.youtube.com",
@@ -145,7 +215,7 @@ const HOSTS: [&str; 5] = [
     "youtu.be",
 ];
 
-const MUSIC_HOST: &str = "music.youtube.com";
+pub(crate) const MUSIC_HOST: &str = "music.youtube.com";
 
 /// A YouTube Music link, while the console has not unlocked them.
 fn locked(input: &str, unlocked: &Unlocked) -> bool {
@@ -154,7 +224,7 @@ fn locked(input: &str, unlocked: &Unlocked) -> bool {
 }
 
 /// The lowercased host and the path after it, credentials and port dropped.
-fn split_url(full: &str) -> Option<(String, &str)> {
+pub(crate) fn split_url(full: &str) -> Option<(String, &str)> {
     let rest = full.split_once("://")?.1;
     let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
     let host = authority
@@ -296,14 +366,12 @@ fn finish(
             Some(Answer::Another) => {
                 // Cancelling the URL question goes back here, not out, and
                 // leaves the last run's outcome exactly as it was.
-                let Some(url) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "") else {
+                let Some(link) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "") else {
                     continue;
                 };
                 let _ = tx.send(Msg::Restart);
                 tracks.clear();
-                cfg.url = url;
-                // As in `start_url`: this playlist is not the last one.
-                cfg.folder = None;
+                link.adopt(cfg, tx);
                 let gate = cfg.pick;
                 result = pipeline(cfg, tx, cancel, tracks, Pass::plain(gate)).map_err(|e| e.to_string());
             }
@@ -3263,16 +3331,16 @@ fn start_url(
     tracks: &mut Vec<Track>,
     asker: &Asker,
 ) -> Option<Result<String>> {
-    let Some(url) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "") else {
+    let Some(link) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "") else {
         let _ = tx.send(Msg::Flash("cancelled".into()));
         return None;
     };
     let _ = tx.send(Msg::Restart);
     tracks.clear();
-    cfg.url = url;
     /* Load-bearing: a new playlist has no folder of its own yet, and the last
-       one's would pull every track of this one into that folder. */
-    cfg.folder = None;
+       one's would pull every track of this one into that folder. `adopt`
+       clears it, or names it after an imported file's heading. */
+    link.adopt(cfg, tx);
     /* The same question the first-start prompt asks above: one menu before
        the download, Esc keeping whatever the session already had. A failed
        save reports rather than aborting the URL that was just typed. */
@@ -3300,10 +3368,11 @@ fn sync_open(
     let folder = folder_of(tracks).context("no folder is open to sync")?;
     if attaching {
         let name = folder.file_name().unwrap_or_default().to_string_lossy().to_string();
-        let Some(url) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "") else {
+        let Some(link) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "") else {
             bail!("cancelled  ·  nothing was downloaded");
         };
-        cfg.url = url;
+        // The folder being attached is the one named below, whatever an imported file calls itself.
+        Link { name: None, ..link }.adopt(cfg, tx);
         /* Before the run, because `output_template` reads it: without it the
            download writes the whole playlist into a second folder named after
            the playlist upstream and leaves this one sitting beside it. */
@@ -4728,6 +4797,111 @@ pub mod tests {
         });
     }
 
+    fn import_file(tag: &str, text: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("earworm-import-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("mix.ytmusic.md");
+        std::fs::write(&file, text).unwrap();
+        file
+    }
+
+    #[test]
+    fn a_file_of_music_links_is_locked_like_the_links_themselves() {
+        let file = import_file("lock", "# Night drive\nhttps://music.youtube.com/watch?v=UEZ-apKKDKQ\n");
+        let path = file.display().to_string();
+        let unlocked = Unlocked::default();
+        assert_eq!(settle(&path, &unlocked), Err(LOCKED.to_string()));
+        unlocked.grant(Feature::Music);
+        let link = settle(&path, &unlocked).unwrap();
+        assert_eq!(link.url, "https://www.youtube.com/watch_videos?video_ids=UEZ-apKKDKQ");
+        assert_eq!(link.name.as_deref(), Some("Night drive"));
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
+    }
+
+    #[test]
+    fn the_url_prompt_takes_a_dragged_file_and_reasks_on_a_missing_one() {
+        let file = import_file("prompt", "# Night drive\nhttps://youtu.be/UEZ-apKKDKQ\n");
+        let dragged = file.display().to_string().replace(' ', "\\ ");
+        let unlocked = Unlocked::default();
+        let (tx, rx) = channel();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| prompt_url(&tx, Escape::Keep, &unlocked, ""));
+            let mut headers = Vec::new();
+            for answer in ["~/no/such/mix.md", dragged.as_str()] {
+                while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
+                    if let Msg::Ask(crate::app::Prompt::Input { header, .. }, reply) = msg {
+                        headers.push(header);
+                        reply.send(Reply::Text(answer.into())).unwrap();
+                        break;
+                    }
+                }
+            }
+            let link = worker.join().unwrap().expect("the file was refused");
+            assert_eq!(link.name.as_deref(), Some("Night drive"));
+            assert_eq!(headers, ["YouTube playlist URL", "No file at that path"]);
+        });
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
+    }
+
+
+    #[test]
+    fn a_path_that_is_not_a_file_is_still_a_mistyped_link() {
+        let unlocked = Unlocked::default();
+        assert_eq!(settle("youtube.co/watch?v=x", &unlocked), Err("Not a YouTube link".to_string()));
+        assert_eq!(settle("/no/such/file.md", &unlocked), Err("No file at that path".to_string()));
+        assert_eq!(settle("  ", &unlocked), Err("Paste a YouTube link".to_string()));
+    }
+
+    // The heading names the folder, or the download lands in one yt-dlp calls "Untitled List".
+    #[test]
+    fn an_import_off_the_command_line_names_its_folder_and_asks_nothing() {
+        let file = import_file("cli", "# Night drive\nhttps://youtu.be/UEZ-apKKDKQ\n");
+        let mut cfg = config(true);
+        cfg.dir = file.parent().unwrap().to_path_buf();
+        // A same-named folder this import did not make, so the name has to be checked under `dir`.
+        std::fs::create_dir_all(cfg.dir.join("Night drive")).unwrap();
+        cfg.import = Some(file.display().to_string());
+        let (tx, rx) = mpsc::channel();
+        assert!(matches!(ask_start(&mut cfg, &tx), Start::Playlist));
+        assert!(!rx.try_iter().any(|msg| matches!(msg, Msg::Ask(..))), "an importable file was asked about");
+        assert_eq!(cfg.url, "https://www.youtube.com/watch_videos?video_ids=UEZ-apKKDKQ");
+        assert_eq!(cfg.folder.as_deref(), Some("Night drive (2)"));
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
+    }
+
+    #[test]
+    fn an_import_never_takes_over_a_folder_it_did_not_make() {
+        let dir = std::env::temp_dir().join(format!("earworm-import-clash-{}", std::process::id()));
+        let (tx, _rx) = mpsc::channel();
+        for (folder, url) in [
+            ("Mix", Some("https://www.youtube.com/playlist?list=PL1")),
+            ("Mix (2)", None),
+            ("Queue", Some("https://www.youtube.com/watch_videos?video_ids=UEZ-apKKDKQ")),
+        ] {
+            std::fs::create_dir_all(dir.join(folder)).unwrap();
+            if let Some(url) = url {
+                std::fs::write(manifest::path(&dir.join(folder)), format!("#url\t{url}\n")).unwrap();
+            }
+        }
+        let ids = |list: &[&str]| list.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        let edited = ids(&["dQw4w9WgXcQ", "UEZ-apKKDKQ"]);
+        let unrelated = ids(&["dQw4w9WgXcQ"]);
+        assert_eq!(import_folder(&dir, "Mix".into(), &edited, &tx), "Mix (3)");
+        assert_eq!(import_folder(&dir, "Queue".into(), &edited, &tx), "Queue", "an edited copy syncs its folder");
+        assert_eq!(import_folder(&dir, "Queue".into(), &unrelated, &tx), "Queue (2)", "another file took it over");
+        assert_eq!(import_folder(&dir, "New".into(), &unrelated, &tx), "New");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_plain_link_after_an_import_does_not_write_into_its_folder() {
+        let mut cfg = config(true);
+        cfg.folder = Some("Night drive".into());
+        let (tx, _rx) = mpsc::channel();
+        settle("https://www.youtube.com/playlist?list=PL1", &cfg.unlocked.clone()).unwrap().adopt(&mut cfg, &tx);
+        assert_eq!(cfg.folder, None);
+    }
+
     /* The unlock is read off each answer, not once when the prompt opens:
        the console is used while this question is still on screen. */
     #[test]
@@ -4752,7 +4926,7 @@ pub mod tests {
                     break;
                 }
             }
-            assert_eq!(worker.join().unwrap().as_deref(), Some(link));
+            assert_eq!(worker.join().unwrap().map(|l| l.url).as_deref(), Some(link));
             assert_eq!(
                 asked,
                 vec![(LOCKED.to_string(), link.to_string()), (LOCKED.to_string(), link.to_string())],
@@ -8108,6 +8282,7 @@ pub mod tests {
             update_check: true,
             achievements: true,
             folder: None,
+            import: None,
             extra: Vec::new(),
             acoustid_key: None,
             unlocked: Default::default(),

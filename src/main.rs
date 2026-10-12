@@ -6,6 +6,7 @@ mod custom;
 mod deps;
 mod export;
 mod icons;
+mod import;
 mod lookup;
 mod manifest;
 mod player;
