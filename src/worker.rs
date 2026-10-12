@@ -793,7 +793,7 @@ fn resync(
         let Some(url) = shelf.url.clone() else {
             skipped += 1;
             let _ = tx.send(Msg::Log(format!(
-                "{name}: no playlist URL  ·  open it and press S to attach one"
+                "{name}: no playlist URL  ·  press S on it to attach one"
             )));
             continue;
         };
@@ -3049,6 +3049,7 @@ fn serve(
                 None
             }
             Cmd::SyncOne => Some(sync_open(cfg, tx, cancel, tracks)),
+            Cmd::Sync(folder) => sync_shelf(cfg, tx, cancel, tracks, &folder),
             Cmd::ResyncAll => Some(resync(cfg, tx, cancel, tracks, library(&cfg.dir))),
             Cmd::Url => start_url(cfg, tx, cancel, tracks, &asker),
             Cmd::Edit(index) => {
@@ -3322,6 +3323,36 @@ fn sync_open(
        exactly as it found it, which matters because a hidden file appearing
        in somebody's music folder is meant to be said out loud. */
     pipeline(cfg, tx, cancel, tracks, pass)
+}
+
+/// `S` on a library row. `None` when there is nothing to sync, so the finish
+/// menu is not offered for a run that never started.
+fn sync_shelf(
+    cfg: &mut Config,
+    tx: &Sender<Msg>,
+    cancel: &AtomicBool,
+    tracks: &mut Vec<Track>,
+    folder: &Path,
+) -> Option<Result<String>> {
+    let Some(shelf) = library(&cfg.dir).into_iter().find(|s| s.path == folder) else {
+        report(tx, Err(anyhow::anyhow!("that playlist is no longer there")));
+        return None;
+    };
+    // `sync_open` reads the URL and pinned name off whatever is open.
+    let opened = open_shelf(cfg, tx, tracks, &shelf);
+    if opened.is_ok() {
+        return Some(sync_open(cfg, tx, cancel, tracks));
+    }
+    // An emptied folder will not open, and a sync is how it fills back up.
+    let Some(url) = shelf.url else {
+        report(tx, opened.map(|_| ()));
+        return None;
+    };
+    cfg.url = url;
+    cfg.folder = manifest::load(&shelf.path).name;
+    tracks.clear();
+    let _ = tx.send(Msg::Restart);
+    Some(pipeline(cfg, tx, cancel, tracks, Pass::plain(cfg.pick)))
 }
 
 /// Downloads and re-tags whatever came out `failed`. The archive names every

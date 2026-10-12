@@ -1038,6 +1038,14 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 }
             }
         },
+        KeyCode::Char('S') if app.can_browse() => match app.custom_row() {
+            Some(_) => app.say("a custom playlist is built here  ·  there is nothing upstream to sync"),
+            None => {
+                if let Some(folder) = app.selected_shelf().map(|s| s.path.clone()) {
+                    app.send(Cmd::Sync(folder));
+                }
+            }
+        },
         KeyCode::Char('R') if app.can_browse() => app.send(Cmd::ResyncAll),
         KeyCode::Char('n') if app.can_browse() => app.send(Cmd::Url),
         KeyCode::Char('N') if app.can_browse() => app.send(Cmd::NewPlaylist),
@@ -2206,6 +2214,34 @@ mod tests {
             files: files.iter().map(|f| ((*f).to_string(), true)).collect(),
             ..Default::default()
         }
+    }
+
+    // Filtered so the row under the cursor is not the first one in the library.
+    #[test]
+    fn the_library_sync_key_sends_the_folder_under_the_cursor() {
+        let (mut app, cmds) = browsing(vec![
+            shelf("Focus", &["01 A.opus"]),
+            shelf("Sleep", &["01 B.opus"]),
+        ]);
+        handle_key(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
+        for c in "sleep".chars() {
+            handle_key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        handle_key(&mut app, KeyCode::Char('S'), KeyModifiers::NONE);
+        assert!(matches!(
+            cmds.try_recv(),
+            Ok(Cmd::Sync(path)) if path == std::path::Path::new("/music/Sleep")
+        ));
+    }
+
+    // With no URL behind it, a sync would ask to attach one to a playlist built here.
+    #[test]
+    fn the_library_sync_key_refuses_a_custom_playlist() {
+        let (mut app, cmds) = custom_library();
+        handle_key(&mut app, KeyCode::Char('S'), KeyModifiers::NONE);
+        assert!(cmds.try_recv().is_err(), "S sent a command for a custom playlist");
     }
 
     /* `/` on the library put the band up and then sent every letter to the

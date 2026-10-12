@@ -1688,7 +1688,7 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 // Dropped from the library's bar in this order when it is short.
-const LIBRARY_OPTIONAL: [&str; 2] = ["   t find a track", "   R resync all"];
+const LIBRARY_OPTIONAL: [&str; 2] = ["   t find a track", "   S sync"];
 
 // The whole library's health in one line, and how many files are missing, which is what colours it.
 fn library_text(app: &App) -> Option<(String, usize)> {
@@ -1795,7 +1795,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         hints.push(("   n new URL".to_string(), Style::new().fg(p.muted)));
         hints.push(("   N create custom playlist".to_string(), Style::new().fg(p.muted)));
         hints.push(("   t find a track".to_string(), Style::new().fg(p.muted)));
-        hints.push(("   R resync all".to_string(), Style::new().fg(p.muted)));
+        hints.push(("   S sync".to_string(), Style::new().fg(p.muted)));
     } else if !app.tracks.is_empty() && app.picking.is_none() {
         if app.can_command() {
             extra.push(("   e edit".to_string(), Style::new().fg(p.accent)));
@@ -1996,7 +1996,8 @@ fn draw_help(frame: &mut Frame, app: &App) {
             rows.push(("play", "space", "play/pause cliamp"));
         }
         rows.extend([
-            ("sync", "R", "sync every playlist"),
+            ("sync", "S", "sync this playlist"),
+            ("", "R", "sync every playlist"),
             ("", "n", "sync a new URL"),
             ("set", "f", "audio format for new downloads"),
             ("view", "l", "yt-dlp output"),
@@ -5237,8 +5238,8 @@ mod tests {
             if let Some(search) = at("t find a track") {
                 assert!(at("N create custom playlist").unwrap() < search && search < at("h keys").unwrap(), "{width}: {bar:?}");
             }
-            // The search goes before the resync does, so the search never shows without it.
-            assert!(!(at("t find a track").is_some() && at("R resync all").is_none()), "{width}: {bar:?}");
+            // The search goes before the sync does, so the search never shows without it.
+            assert!(!(at("t find a track").is_some() && at("S sync").is_none()), "{width}: {bar:?}");
         }
     }
 

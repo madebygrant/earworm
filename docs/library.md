@@ -11,8 +11,9 @@ it synced. `--list` prints the same to stdout, with the URL, and exits.
 Enter opens a folder without touching the network. The rows come from
 `.earworm`, the tags on the files and the `.m3u8`. Every post-run key then
 works on those tracks, which makes the library the way to fix a tag on
-something downloaded weeks ago. `S` syncs the open playlist against its saved
-URL, `R` syncs all of them, Esc goes back.
+something downloaded weeks ago. `S` syncs a playlist against its saved URL,
+either the open one or the row under the cursor on the library, `R` syncs all
+of them, Esc goes back.
 
 ## Folders earworm didn't download
 
@@ -337,4 +338,5 @@ Most failures are a network blip or a video that was briefly unavailable, so
 
 Folders downloaded before earworm started recording the URL need one sync by
 URL before `--resync` picks them up, and so does anything you copied in
-yourself. `S` on the open folder is where that URL is given.
+yourself. `S` on the folder, open or on the library, is where that URL is
+given.

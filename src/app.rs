@@ -419,6 +419,8 @@ pub enum Cmd {
     Open(PathBuf, Option<String>),
     /// Sync the playlist that is open, from the URL its manifest recorded.
     SyncOne,
+    /// Open a library row, then `SyncOne` it.
+    Sync(PathBuf),
     ResyncAll,
     /// Ask for a URL and sync it, which is the only way into a new playlist
     /// once the library screen has replaced the opening question.
