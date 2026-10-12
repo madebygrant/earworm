@@ -888,6 +888,11 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 app.send(Cmd::Remove(folder));
             }
         }
+        KeyCode::Char('S') if app.can_browse() => {
+            if let Some(folder) = app.selected_shelf().map(|s| s.path.clone()) {
+                app.send(Cmd::Sync(folder));
+            }
+        }
         KeyCode::Char('R') if app.can_browse() => app.send(Cmd::ResyncAll),
         KeyCode::Char('n') if app.can_browse() => app.send(Cmd::Url),
         _ => {}
@@ -1643,6 +1648,26 @@ mod tests {
             files: files.iter().map(|f| ((*f).to_string(), true)).collect(),
             ..Default::default()
         }
+    }
+
+    // Filtered so the row under the cursor is not the first one in the library.
+    #[test]
+    fn the_library_sync_key_sends_the_folder_under_the_cursor() {
+        let (mut app, cmds) = browsing(vec![
+            shelf("Focus", &["01 A.opus"]),
+            shelf("Sleep", &["01 B.opus"]),
+        ]);
+        handle_key(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
+        for c in "sleep".chars() {
+            handle_key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+        handle_key(&mut app, KeyCode::Char('S'), KeyModifiers::NONE);
+        assert!(matches!(
+            cmds.try_recv(),
+            Ok(Cmd::Sync(path)) if path == std::path::Path::new("/music/Sleep")
+        ));
     }
 
     /* `/` on the library put the band up and then sent every letter to the

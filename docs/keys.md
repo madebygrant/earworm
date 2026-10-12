@@ -62,6 +62,7 @@ touch, and failures](images/keys.png)
 | `a` | show every folder, albums only, or playlists only |
 | `p` | play the folder under the cursor in cliamp (needs a playlist file) |
 | `space` | play/pause cliamp |
+| `S` | sync the playlist under the cursor (asks for a URL if it has none) |
 | `R` | sync every playlist |
 | `n` | sync a new URL |
 | `f` | choose the format new downloads arrive in |

@@ -1451,7 +1451,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     } else if app.view == View::Library {
         hints.push(("   enter open".to_string(), Style::new().fg(p.accent)));
         hints.push(("   t find a track".to_string(), Style::new().fg(p.muted)));
-        hints.push(("   R resync all".to_string(), Style::new().fg(p.muted)));
+        hints.push(("   S sync".to_string(), Style::new().fg(p.muted)));
         hints.push(("   n new URL".to_string(), Style::new().fg(p.muted)));
     } else if !app.tracks.is_empty() && app.picking.is_none() {
         if app.can_command() {
@@ -1613,7 +1613,8 @@ fn draw_help(frame: &mut Frame, app: &App) {
             rows.push(("play", "space", "play/pause cliamp"));
         }
         rows.extend([
-            ("sync", "R", "sync every playlist"),
+            ("sync", "S", "sync this playlist"),
+            ("", "R", "sync every playlist"),
             ("", "n", "sync a new URL"),
             ("set", "f", "audio format for new downloads"),
             ("view", "l", "yt-dlp output"),
