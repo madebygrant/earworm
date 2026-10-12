@@ -10,9 +10,13 @@ use anyhow::{Context, Result, bail};
 use crate::app::{Asker, Cmd, Escape, Msg, Reply, Shelf, Status, Track, Watch};
 use crate::cheats::{Feature, LOCKED, Unlocked};
 use crate::config::{self, Config, composed, decomposed};
+use crate::custom;
+use crate::export;
+use crate::import;
 use crate::lookup;
 use crate::manifest;
 use crate::player;
+use crate::playlists;
 use crate::tag::{self, CoverState};
 use crate::ytdlp;
 
@@ -56,6 +60,20 @@ enum Start {
    question: its rows are the playlists the URL question was going to be
    about, and one of them can be opened without downloading anything. */
 fn ask_start(cfg: &mut Config, tx: &Sender<Msg>) -> Start {
+    // A file that will not import lands at the prompt with its path typed, saying why.
+    if let Some(path) = cfg.import.take() {
+        let link = settle(&path, &cfg.unlocked).ok().or_else(|| {
+            let _ = tx.send(Msg::Stage("waiting for a playlist URL".into()));
+            prompt_url(tx, Escape::Quit, &cfg.unlocked, &path)
+        });
+        return match link {
+            Some(link) => {
+                link.adopt(cfg, tx);
+                Start::Playlist
+            }
+            None => Start::Cancelled,
+        };
+    }
     /* A locked link from the command line lands at the prompt, typed out,
        rather than failing: the console can unlock it from there. */
     if !cfg.url.is_empty() {
@@ -65,14 +83,14 @@ fn ask_start(cfg: &mut Config, tx: &Sender<Msg>) -> Start {
         let _ = tx.send(Msg::Stage("waiting for a playlist URL".into()));
         let typed = cfg.url.clone();
         return match prompt_url(tx, Escape::Quit, &cfg.unlocked, &typed) {
-            Some(url) => {
-                cfg.url = url;
+            Some(link) => {
+                link.adopt(cfg, tx);
                 Start::Playlist
             }
             None => Start::Cancelled,
         };
     }
-    let saved = library(&cfg.dir);
+    let saved = library_all(&cfg.dir);
     if cfg.resync {
         return Start::Resync(saved);
     }
@@ -82,8 +100,8 @@ fn ask_start(cfg: &mut Config, tx: &Sender<Msg>) -> Start {
 
     let _ = tx.send(Msg::Stage("waiting for a playlist URL".into()));
     match prompt_url(tx, Escape::Quit, &cfg.unlocked, "") {
-        Some(url) => {
-            cfg.url = url;
+        Some(link) => {
+            link.adopt(cfg, tx);
             /* The only format question before the first download: the run
                adopts whatever this leaves behind. A URL from the command line
                returns above, having arrived fully specified. `start_url` asks
@@ -103,38 +121,93 @@ fn ask_start(cfg: &mut Config, tx: &Sender<Msg>) -> Start {
    handing back the text means fixing it instead of retyping it. `None` is a
    cancel, and `escape` is what the caller does with one: only the very first
    question has nothing to go back to. */
-fn prompt_url(tx: &Sender<Msg>, escape: Escape, unlocked: &Unlocked, typed: &str) -> Option<String> {
+fn prompt_url(tx: &Sender<Msg>, escape: Escape, unlocked: &Unlocked, typed: &str) -> Option<Link> {
     let asker = Asker {
         tx: tx.clone(),
         enabled: true,
     };
-    let mut header = if locked(typed, unlocked) {
-        LOCKED.to_string()
-    } else {
-        "YouTube playlist URL".to_string()
+    let mut header = match settle(typed, unlocked) {
+        Err(why) if !typed.trim().is_empty() => why,
+        _ => "YouTube playlist URL".to_string(),
     };
     let mut typed = typed.to_string();
     /* The first thing a new user is ever asked, on a screen with nothing else
        on it yet. Both facts they need before typing: that one video is a
        valid answer, and what the only other key does. */
     let note = match escape {
-        Escape::Quit => "a playlist or a single video  ·  esc quits",
-        _ => "a playlist or a single video",
+        Escape::Quit => "a playlist, a video or a file of links  ·  esc quits",
+        _ => "a playlist, a video or a file of links",
     };
     loop {
         let answer = asker.input_noted(&header, note, &typed, escape)?;
         // Asked of the answer, not the opening: the console can unlock mid-prompt.
-        header = match youtube_url(&answer) {
-            Some(url) if !locked(&url, unlocked) => return Some(url),
-            Some(_) => LOCKED.into(),
-            None if answer.trim().is_empty() => "Paste a YouTube link".into(),
-            None => "Not a YouTube link".into(),
-        };
+        match settle(&answer, unlocked) {
+            Ok(link) => return Some(link),
+            Err(why) => header = why,
+        }
         typed = answer;
     }
 }
 
-const HOSTS: [&str; 5] = [
+/// What the URL prompt settled on. `name` and `ids` come from an imported file:
+/// the heading names the folder, where yt-dlp would call the queue "Untitled List".
+#[derive(Debug, PartialEq, Eq)]
+struct Link {
+    url: String,
+    name: Option<String>,
+    ids: Vec<String>,
+}
+
+impl Link {
+    fn plain(url: String) -> Link {
+        Link { url, name: None, ids: Vec::new() }
+    }
+
+    // Sets the folder either way: a plain link must not write into the last run's.
+    fn adopt(self, cfg: &mut Config, tx: &Sender<Msg>) {
+        cfg.url = self.url;
+        cfg.folder = self.name.map(|name| import_folder(&cfg.dir, name, &self.ids, tx));
+    }
+}
+
+// Any other same-named folder would be taken over: its `#url` and `.m3u8` rewritten and every
+// track it held offered to `D`. An import sharing a track with this one is an edited copy of it.
+fn import_folder(dir: &Path, name: String, ids: &[String], tx: &Sender<Msg>) -> String {
+    let ours = |name: &str| {
+        let folder = dir.join(name);
+        !folder.exists()
+            || manifest::load(&folder)
+                .url
+                .and_then(|url| import::queue_ids(&url))
+                .is_some_and(|held| held.iter().any(|id| ids.contains(id)))
+    };
+    if ours(&name) {
+        return name;
+    }
+    let free = (2..).map(|n| format!("{name} ({n})")).find(|n| ours(n)).unwrap_or(name.clone());
+    let _ = tx.send(Msg::Log(format!("{name} is another playlist's folder  ·  importing into {free}")));
+    free
+}
+
+/// A link, or a markdown file of links, or the prompt header that says why not.
+fn settle(answer: &str, unlocked: &Unlocked) -> Result<Link, String> {
+    if let Some(url) = youtube_url(answer) {
+        if locked(&url, unlocked) {
+            return Err(LOCKED.into());
+        }
+        return Ok(Link::plain(url));
+    }
+    if answer.trim().is_empty() {
+        return Err("Paste a YouTube link".into());
+    }
+    let found = import::read(answer).map_err(|fault| fault.to_string())?;
+    if found.music && !unlocked.has(Feature::Music) {
+        return Err(LOCKED.into());
+    }
+    Ok(Link { url: found.url(), name: found.name, ids: found.ids })
+}
+
+pub(crate) const HOSTS: [&str; 5] = [
     "youtube.com",
     "www.youtube.com",
     "m.youtube.com",
@@ -142,7 +215,7 @@ const HOSTS: [&str; 5] = [
     "youtu.be",
 ];
 
-const MUSIC_HOST: &str = "music.youtube.com";
+pub(crate) const MUSIC_HOST: &str = "music.youtube.com";
 
 /// A YouTube Music link, while the console has not unlocked them.
 fn locked(input: &str, unlocked: &Unlocked) -> bool {
@@ -151,7 +224,7 @@ fn locked(input: &str, unlocked: &Unlocked) -> bool {
 }
 
 /// The lowercased host and the path after it, credentials and port dropped.
-fn split_url(full: &str) -> Option<(String, &str)> {
+pub(crate) fn split_url(full: &str) -> Option<(String, &str)> {
     let rest = full.split_once("://")?.1;
     let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
     let host = authority
@@ -293,14 +366,12 @@ fn finish(
             Some(Answer::Another) => {
                 // Cancelling the URL question goes back here, not out, and
                 // leaves the last run's outcome exactly as it was.
-                let Some(url) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "") else {
+                let Some(link) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "") else {
                     continue;
                 };
                 let _ = tx.send(Msg::Restart);
                 tracks.clear();
-                cfg.url = url;
-                // As in `start_url`: this playlist is not the last one.
-                cfg.folder = None;
+                link.adopt(cfg, tx);
                 let gate = cfg.pick;
                 result = pipeline(cfg, tx, cancel, tracks, Pass::plain(gate)).map_err(|e| e.to_string());
             }
@@ -401,6 +472,42 @@ pub fn library(dir: &Path) -> Vec<Shelf> {
     found
 }
 
+/// What the library screen draws: the folders, then the custom playlists, by name.
+// `library` stays folders only. Resync, `--list`, `--check` and the duplicate checks all treat a row as a
+// directory to sync or read, and a custom playlist is a list of ids that is none of those.
+pub fn library_all(dir: &Path) -> Vec<Shelf> {
+    let mut found = library(dir);
+    let lists = playlists::list(dir);
+    if lists.is_empty() {
+        return found;
+    }
+    let others = Others::everything(dir);
+    for list in lists {
+        let resolved = resolve_entries(&others, dir, &list.entries);
+        let files: Vec<(String, bool)> = list
+            .entries
+            .iter()
+            .zip(&resolved)
+            .map(|(entry, file)| {
+                let name = file.as_deref().unwrap_or(&entry.hint).file_name().unwrap_or_default();
+                (name.to_string_lossy().to_string(), file.is_some())
+            })
+            .collect();
+        let present = files.iter().filter(|(_, here)| *here).count();
+        found.push(Shelf {
+            path: playlists::path_of(dir, &list.name),
+            name: list.name,
+            tracks: present,
+            missing: files.len() - present,
+            files,
+            kind: Some(manifest::Kind::Custom),
+            ..Shelf::default()
+        });
+    }
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found
+}
+
 /// The folders `library` is leaving out, by name.
 /* Hiding takes a folder off every screen and out of `--resync`, and the only
    word it ever gets is one flash at the moment it happens. A month later
@@ -464,7 +571,7 @@ fn contents(folder: &Path, sidecar: &manifest::Sidecar) -> Vec<(String, PathBuf)
 /* Filtered on the extensions `FORMATS` can produce rather than on anything
    wider: a folder holding artwork, a text file and one `.m4a` is a one-track
    playlist, and a `.DS_Store` beside it must not be counted as a track. */
-fn audio_files(folder: &Path) -> Vec<PathBuf> {
+pub(crate) fn audio_files(folder: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(folder) else {
         return Vec::new();
     };
@@ -559,6 +666,7 @@ fn open_shelf(
             track.album = info.album;
             track.year = info.year;
             track.duration = info.duration;
+            track.isrc = info.isrc;
             // An untagged file would otherwise read as "? - ?", which says
             // less about which track it is than the filename does.
             if !track.title.is_empty() {
@@ -605,6 +713,8 @@ fn open_shelf(
     }
 
     tracks.sort_by_key(|t| t.index);
+    // Before the tracks go out, so a reopened folder shows the same flags a sync did.
+    flag_isrc_twins(&Others::new(cfg, &shelf.path), tracks);
     let _ = tx.send(Msg::Tracks(tracks.clone()));
 
     let departed = tracks.iter().filter(|t| t.status == Status::Gone).count();
@@ -863,10 +973,35 @@ fn pipeline(
         kind = Some((manifest::Kind::Album, "its chapters"));
     }
     let album = matches!(kind, Some((manifest::Kind::Album, _)));
+    // Chapters are cut from one video and have no id to look up,
+    // so a split pass neither copies nor compares titles.
+    let here = folder_of(tracks);
+    let others = Others::new(cfg, here.as_deref().unwrap_or(Path::new("")));
+    let known = match here.as_deref().filter(|_| split.is_none()) {
+        Some(here) => {
+            let wanted: HashSet<&str> = tracks
+                .iter()
+                .filter(|t| t.status == Status::Pending)
+                .map(|t| t.id.as_str())
+                .collect();
+            let known = library_index(&others, &cfg.format, &wanted);
+            // `library` stats every file, so ask it only when a row
+            // is a download the id index could not account for.
+            let unplaced = tracks
+                .iter()
+                .any(|t| t.status == Status::Pending && !known.contains_key(&t.id));
+            let shelves = if unplaced { library(&cfg.dir) } else { Vec::new() };
+            mark_twins(tracks, &known, &shelves, here);
+            known
+        }
+        None => HashMap::new(),
+    };
     let _ = tx.send(Msg::Tracks(tracks.clone()));
 
     // Held on to, because `to_bring` has to honour the same answer.
     let picked = pass.gate.then(|| ask_which(tx, tracks)).flatten();
+    // After the gate, so a track nobody picked is not copied either.
+    let copied = copy_known(cfg, tx, tracks, &known);
 
     let have = tracks.iter().filter(|t| t.status == Status::Have).count();
     let _ = tx.send(Msg::Stage(format!(
@@ -930,6 +1065,9 @@ fn pipeline(
         album_loudness(tx, tracks);
     }
 
+    for (index, twin) in flag_isrc_twins(&others, tracks) {
+        let _ = tx.send(Msg::Twin { index, twin });
+    }
     record_kind(tx, folder_of(tracks).as_deref(), kind);
     sync_manifest(cfg, tracks);
     let playlist_file = write_playlist(cfg, tracks)?;
@@ -940,6 +1078,9 @@ fn pipeline(
     }
     /* Said out loud, because the rows scroll off and a --resync's one line
        per folder is the only record anyone reads afterwards. */
+    if copied > 0 {
+        summary = format!("{summary}, {copied} copied from other playlists");
+    }
     if converted > 0 {
         summary = format!("{summary}, {converted} brought to {}", cfg.format);
     }
@@ -990,10 +1131,15 @@ fn settle_split(
     let video = tracks.first()?.clone();
     let folder = video.path.as_deref()?.parent()?.to_path_buf();
     let split = manifest::is_split(&folder, &video.id);
+    // Whatever a cut that was killed left, found on the next sync and not only when something is cut.
+    if split {
+        sweep_scratch(&folder);
+    }
     if chapters.is_empty() {
         // Upstream lost its chapters: the cuts on disk are still the folder, and fetching the video again would put it back beside them.
         let held = held_chapters(&folder, &video.id);
-        if !split || held.is_empty() {
+        // One video only: a playlist that also has chapter entries for its first track is not that video.
+        if !split || held.is_empty() || tracks.len() != 1 {
             return None;
         }
         *tracks = held;
@@ -1040,10 +1186,20 @@ fn held_chapters(folder: &Path, video: &str) -> Vec<Track> {
 }
 
 // Numbered from one in listing order, and found again by the manifest on a later sync, which is what keeps a rename from costing the cut.
+// An id is a position, so a creator who inserts a chapter would otherwise hand every later position the wrong
+// file. The span each cut came from is recorded, and a chapter takes the file whose span it matches, wherever
+// it sat before; a position whose recorded span no longer matches is cut again. A folder split before spans
+// were recorded has none, and keeps trusting the position.
 fn chapter_tracks(cfg: &Config, video: &Track, chapters: &[ytdlp::Chapter], folder: &Path) -> Vec<Track> {
     let ext = config::extension(&cfg.format);
     let known = manifest::read(folder);
-    chapters
+    let prefix = format!("{}#", video.id);
+    let recorded: Vec<(String, f64, f64)> =
+        manifest::load(folder).chapters.into_iter().filter(|(id, _, _)| id.starts_with(&prefix)).collect();
+    // A second either way is a rounding of the same moment, which is how a listing and a cut can differ.
+    let near = |start: f64, end: f64, chapter: &ytdlp::Chapter| (start - chapter.start).abs() <= 1.0 && (end - chapter.end).abs() <= 1.0;
+    let mut claimed: HashSet<PathBuf> = HashSet::new();
+    let tracks: Vec<Track> = chapters
         .iter()
         .enumerate()
         .map(|(i, chapter)| {
@@ -1056,17 +1212,48 @@ fn chapter_tracks(cfg: &Config, video: &Track, chapters: &[ytdlp::Chapter], fold
             }
             let mut track = Track::new(number, id.clone(), chapter.title.clone(), path);
             track.duration = (chapter.end - chapter.start).round() as u64;
-            match known.get(&id) {
-                Some(file) => {
+            let own = recorded.iter().find(|(held, _, _)| *held == id);
+            let by_span = recorded
+                .iter()
+                .filter(|(_, start, end)| near(*start, *end, chapter))
+                .filter_map(|(held, _, _)| known.get(held))
+                .find(|file| !claimed.contains(*file));
+            match (own, by_span) {
+                (Some((_, start, end)), _) if near(*start, *end, chapter) => {
+                    if let Some(file) = known.get(&id) {
+                        track.path = Some(file.clone());
+                        track.status = Status::Have;
+                    }
+                }
+                (_, Some(file)) => {
                     track.path = Some(file.clone());
                     track.status = Status::Have;
                 }
-                None if track.path.as_deref().is_some_and(Path::is_file) => track.status = Status::Have,
-                None => {}
+                // The position holds a cut of some other span: cut this one, and leave that file where it is.
+                (Some(_), None) => {}
+                (None, None) => match known.get(&id) {
+                    Some(file) => {
+                        track.path = Some(file.clone());
+                        track.status = Status::Have;
+                    }
+                    None if track.path.as_deref().is_some_and(Path::is_file) => track.status = Status::Have,
+                    None => {}
+                },
+            }
+            if track.status == Status::Have && let Some(file) = &track.path {
+                claimed.insert(file.clone());
             }
             track
         })
-        .collect()
+        .collect();
+    // So a folder split before spans were kept, or a chapter that moved, is described from now on.
+    for (track, chapter) in tracks.iter().zip(chapters).filter(|(t, _)| t.status == Status::Have) {
+        let held = recorded.iter().find(|(id, _, _)| *id == track.id);
+        if held.is_none_or(|(_, start, end)| !near(*start, *end, chapter)) {
+            let _ = manifest::set_chapter(folder, &track.id, chapter.start, chapter.end);
+        }
+    }
+    tracks
 }
 
 /* The download for a split video: the whole file once, then each chapter cut
@@ -1105,6 +1292,10 @@ fn fetch_split(
     // Whatever an earlier cut was killed in the middle of.
     if let Some(folder) = full.parent() {
         sweep_scratch(folder);
+        // Before the first cut: stopped in between, the folder holds the whole file and nothing else says it was split.
+        if let Err(err) = manifest::set_split(folder, &split.video.id) {
+            let _ = tx.send(Msg::Log(format!("split: could not record the choice: {err}")));
+        }
     }
     let artist = tag::read(&full).map(|info| info.artist).unwrap_or_default();
     // The cut drops the picture, and the video's thumbnail is what a chapter the lookup cannot place falls back on.
@@ -1162,6 +1353,9 @@ fn fetch_split(
                    still finds it, resumes from the full file and does not
                    call the video whole with chapter files lying beside it. */
                 write_manifest(cfg, tracks, false);
+                if let Some(folder) = full.parent() {
+                    let _ = manifest::set_chapter(folder, &tracks[i].id, chapter.start, chapter.end);
+                }
             }
             Err(err) => {
                 tracks[i].status = Status::Failed;
@@ -1176,14 +1370,21 @@ fn fetch_split(
             }
         }
     }
-    // A failed chapter may be recorded against the video's own file, which is there and is not its cut.
-    let whole_done = tracks.iter().all(|t| {
-        t.status != Status::Failed && t.path.as_deref().is_some_and(|p| p != full && p.is_file())
-    });
-    if whole_done {
+    if whole_is_done(tracks, &full) {
         let _ = std::fs::remove_file(&full);
     }
     warning
+}
+
+// The full file goes when every chapter the user wants has a cut of its own. A failed chapter may be recorded
+// against the video's own file, which is there and is not its cut, so the status is read as well as the file.
+// A chapter left unpicked has no file and is no reason to keep the video: it downloads again if it is ever wanted,
+// as an unpicked track does anywhere else.
+fn whole_is_done(tracks: &[Track], full: &Path) -> bool {
+    tracks.iter().all(|t| {
+        t.status == Status::Skipped
+            || (t.status != Status::Failed && t.path.as_deref().is_some_and(|p| p != full && p.is_file()))
+    })
 }
 
 // Runs after the tagging pass, because it needs every track's own gain first.
@@ -1392,6 +1593,341 @@ fn reconcile(tx: &Sender<Msg>, tracks: &mut Vec<Track>) {
     )));
 }
 
+// The pick gate's `copy from` is no longer true once the copy is done or has failed.
+fn unmark(tx: &Sender<Msg>, track: &mut Track) {
+    if track.twin.take().is_some() {
+        let _ = tx.send(Msg::Twin { index: track.index, twin: None });
+    }
+}
+
+/// A copy of a video that another folder already holds.
+struct Held {
+    file: PathBuf,
+    folder: String,
+}
+
+/// One other playlist folder under `--dir`, as its sidecar holds it.
+pub(crate) struct Other {
+    pub(crate) name: String,
+    pub(crate) sidecar: manifest::Sidecar,
+}
+
+/// The other playlist folders under `--dir`, read at most once per pass.
+// One read serves the id index, the title check and the ISRC check; a walk per question
+// made a `--resync` cost the square of the library. Lazy, so a pass with nothing to ask never reads.
+// Name order makes one video in three folders always copy from the same one.
+pub(crate) struct Others {
+    dir: PathBuf,
+    here: Option<std::ffi::OsString>,
+    hidden: bool,
+    read: std::cell::OnceCell<Vec<Other>>,
+}
+
+impl Others {
+    fn new(cfg: &Config, here: &Path) -> Self {
+        Others::at(&cfg.dir, here)
+    }
+
+    pub(crate) fn at(dir: &Path, here: &Path) -> Self {
+        Others {
+            dir: dir.to_path_buf(),
+            here: here.file_name().map(ToOwned::to_owned),
+            hidden: false,
+            read: std::cell::OnceCell::new(),
+        }
+    }
+
+    // For a custom playlist, which keeps playing a hidden folder's files: hiding takes a row off the library
+    // and nothing else, so what resolves an entry has to see the folder too.
+    pub(crate) fn everything(dir: &Path) -> Self {
+        Others { hidden: true, ..Others::at(dir, Path::new("")) }
+    }
+
+    pub(crate) fn all(&self) -> &[Other] {
+        self.read.get_or_init(|| {
+            let Ok(entries) = std::fs::read_dir(&self.dir) else {
+                return Vec::new();
+            };
+            let mut folders: Vec<PathBuf> = entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_dir() && p.file_name() != self.here.as_deref())
+                .filter(|p| !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with('.')))
+                .collect();
+            folders.sort();
+            folders
+                .into_iter()
+                .map(|folder| (folder.file_name().unwrap_or_default().to_string_lossy().to_string(), manifest::load(&folder)))
+                .filter(|(_, sidecar)| self.hidden || !sidecar.hidden)
+                .map(|(name, sidecar)| Other { name, sidecar })
+                .collect()
+        })
+    }
+}
+
+// Ids this pass wants, matched to files other folders hold. Built per pass, not per `--resync`,
+// so the second folder sees what the first just fetched. Only the chosen format counts, or
+// `convert` would have a second format to undo; `~` and chapter ids are no listing's.
+fn library_index(others: &Others, format: &str, wanted: &HashSet<&str>) -> HashMap<String, Held> {
+    let mut found: HashMap<String, Held> = HashMap::new();
+    if wanted.is_empty() {
+        return found;
+    }
+    for other in others.all() {
+        for (id, file) in &other.sidecar.entries {
+            if manifest::is_local(id) || manifest::is_chapter(id) {
+                continue;
+            }
+            if !wanted.contains(id.as_str()) || found.contains_key(id) || !file.is_file() {
+                continue;
+            }
+            if format_on_disk(file) != Some(format) {
+                continue;
+            }
+            found.insert(id.clone(), Held { file: file.clone(), folder: other.name.clone() });
+        }
+    }
+    found
+}
+
+// Where each entry of a custom playlist is now, or `None` for one that is gone.
+// The id resolves it, so a rename of the file or its folder breaks nothing. A video id is global and
+// the entry's folder only breaks a tie; a `~` id is a filename, so it only means something in its own folder.
+pub(crate) fn resolve_entries(others: &Others, root: &Path, entries: &[playlists::Entry]) -> Vec<Option<PathBuf>> {
+    let mut held: HashMap<&str, Vec<(&str, &PathBuf)>> = HashMap::new();
+    for other in others.all() {
+        for (id, file) in &other.sidecar.entries {
+            held.entry(id.as_str()).or_default().push((other.name.as_str(), file));
+        }
+    }
+    entries
+        .iter()
+        .map(|entry| {
+            let home = entry.hint.components().next().map(|c| c.as_os_str().to_string_lossy().to_string());
+            let in_home = |folder: &str| home.as_deref() == Some(folder);
+            let found = held.get(entry.id.as_str()).and_then(|files| {
+                let mut live = files.iter().filter(|(_, file)| file.is_file());
+                let chosen = live.clone().find(|(folder, _)| in_home(folder));
+                if manifest::is_local(&entry.id) { chosen } else { chosen.or_else(|| live.next()) }.map(|(_, file)| (*file).clone())
+            });
+            // The last resort, for a file no sidecar lists, and never one that leaves `--dir`.
+            found.or_else(|| {
+                Some(root.join(&entry.hint)).filter(|p| playlists::safe_hint(&entry.hint) && p.is_file())
+            })
+        })
+        .collect()
+}
+
+// A copy and not a hardlink, so editing a tag in one folder leaves the other alone. Named after the
+// source, which has the name its lookup gave it, with this playlist's number in front: a `Have` track
+// is never renamed. Through a scratch name, so a killed copy is not a truncated file the scan trusts.
+fn copy_known(cfg: &Config, tx: &Sender<Msg>, tracks: &mut [Track], known: &HashMap<String, Held>) -> usize {
+    let Some(folder) = folder_of(tracks) else {
+        return 0;
+    };
+    let mut copied = 0;
+    // A row the gate left out is not copied, so its "copy from" would describe something that will not happen.
+    for track in tracks.iter_mut().filter(|t| t.status == Status::Skipped) {
+        if track.twin.as_deref().is_some_and(|t| t.starts_with("copy from ")) {
+            unmark(tx, track);
+        }
+    }
+    for track in tracks.iter_mut().filter(|t| t.status == Status::Pending) {
+        let Some(held) = known.get(&track.id) else {
+            continue;
+        };
+        let stem = held.file.file_stem().unwrap_or_default().to_string_lossy();
+        let ext = held.file.extension().unwrap_or_default().to_string_lossy();
+        let name = format!("{:02} - {}.{ext}", track.index, strip_number(&stem));
+        let dest = folder.join(&name);
+        if dest.exists() {
+            let _ = tx.send(Msg::Log(format!(
+                "copy: {name} is already here, so track {} downloads as usual",
+                track.index
+            )));
+            unmark(tx, track);
+            continue;
+        }
+        let scratch = folder.join(format!("{SCRATCH}{name}"));
+        let done = std::fs::create_dir_all(&folder)
+            .map(|()| sweep_scratch(&folder))
+            .and_then(|()| std::fs::copy(&held.file, &scratch))
+            .and_then(|_| std::fs::rename(&scratch, &dest));
+        if let Err(err) = done {
+            let _ = std::fs::remove_file(&scratch);
+            let _ = tx.send(Msg::Log(format!("copy: track {}: {err}", track.index)));
+            unmark(tx, track);
+            continue;
+        }
+        track.path = Some(dest.clone());
+        track.status = Status::Have;
+        track.source = "copied".into();
+        track.note = format!("from {}", held.folder);
+        unmark(tx, track);
+        let _ = tx.send(Msg::Path { index: track.index, path: dest });
+        let _ = tx.send(Msg::Update {
+            index: track.index,
+            status: Status::Have,
+            source: Some(track.source.clone()),
+            note: Some(track.note.clone()),
+            name: None,
+        });
+        let _ = tx.send(Msg::Log(format!(
+            "copied track {} from {} instead of downloading it",
+            track.index, held.folder
+        )));
+        copied += 1;
+    }
+    // Recorded now and not at the end of the pass: quit during the download and an unrecorded copy is a file
+    // the next scan does not know, so the track downloads again beside it.
+    if copied > 0 {
+        write_manifest(cfg, tracks, false);
+    }
+    copied
+}
+
+// The whole title and what follows the last ` - `, since one side often has the artist and the other not.
+fn title_keys(text: &str) -> (String, String) {
+    let whole = normalised(strip_number(text));
+    let tail = whole.rsplit_once(" - ").map_or_else(String::new, |(_, t)| t.trim().to_string());
+    (whole, tail)
+}
+
+/// Marks a likely copy of the same song for the pick gate. A warning and never a skip.
+// Two ids in this listing match on title and a duration within 2s, `reconcile`'s rules. Library files
+// match on title only, since their length costs a tag read. Two tails never meet, or every `Intro` would.
+// An id the library holds says it will be copied instead, which is what the sync does.
+fn mark_twins(tracks: &mut [Track], known: &HashMap<String, Held>, shelves: &[Shelf], here: &Path) {
+    let keys: Vec<(String, String)> = tracks.iter().map(|t| title_keys(&t.name)).collect();
+    // First folder wins, as it did when this was a scan in folder order.
+    let mut whole_of: HashMap<String, &str> = HashMap::new();
+    let mut tail_of: HashMap<String, &str> = HashMap::new();
+    for shelf in shelves.iter().filter(|s| s.path.file_name() != here.file_name()) {
+        for (name, present) in &shelf.files {
+            if !present {
+                continue;
+            }
+            let stem = Path::new(name).file_stem().unwrap_or_default().to_string_lossy();
+            let (whole, tail) = title_keys(&stem);
+            if whole.is_empty() {
+                continue;
+            }
+            if !tail.is_empty() {
+                tail_of.entry(tail).or_insert(shelf.name.as_str());
+            }
+            whole_of.entry(whole).or_insert(shelf.name.as_str());
+        }
+    }
+    for i in 0..tracks.len() {
+        // Said first, because it is the one answer that changes what happens: unpicking this row saves a copy, not a download.
+        if tracks[i].status == Status::Pending
+            && let Some(held) = known.get(&tracks[i].id)
+        {
+            tracks[i].twin = Some(format!("copy from {}", held.folder));
+            continue;
+        }
+        if !matches!(tracks[i].status, Status::Pending | Status::Have) || keys[i].0.is_empty() {
+            continue;
+        }
+        let earlier = (0..i).find(|&j| {
+            matches!(tracks[j].status, Status::Pending | Status::Have)
+                && keys[j].0 == keys[i].0
+                && tracks[j].duration.abs_diff(tracks[i].duration) <= 2
+        });
+        if let Some(j) = earlier {
+            tracks[i].twin = Some(format!("same as track {}", tracks[j].index));
+            continue;
+        }
+        if tracks[i].status != Status::Pending {
+            continue;
+        }
+        let (whole, tail) = &keys[i];
+        let hit = whole_of
+            .get(whole)
+            .or_else(|| whole_of.get(tail).filter(|_| !tail.is_empty()))
+            .or_else(|| tail_of.get(whole));
+        if let Some(folder) = hit {
+            tracks[i].twin = Some(format!("maybe in {folder}"));
+        }
+    }
+}
+
+// Two videos with one ISRC are one recording. Returns what changed; `open_shelf` has nobody to tell.
+// An ISRC match replaces a title-based marker, since it is the stronger answer, and the title guess is
+// dropped only when the other side holds a different ISRC. Nothing recorded on the other side contradicts
+// nothing, and most files have none. The same video in two folders is what a copy makes, so it is not a twin.
+fn flag_isrc_twins(others: &Others, tracks: &mut [Track]) -> Vec<(usize, Option<String>)> {
+    let mut changed = Vec::new();
+    if tracks.iter().all(|t| t.isrc.is_none()) {
+        return changed;
+    }
+    // Every holder of an ISRC, in folder order: a copy of this very video is not a twin, and must not hide a real one.
+    let mut elsewhere: HashMap<&str, Vec<(&str, &str)>> = HashMap::new();
+    for other in others.all() {
+        let files: HashMap<&str, &Path> =
+            other.sidecar.entries.iter().map(|(id, file)| (id.as_str(), file.as_path())).collect();
+        for (id, isrc) in &other.sidecar.isrcs {
+            if files.get(id.as_str()).is_some_and(|file| file.is_file()) {
+                elsewhere.entry(isrc.as_str()).or_default().push((other.name.as_str(), id.as_str()));
+            }
+        }
+    }
+    let isrc_of: HashMap<usize, String> = tracks.iter().filter_map(|t| t.isrc.clone().map(|i| (t.index, i))).collect();
+    let mut seen: HashMap<String, (usize, String)> = HashMap::new();
+    for track in tracks.iter_mut() {
+        let Some(isrc) = track.isrc.clone() else {
+            continue;
+        };
+        let mut twin = if let Some((index, _)) = seen.get(&isrc).filter(|(_, id)| *id != track.id) {
+            Some(format!("same recording as track {index}"))
+        } else {
+            elsewhere
+                .get(isrc.as_str())
+                .and_then(|held| held.iter().find(|(_, id)| *id != track.id))
+                .map(|(folder, _)| format!("same recording in {folder}"))
+        };
+        if twin.is_none() && !title_guess_contradicted(others, track, &isrc, &isrc_of) {
+            twin.clone_from(&track.twin);
+        }
+        seen.entry(isrc).or_insert((track.index, track.id.clone()));
+        if track.twin != twin {
+            track.twin.clone_from(&twin);
+            changed.push((track.index, twin));
+        }
+    }
+    changed
+}
+
+// Whether the other side of a title guess is known to hold a different ISRC. "copy from" is never a guess.
+fn title_guess_contradicted(others: &Others, track: &Track, isrc: &str, isrc_of: &HashMap<usize, String>) -> bool {
+    let Some(guess) = track.twin.as_deref() else {
+        return false;
+    };
+    if let Some(index) = guess.strip_prefix("same as track ").and_then(|n| n.parse::<usize>().ok()) {
+        return isrc_of.get(&index).is_some_and(|other| other != isrc);
+    }
+    let Some(folder) = guess.strip_prefix("maybe in ") else {
+        return false;
+    };
+    let (whole, tail) = title_keys(&track.name);
+    let Some(other) = others.all().into_iter().find(|o| o.name == folder) else {
+        return false;
+    };
+    // The files in that folder the title matched, and what the sidecar says their recordings are.
+    let held: Vec<&str> = other
+        .sidecar
+        .entries
+        .iter()
+        .filter(|(_, file)| {
+            let stem = file.file_stem().unwrap_or_default().to_string_lossy();
+            let (w, t) = title_keys(&stem);
+            !w.is_empty() && (w == whole || (!tail.is_empty() && w == tail) || (!t.is_empty() && t == whole))
+        })
+        .filter_map(|(id, _)| other.sidecar.isrcs.iter().find(|(known, _)| known == id).map(|(_, i)| i.as_str()))
+        .collect();
+    !held.is_empty() && held.iter().all(|other| *other != isrc)
+}
+
 /// Lowercased, composed and trimmed, which is what every other comparison in
 /// this file does and for the same reason: matched raw, every accented or
 /// Hangul title misses while the ASCII ones still match.
@@ -1404,7 +1940,7 @@ fn normalised(text: &str) -> String {
 /* Only a leading run of digits followed by a separator: a title that opens
    with a number, `1979` or `99 Luftballons`, keeps it, because there is no
    separator after it. */
-fn strip_number(stem: &str) -> &str {
+pub(crate) fn strip_number(stem: &str) -> &str {
     let rest = stem.trim_start_matches(|c: char| c.is_ascii_digit());
     if rest.len() == stem.len() {
         return stem;
@@ -1428,7 +1964,7 @@ enum Bring {
 
 /// The format a file on disk actually holds, as a `FORMATS` name, or `None`
 /// for a container earworm does not write.
-fn format_on_disk(path: &Path) -> Option<&'static str> {
+pub(crate) fn format_on_disk(path: &Path) -> Option<&'static str> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     /* `alac` and `m4a` share this extension, so the container has to be asked
        which codec is inside it. `None` from that is a genuine "cannot tell",
@@ -1461,9 +1997,12 @@ fn format_on_disk(path: &Path) -> Option<&'static str> {
      where a download makes at most two. Fetch it again. `m4a` belongs here
      despite being a container YouTube serves, because it is not the
      container `bestaudio` hands over.
-   - target `opus`: the only one a download remuxes rather than re-encodes,
-     so a fetch is one generation against the two any conversion would cost.
-     Fetch it again unless the file already is one.
+   - `alac` on disk, target `m4a`: convert. Both are `.m4a`, so a refetch's
+     file lands on the very path the old one holds and yt-dlp skips or
+     rewrites it in place.
+   - target `opus` or `m4a`: a download copies YouTube's own stream (the AAC
+     one for m4a, through `NATIVE_M4A`), so a fetch is one generation against
+     the two a conversion would cost. Fetch it again unless the file already is one.
    - everything else: convert. The source holds one generation and a download
      would cost exactly what ffmpeg costs here, without the network.
 
@@ -1482,7 +2021,10 @@ fn bring(track: &Track, format: &str) -> Bring {
         None => Bring::Leave,
         Some(now) if now == format => Bring::Leave,
         Some("m4a" | "mp3" | "vorbis") => Bring::Refetch,
-        Some(_) if format == "opus" => Bring::Refetch,
+        // A refetch to `m4a` names its file where this alac one already sits, so yt-dlp would skip or rewrite it.
+
+        Some("alac") if format == "m4a" => Bring::Convert,
+        Some(_) if matches!(format, "opus" | "m4a") => Bring::Refetch,
         Some(_) => Bring::Convert,
     }
 }
@@ -1538,8 +2080,7 @@ fn swap_in(
 ) -> Result<Option<PathBuf>> {
     let old = track.path.clone().context("track has no file")?;
 
-    let kept = tag::read(&old).ok();
-    let cover = tag::read_cover(&old);
+    let kept = tag::Kept::read(&old);
 
     /* An ffmpeg that half-wrote exits non-zero, but a full disk is the case
        that makes reading it back worth the second or two. */
@@ -1559,19 +2100,14 @@ fn swap_in(
         None => bail!("the new file is not a format earworm writes"),
     }
 
-    if let Some(info) = kept {
-        let fields = tag::Fields {
-            artist: info.artist,
-            title: info.title,
-            album: info.album,
-            year: info.year,
-        };
-        tag::set_fields(new, &fields).context("could not carry the tags across")?;
-    }
-    if let Some(image) = cover {
+    if let Some(warning) = kept.write(new)? {
         // Not fatal: a track with the right audio and no art beats no track.
-        if let Err(err) = tag::set_cover(new, &image) {
-            let _ = tx.send(Msg::Log(format!("convert: cover: {err}")));
+        let _ = tx.send(Msg::Log(format!("convert: cover: {warning}")));
+    }
+    // The sidecar line follows the file's tag, so a replacement that did not keep the ISRC drops it too.
+    if kept.isrc().is_some() && tag::read(new).ok().and_then(|i| i.isrc).is_none() {
+        if let Some(folder) = old.parent() {
+            let _ = manifest::drop_isrc(folder, &track.id);
         }
     }
 
@@ -1991,6 +2527,8 @@ fn tag_tracks(
                 track.album = info.album;
                 track.year = info.year;
                 track.duration = info.duration;
+                // So a file from an earlier run is compared too, and its line reaches the sidecar.
+                track.isrc = info.isrc;
                 track.listed = true;
                 track.name = label(&track.title, &track.artist);
                 let _ = tx.send(Msg::Update {
@@ -2008,7 +2546,7 @@ fn tag_tracks(
                 });
                 offer_meta(tx, track);
             }
-            extras.add(enrich(cfg, tx, track, &path));
+            extras.add(enrich(cfg, tx, track, &path, playlist));
             continue;
         }
 
@@ -2028,6 +2566,15 @@ fn tag_tracks(
                 track.title = out.title;
                 track.mbid = out.mbid;
                 let info = tag::read(&path).ok();
+                // The file is the truth, so a line for a recording it no longer holds goes.
+                let isrc = info.as_ref().map_or(out.isrc, |i| i.isrc.clone());
+                if isrc.is_none()
+                    && track.isrc.is_some()
+                    && let Some(folder) = path.parent()
+                {
+                    let _ = manifest::drop_isrc(folder, &track.id);
+                }
+                track.isrc = isrc;
                 track.duration = info.as_ref().map(|i| i.duration).unwrap_or(0);
                 track.album = info.as_ref().map(|i| i.album.clone()).unwrap_or_default();
                 track.year = info.as_ref().and_then(|i| i.year);
@@ -2074,7 +2621,7 @@ fn tag_tracks(
                         let _ = tx.send(Msg::Log(format!("cover: track {}: {err}", track.index)));
                     }
                 }
-                extras.add(enrich(cfg, tx, track, &path));
+                extras.add(enrich(cfg, tx, track, &path, playlist));
                 rename(cfg, tx, track);
             }
             Err(err) => {
@@ -2127,8 +2674,12 @@ impl Extras {
 
 // Per-track extras written after identification: loudness and lyrics. Runs for tracks already
 // on disk too, so a resync backfills old folders. Both are off by default.
-fn enrich(cfg: &Config, tx: &Sender<Msg>, track: &Track, path: &Path) -> Extras {
-    enrich_with(cfg, tx, track, path, lookup::lyrics)
+fn enrich(cfg: &Config, tx: &Sender<Msg>, track: &Track, path: &Path, playlist: &str) -> Extras {
+    enrich_with(cfg, tx, track, path, playlist, lookup::lyrics)
+}
+
+fn real_album<'a>(album: &'a str, playlist: &str) -> &'a str {
+    if album == playlist { "" } else { album }
 }
 
 // Takes the lyrics fetch so a test can count requests without a network.
@@ -2137,6 +2688,7 @@ fn enrich_with(
     tx: &Sender<Msg>,
     track: &Track,
     path: &Path,
+    playlist: &str,
     fetch: impl Fn(&str, &str, &str, u64) -> lookup::Lookup,
 ) -> Extras {
     let mut extras = Extras::default();
@@ -2156,7 +2708,8 @@ fn enrich_with(
         // Asked before the request: a track that has words never costs one, and a rerun is free.
         match tag::extra(path, tag::Extra::Lyrics) {
             Ok(Some(_)) => {}
-            Ok(None) => match fetch(&track.artist, &track.title, &track.album, track.duration) {
+            // The album fill is the playlist's name, which LRCLIB's exact lookup would only ever miss on.
+            Ok(None) => match fetch(&track.artist, &track.title, real_album(&track.album, playlist), track.duration) {
                 lookup::Lookup::Found(text) => match tag::set_extra(path, tag::Extra::Lyrics, &text) {
                     Ok(()) => {
                         extras.lyrics_found += 1;
@@ -2196,6 +2749,7 @@ fn rename_shelf(
     tracks: &[Track],
     folder: &Path,
 ) -> Result<()> {
+    not_custom(cfg, folder)?;
     let current = folder
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -2246,6 +2800,11 @@ fn rename_shelf(
     std::fs::rename(folder, &to)
         .with_context(|| format!("renaming {} to {name}", folder.display()))?;
 
+    // A custom playlist names its tracks by folder, so a local id would be orphaned by the move.
+    if let Err(err) = playlists::rehome(&cfg.dir, &current, &name) {
+        let _ = tx.send(Msg::Log(format!("custom playlists: {err}")));
+    }
+
     /* The .m3u8 is named after its folder and `last_playlist` finds it that
        way. Its entries are relative, so the move itself left them valid. */
     let old_playlist = to.join(format!("{current}.m3u8"));
@@ -2269,7 +2828,7 @@ fn rename_shelf(
         let _ = tx.send(Msg::Folder(to.clone()));
     }
     let _ = tx.send(Msg::Library {
-        shelves: library(&cfg.dir),
+        shelves: library_all(&cfg.dir),
         show: false,
     });
     let _ = tx.send(Msg::Flash(format!("renamed to {name}")));
@@ -2304,6 +2863,7 @@ fn remove_shelf(
     if !folder.starts_with(&cfg.dir) || folder == cfg.dir {
         bail!("that folder is outside {}", cfg.dir.display());
     }
+    not_custom(cfg, folder)?;
     let name = folder
         .file_name()
         .map(|n| n.to_string_lossy().to_string())
@@ -2393,7 +2953,7 @@ fn remove_shelf(
         tracks.clear();
     }
     let _ = tx.send(Msg::Library {
-        shelves: library(&cfg.dir),
+        shelves: library_all(&cfg.dir),
         show: open,
     });
     /* Forgetting takes the sidecar, not the music, and a folder holding
@@ -2620,9 +3180,59 @@ fn serve(
                 report(tx, remove_shelf(cfg, tx, &asker, tracks, &folder));
                 None
             }
+            Cmd::NewPlaylist => {
+                report(tx, custom::new(&cfg.dir, tx, &asker));
+                None
+            }
+            Cmd::AddToPlaylist(picks, into) => {
+                report(tx, custom::add(&cfg.dir, tx, &asker, &picks, into.as_deref()));
+                None
+            }
+            Cmd::EditPlaylist { name, add, remove } => {
+                report(tx, custom::edit(&cfg.dir, tx, &name, &add, &remove));
+                None
+            }
+            Cmd::OpenPlaylist(name) => {
+                report(tx, custom::open(&cfg.dir, tx, &name));
+                None
+            }
+            Cmd::MoveEntry { name, id, up } => {
+                report(tx, custom::move_entry(&cfg.dir, tx, &name, &id, up));
+                None
+            }
+            Cmd::RemoveEntry { name, id } => {
+                report(tx, custom::remove_entry(&cfg.dir, tx, &name, &id));
+                None
+            }
+            Cmd::RenamePlaylist(name) => {
+                report(tx, custom::rename(&cfg.dir, tx, &asker, &name));
+                None
+            }
+            Cmd::DeletePlaylist(name) => {
+                report(tx, custom::delete(&cfg.dir, tx, &asker, &name));
+                None
+            }
+            Cmd::Export(target) => {
+                report(tx, export::run(&cfg.dir, tx, &asker, cancel, &target));
+                None
+            }
+            Cmd::PlayPlaylist(name) => {
+                match custom::play(&cfg.dir, &name) {
+                    Ok((said, folders)) => {
+                        let _ = tx.send(Msg::OnAir(Some((name, folders))));
+                        let _ = tx.send(Msg::Flash(said));
+                    }
+                    Err(err) => {
+                        let _ = tx.send(Msg::Flash(format!("cliamp: {err}")));
+                        let _ = tx.send(Msg::Log(format!("cliamp: {err}")));
+                    }
+                }
+                None
+            }
             Cmd::Play(folder) => {
                 match player::load(&folder) {
                     Ok(said) => {
+                        let _ = tx.send(Msg::OnAir(None));
                         let _ = tx.send(Msg::Flash(said));
                     }
                     Err(err) => {
@@ -2637,7 +3247,7 @@ fn serve(
         if let Some(result) = synced {
             // Counts and sync times have moved, so the library screen is stale.
             let _ = tx.send(Msg::Library {
-                shelves: library(&cfg.dir),
+                shelves: library_all(&cfg.dir),
                 show: false,
             });
             if !finish(cfg, tx, cancel, tracks, result) {
@@ -2647,6 +3257,15 @@ fn serve(
         // Last, so the keys stay dead until everything above has landed.
         let _ = tx.send(Msg::Idle);
     }
+}
+
+// A custom playlist's row carries its file as the path, and these commands treat a path as a directory to move or delete.
+// The keys route a custom row elsewhere, and this is the second lock: `remove_dir_all` does not come back.
+fn not_custom(cfg: &Config, path: &Path) -> Result<()> {
+    if playlists::in_store(&cfg.dir, path) {
+        bail!("that is a custom playlist, not a folder  ·  its own keys never touch audio");
+    }
+    Ok(())
 }
 
 /// How often `serve` re-checks cliamp while it has nothing else to do. A probe
@@ -2670,9 +3289,10 @@ fn open_row(
     folder: &Path,
     land_on: Option<&str>,
 ) -> Result<()> {
+    not_custom(cfg, folder)?;
     // Re-read rather than trusting what the screen was showing: the folder may
     // have gone away between the listing and the keypress.
-    let shelves = library(&cfg.dir);
+    let shelves = library_all(&cfg.dir);
     let shelf = shelves
         .into_iter()
         .find(|s| s.path == folder)
@@ -2711,16 +3331,16 @@ fn start_url(
     tracks: &mut Vec<Track>,
     asker: &Asker,
 ) -> Option<Result<String>> {
-    let Some(url) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "") else {
+    let Some(link) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "") else {
         let _ = tx.send(Msg::Flash("cancelled".into()));
         return None;
     };
     let _ = tx.send(Msg::Restart);
     tracks.clear();
-    cfg.url = url;
     /* Load-bearing: a new playlist has no folder of its own yet, and the last
-       one's would pull every track of this one into that folder. */
-    cfg.folder = None;
+       one's would pull every track of this one into that folder. `adopt`
+       clears it, or names it after an imported file's heading. */
+    link.adopt(cfg, tx);
     /* The same question the first-start prompt asks above: one menu before
        the download, Esc keeping whatever the session already had. A failed
        save reports rather than aborting the URL that was just typed. */
@@ -2748,10 +3368,11 @@ fn sync_open(
     let folder = folder_of(tracks).context("no folder is open to sync")?;
     if attaching {
         let name = folder.file_name().unwrap_or_default().to_string_lossy().to_string();
-        let Some(url) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "") else {
+        let Some(link) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "") else {
             bail!("cancelled  ·  nothing was downloaded");
         };
-        cfg.url = url;
+        // The folder being attached is the one named below, whatever an imported file calls itself.
+        Link { name: None, ..link }.adopt(cfg, tx);
         /* Before the run, because `output_template` reads it: without it the
            download writes the whole playlist into a second folder named after
            the playlist upstream and leaves this one sitting beside it. */
@@ -2873,6 +3494,10 @@ fn retry(
         ..CoverState::default()
     };
     let extras = tag_tracks(cfg, tx, cancel, tracks, &playlist, asker, &mut cover, Some(&failed));
+    // Album gain is a mean over the folder, so a retried track changes it for every file.
+    if album && cfg.loudness && !cancel.load(Ordering::SeqCst) {
+        album_loudness(tx, tracks);
+    }
 
     sync_manifest(cfg, tracks);
     let playlist_file = write_playlist(cfg, tracks)?;
@@ -3286,6 +3911,14 @@ fn search(
     track.source = m.source.into();
     track.note = std::mem::take(&mut note);
     track.mbid = m.mbid.clone();
+    let isrc = written.as_ref().and_then(|i| i.isrc.clone());
+    if isrc.is_none()
+        && track.isrc.is_some()
+        && let Some(folder) = path.parent()
+    {
+        let _ = manifest::drop_isrc(folder, &track.id);
+    }
+    track.isrc = isrc;
     if !departed {
         track.listed = true;
     }
@@ -3934,12 +4567,19 @@ fn write_manifest(cfg: &Config, tracks: &[Track], synced: bool) {
         let _ = manifest::set_name(&folder, name);
     }
 
+    let found: Vec<(String, String)> = tracks
+        .iter()
+        .filter(|t| t.path.as_deref().is_some_and(Path::is_file))
+        .filter_map(|t| t.isrc.clone().map(|isrc| (t.id.clone(), isrc)))
+        .collect();
     let entries = kept.into_iter().chain(known);
     let _ = if synced {
         manifest::write_synced(&folder, &cfg.url, entries)
     } else {
         manifest::write(&folder, &cfg.url, entries)
     };
+    // After the entries, which are what say which ids still have a line.
+    let _ = manifest::set_isrcs(&folder, &found);
 }
 
 fn folder_of(tracks: &[Track]) -> Option<PathBuf> {
@@ -4157,6 +4797,111 @@ pub mod tests {
         });
     }
 
+    fn import_file(tag: &str, text: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("earworm-import-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("mix.ytmusic.md");
+        std::fs::write(&file, text).unwrap();
+        file
+    }
+
+    #[test]
+    fn a_file_of_music_links_is_locked_like_the_links_themselves() {
+        let file = import_file("lock", "# Night drive\nhttps://music.youtube.com/watch?v=UEZ-apKKDKQ\n");
+        let path = file.display().to_string();
+        let unlocked = Unlocked::default();
+        assert_eq!(settle(&path, &unlocked), Err(LOCKED.to_string()));
+        unlocked.grant(Feature::Music);
+        let link = settle(&path, &unlocked).unwrap();
+        assert_eq!(link.url, "https://www.youtube.com/watch_videos?video_ids=UEZ-apKKDKQ");
+        assert_eq!(link.name.as_deref(), Some("Night drive"));
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
+    }
+
+    #[test]
+    fn the_url_prompt_takes_a_dragged_file_and_reasks_on_a_missing_one() {
+        let file = import_file("prompt", "# Night drive\nhttps://youtu.be/UEZ-apKKDKQ\n");
+        let dragged = file.display().to_string().replace(' ', "\\ ");
+        let unlocked = Unlocked::default();
+        let (tx, rx) = channel();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| prompt_url(&tx, Escape::Keep, &unlocked, ""));
+            let mut headers = Vec::new();
+            for answer in ["~/no/such/mix.md", dragged.as_str()] {
+                while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
+                    if let Msg::Ask(crate::app::Prompt::Input { header, .. }, reply) = msg {
+                        headers.push(header);
+                        reply.send(Reply::Text(answer.into())).unwrap();
+                        break;
+                    }
+                }
+            }
+            let link = worker.join().unwrap().expect("the file was refused");
+            assert_eq!(link.name.as_deref(), Some("Night drive"));
+            assert_eq!(headers, ["YouTube playlist URL", "No file at that path"]);
+        });
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
+    }
+
+
+    #[test]
+    fn a_path_that_is_not_a_file_is_still_a_mistyped_link() {
+        let unlocked = Unlocked::default();
+        assert_eq!(settle("youtube.co/watch?v=x", &unlocked), Err("Not a YouTube link".to_string()));
+        assert_eq!(settle("/no/such/file.md", &unlocked), Err("No file at that path".to_string()));
+        assert_eq!(settle("  ", &unlocked), Err("Paste a YouTube link".to_string()));
+    }
+
+    // The heading names the folder, or the download lands in one yt-dlp calls "Untitled List".
+    #[test]
+    fn an_import_off_the_command_line_names_its_folder_and_asks_nothing() {
+        let file = import_file("cli", "# Night drive\nhttps://youtu.be/UEZ-apKKDKQ\n");
+        let mut cfg = config(true);
+        cfg.dir = file.parent().unwrap().to_path_buf();
+        // A same-named folder this import did not make, so the name has to be checked under `dir`.
+        std::fs::create_dir_all(cfg.dir.join("Night drive")).unwrap();
+        cfg.import = Some(file.display().to_string());
+        let (tx, rx) = mpsc::channel();
+        assert!(matches!(ask_start(&mut cfg, &tx), Start::Playlist));
+        assert!(!rx.try_iter().any(|msg| matches!(msg, Msg::Ask(..))), "an importable file was asked about");
+        assert_eq!(cfg.url, "https://www.youtube.com/watch_videos?video_ids=UEZ-apKKDKQ");
+        assert_eq!(cfg.folder.as_deref(), Some("Night drive (2)"));
+        let _ = std::fs::remove_dir_all(file.parent().unwrap());
+    }
+
+    #[test]
+    fn an_import_never_takes_over_a_folder_it_did_not_make() {
+        let dir = std::env::temp_dir().join(format!("earworm-import-clash-{}", std::process::id()));
+        let (tx, _rx) = mpsc::channel();
+        for (folder, url) in [
+            ("Mix", Some("https://www.youtube.com/playlist?list=PL1")),
+            ("Mix (2)", None),
+            ("Queue", Some("https://www.youtube.com/watch_videos?video_ids=UEZ-apKKDKQ")),
+        ] {
+            std::fs::create_dir_all(dir.join(folder)).unwrap();
+            if let Some(url) = url {
+                std::fs::write(manifest::path(&dir.join(folder)), format!("#url\t{url}\n")).unwrap();
+            }
+        }
+        let ids = |list: &[&str]| list.iter().map(|id| id.to_string()).collect::<Vec<_>>();
+        let edited = ids(&["dQw4w9WgXcQ", "UEZ-apKKDKQ"]);
+        let unrelated = ids(&["dQw4w9WgXcQ"]);
+        assert_eq!(import_folder(&dir, "Mix".into(), &edited, &tx), "Mix (3)");
+        assert_eq!(import_folder(&dir, "Queue".into(), &edited, &tx), "Queue", "an edited copy syncs its folder");
+        assert_eq!(import_folder(&dir, "Queue".into(), &unrelated, &tx), "Queue (2)", "another file took it over");
+        assert_eq!(import_folder(&dir, "New".into(), &unrelated, &tx), "New");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_plain_link_after_an_import_does_not_write_into_its_folder() {
+        let mut cfg = config(true);
+        cfg.folder = Some("Night drive".into());
+        let (tx, _rx) = mpsc::channel();
+        settle("https://www.youtube.com/playlist?list=PL1", &cfg.unlocked.clone()).unwrap().adopt(&mut cfg, &tx);
+        assert_eq!(cfg.folder, None);
+    }
+
     /* The unlock is read off each answer, not once when the prompt opens:
        the console is used while this question is still on screen. */
     #[test]
@@ -4181,7 +4926,7 @@ pub mod tests {
                     break;
                 }
             }
-            assert_eq!(worker.join().unwrap().as_deref(), Some(link));
+            assert_eq!(worker.join().unwrap().map(|l| l.url).as_deref(), Some(link));
             assert_eq!(
                 asked,
                 vec![(LOCKED.to_string(), link.to_string()), (LOCKED.to_string(), link.to_string())],
@@ -4215,6 +4960,12 @@ pub mod tests {
             [("id1".to_string(), from.join("01 - A.opus"))].into_iter(),
         )
         .unwrap();
+        // A custom playlist that names this folder, which the move must not orphan.
+        let mine = playlists::Playlist {
+            name: "Mix".into(),
+            entries: vec![playlists::Entry { id: "~01 - A.opus".into(), hint: "Chill Evenings/01 - A.opus".into() }],
+        };
+        playlists::save(&root, &mine).unwrap();
 
         let mut cfg = config(true);
         cfg.dir = root.clone();
@@ -4253,6 +5004,11 @@ pub mod tests {
         assert_eq!(after.name.as_deref(), Some("Evenings"));
         assert_eq!(after.url.as_deref(), Some("https://example.com"), "the URL went");
         assert_eq!(after.entries.len(), 1, "the entries went");
+        assert_eq!(
+            playlists::load(&root, "Mix").unwrap().entries[0].hint,
+            PathBuf::from("Evenings/01 - A.opus"),
+            "a custom playlist still names the old folder"
+        );
 
         // And the library the UI is about to draw is the renamed one.
         let shelves: Vec<Shelf> = rx
@@ -4263,7 +5019,8 @@ pub mod tests {
             })
             .last()
             .expect("the library was never refreshed");
-        assert_eq!(shelves.iter().map(|s| s.name.clone()).collect::<Vec<_>>(), ["Evenings"]);
+        // The folder under its new name, and the custom playlist beside it, which is still there.
+        assert_eq!(shelves.iter().map(|s| s.name.clone()).collect::<Vec<_>>(), ["Evenings", "Mix"]);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -5226,7 +5983,7 @@ pub mod tests {
         });
 
         assert!(matches!(start, Start::Playlist), "cancelling the menu lost the URL");
-        assert_eq!(cfg.format, config::DEFAULT_FORMAT);
+        assert_eq!(cfg.format, "opus");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -5239,7 +5996,7 @@ pub mod tests {
         let (tx, rx) = mpsc::channel();
         assert!(matches!(ask_start(&mut cfg, &tx), Start::Playlist));
         assert!(rx.try_recv().is_err(), "a passed URL was asked about");
-        assert_eq!(cfg.format, config::DEFAULT_FORMAT);
+        assert_eq!(cfg.format, "opus");
     }
 
     #[test]
@@ -6854,6 +7611,7 @@ pub mod tests {
             mbid: None,
             cover_url: None,
             score: None,
+            isrc: None,
             source: "test",
         };
 
@@ -7495,6 +8253,7 @@ pub mod tests {
             url: String::new(),
             dir: PathBuf::new(),
             theme: crate::theme::Palette::default(),
+            icons: crate::icons::Icons::Text,
             theme_name: crate::config::DEFAULT_THEME.to_string(),
             themes: crate::theme::Themes::default(),
             theme_warnings: Vec::new(),
@@ -7505,7 +8264,8 @@ pub mod tests {
             lookup: true,
             apple: true,
             fix: true,
-            format: config::DEFAULT_FORMAT.into(),
+            // The fixtures are all `.opus`, whatever the shipped default is.
+            format: "opus".into(),
             // Off, so a test that does not ask for it converts nothing.
             convert: false,
             loudness: false,
@@ -7522,6 +8282,7 @@ pub mod tests {
             update_check: true,
             achievements: true,
             folder: None,
+            import: None,
             extra: Vec::new(),
             acoustid_key: None,
             unlocked: Default::default(),
@@ -7999,7 +8760,7 @@ mod format_tests {
             worker.join().unwrap().unwrap();
         });
 
-        assert_eq!(cfg.format, config::DEFAULT_FORMAT);
+        assert_eq!(cfg.format, "opus");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "dir = \"/tmp/music\"\n");
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -8106,8 +8867,8 @@ mod convert_tests {
                     /* Two generations on disk already, so converting makes a
                        third where a download makes at most two. */
                     ("m4a" | "mp3" | "vorbis", _) => Bring::Refetch,
-                    // The one target a download remuxes rather than re-encodes.
-                    (_, "opus") => Bring::Refetch,
+                    // The targets a download copies rather than re-encodes.
+                    (_, "opus" | "m4a") => Bring::Refetch,
                     // One generation in, and a download would cost the same.
                     _ => Bring::Convert,
                 };
@@ -8119,6 +8880,10 @@ mod convert_tests {
             real.contains(&"m4a") && real.contains(&"alac"),
             "the two formats behind one extension were never tested"
         );
+
+        // The pair sharing an extension: a refetch would land on the file already there.
+        let alac = holding(&dir, 2, "alac.m4a", Status::Have);
+        assert_eq!(bring(&alac, "m4a"), Bring::Convert);
 
         // A container earworm does not write is left alone, not guessed at.
         std::fs::write(dir.join("06 - f.wav"), "audio").unwrap();
@@ -8321,6 +9086,36 @@ mod convert_tests {
     /* An edit is the only thing in a folder that cannot be got back, so it
        has to survive the container change: the tags off the old file, and the
        name the edit gave it with the new extension on the end. */
+    // The swap used to carry four fields and the picture, so lyrics somebody typed and the ISRC the sidecar's
+    // `#isrc` line is built from were gone from every converted file.
+    #[test]
+    fn a_swap_carries_the_lyrics_and_the_isrc_too() {
+        let dir = scratch("swap-extras");
+        let old = dir.join("01 - Song.opus");
+        if super::tests::tiny_opus(&old).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            return;
+        }
+        tag::set_fields(&old, &tag::Fields { artist: "A".into(), title: "Song".into(), album: String::new(), year: None }).unwrap();
+        tag::set_extra(&old, tag::Extra::Lyrics, "words I typed").unwrap();
+        tag::set_isrc(&old, "GBAYE9200070").unwrap();
+        // A fresh download holds none of it, which is what a refetch hands back.
+        let fresh = dir.join("fresh.flac");
+        if tag::transcode(&old, &fresh, "flac", Some("opus")).is_err() {
+            eprintln!("no flac encoder, skipping");
+            return;
+        }
+        tag::set_extra(&fresh, tag::Extra::Lyrics, "").unwrap();
+
+        let (tx, _rx) = mpsc::channel();
+        let mut track = holding(&dir, 1, "01 - Song.opus", Status::Have);
+        swap_in(&tx, &mut track, &fresh, "flac", &HashSet::new()).unwrap();
+        let landed = dir.join("01 - Song.flac");
+        assert_eq!(tag::extra(&landed, tag::Extra::Lyrics).unwrap().as_deref(), Some("words I typed"));
+        assert_eq!(tag::read(&landed).unwrap().isrc.as_deref(), Some("GBAYE9200070"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn a_swap_carries_the_tags_and_the_edited_name_onto_the_new_file() {
         let dir = scratch("swap");
@@ -9002,14 +9797,21 @@ mod purge_tests {
         let (tx, rx) = mpsc::channel();
         let mut cfg = super::tests::config(false);
 
-        super::enrich(&cfg, &tx, &track, &file);
+        super::enrich(&cfg, &tx, &track, &file, "");
         assert!(tag::extra(&file, tag::Extra::TrackGain).unwrap().is_none(), "written with loudness off");
 
         cfg.loudness = true;
-        super::enrich(&cfg, &tx, &track, &file);
+        super::enrich(&cfg, &tx, &track, &file, "");
         assert!(tag::extra(&file, tag::Extra::TrackGain).unwrap().is_some(), "not written with loudness on");
         assert!(rx.try_iter().any(|m| matches!(m, Msg::Log(l) if l.contains("loudness"))));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_playlist_name_filled_in_as_an_album_is_not_asked_about() {
+        assert_eq!(super::real_album("Focus", "Focus"), "");
+        assert_eq!(super::real_album("Autobahn", "Focus"), "Autobahn");
+        assert_eq!(super::real_album("", "Focus"), "");
     }
 
     #[test]
@@ -9040,32 +9842,32 @@ mod purge_tests {
         };
         let mut cfg = super::tests::config(false);
 
-        super::enrich_with(&cfg, &tx, &track, &file, fetch);
+        super::enrich_with(&cfg, &tx, &track, &file, "", fetch);
         assert_eq!(calls.get(), 0, "asked with lyrics off");
 
         cfg.lyrics = true;
-        let found = super::enrich_with(&cfg, &tx, &track, &file, fetch);
+        let found = super::enrich_with(&cfg, &tx, &track, &file, "", fetch);
         assert_eq!(calls.get(), 1);
         assert_eq!((found.lyrics_found, found.lyrics_missed), (1, 0));
         assert_eq!(tag::extra(&file, tag::Extra::Lyrics).unwrap().as_deref(), Some("Fahren fahren fahren"));
 
         // Already has them: a rerun is free, and what is there stays.
         tag::set_extra(&file, tag::Extra::Lyrics, "mine").unwrap();
-        let had = super::enrich_with(&cfg, &tx, &track, &file, fetch);
+        let had = super::enrich_with(&cfg, &tx, &track, &file, "", fetch);
         assert_eq!(had, super::Extras::default(), "a track that had lyrics was counted");
         assert_eq!(calls.get(), 1, "asked again for a track that had lyrics");
         assert_eq!(tag::extra(&file, tag::Extra::Lyrics).unwrap().as_deref(), Some("mine"));
 
         // No answer writes nothing.
         tag::set_extra(&file, tag::Extra::Lyrics, "").unwrap();
-        let missed = super::enrich_with(&cfg, &tx, &track, &file, |_: &str, _: &str, _: &str, _: u64| lookup::Lookup::Missing);
+        let missed = super::enrich_with(&cfg, &tx, &track, &file, "", |_: &str, _: &str, _: &str, _: u64| lookup::Lookup::Missing);
         assert_eq!((missed.lyrics_found, missed.lyrics_missed), (0, 1));
         assert_eq!(tag::extra(&file, tag::Extra::Lyrics).unwrap(), None);
 
         // A service that did not answer is neither a hit nor a miss, and a track not asked about is neither.
-        let down = super::enrich_with(&cfg, &tx, &track, &file, |_: &str, _: &str, _: &str, _: u64| lookup::Lookup::Unavailable);
+        let down = super::enrich_with(&cfg, &tx, &track, &file, "", |_: &str, _: &str, _: &str, _: u64| lookup::Lookup::Unavailable);
         assert_eq!(down, super::Extras { lyrics_unavailable: 1, ..super::Extras::default() });
-        let skipped = super::enrich_with(&cfg, &tx, &track, &file, |_: &str, _: &str, _: &str, _: u64| lookup::Lookup::Skipped);
+        let skipped = super::enrich_with(&cfg, &tx, &track, &file, "", |_: &str, _: &str, _: &str, _: u64| lookup::Lookup::Skipped);
         assert_eq!(skipped, super::Extras::default());
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -9413,6 +10215,101 @@ mod chapter_tests {
         assert_eq!(next.iter().map(|t| t.status).collect::<Vec<_>>(), [Status::Have, Status::Pending, Status::Have]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
+    // Break it by moving `set_split` below the cut loop: a kill before the first cut leaves the video looking whole.
+    #[test]
+    fn the_choice_to_split_is_recorded_before_anything_is_cut() {
+        let dir = folder("splitrecord");
+        let whole = dir.join("01 - Album.opus");
+        std::fs::write(&whole, "audio").unwrap();
+        let cfg = super::tests::config(false);
+        let mut tracks = chapter_tracks(&cfg, &video(&dir, true), &three(), &dir);
+        let mut split = Split { chapters: three(), video: video(&dir, true) };
+        split.video.status = Status::Have;
+        // Cancelled before the first cut, which is where quitting during the first ffmpeg lands.
+        fetch_split(&cfg, &mpsc::channel().0, &AtomicBool::new(true), &mut tracks, &split);
+        assert!(tracks.iter().all(|t| t.status == Status::Pending), "something was cut");
+        assert!(manifest::is_split(&dir, "vid"), "nothing says the video was to be split");
+
+        // The next gated sync does not ask again and does not keep one whole track.
+        let mut next = vec![video(&dir, true)];
+        let (again, asked) = settle(Pass::plain(true), Reply::Choice(1), &mut next);
+        assert!(!asked && again.is_some(), "the answer was lost");
+        assert_eq!(next.len(), 3);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // Break it by taking the span match out of `chapter_tracks`: every position keeps whatever file it had.
+    #[test]
+    fn a_chapter_inserted_upstream_takes_the_file_its_span_matches_and_cuts_only_the_new_one() {
+        let dir = folder("spans");
+        let (middle, end) = (dir.join("01 - Middle.opus"), dir.join("02 - End.opus"));
+        std::fs::write(&middle, "m").unwrap();
+        std::fs::write(&end, "e").unwrap();
+        manifest::write(&dir, "u", [("vid#01".to_string(), middle.clone()), ("vid#02".to_string(), end.clone())].into_iter()).unwrap();
+        manifest::set_chapter(&dir, "vid#01", 4.0, 8.0).unwrap();
+        manifest::set_chapter(&dir, "vid#02", 8.0, 12.0).unwrap();
+
+        // The creator added an Intro in front: positions shift, spans do not.
+        let cfg = super::tests::config(false);
+        let tracks = chapter_tracks(&cfg, &video(&dir, false), &three(), &dir);
+        let got: Vec<(&str, Status, Option<&Path>)> = tracks.iter().map(|t| (t.name.as_str(), t.status, t.path.as_deref())).collect();
+        assert_eq!(got[0].1, Status::Pending, "{got:?}");
+        assert_eq!((got[1].1, got[1].2), (Status::Have, Some(middle.as_path())), "{got:?}");
+        assert_eq!((got[2].1, got[2].2), (Status::Have, Some(end.as_path())), "{got:?}");
+        // And the new positions describe themselves from now on.
+        let spans = manifest::load(&dir).chapters;
+        assert!(spans.iter().any(|(id, s, e)| id == "vid#02" && *s == 4.0 && *e == 8.0), "{spans:?}");
+        assert!(spans.iter().any(|(id, s, e)| id == "vid#03" && *s == 8.0 && *e == 12.0), "{spans:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_position_whose_span_moved_is_cut_again_and_the_old_file_is_left_alone() {
+        let dir = folder("spanmoved");
+        let one = dir.join("01 - Intro.opus");
+        std::fs::write(&one, "old cut").unwrap();
+        manifest::write(&dir, "u", [("vid#01".to_string(), one.clone())].into_iter()).unwrap();
+        manifest::set_chapter(&dir, "vid#01", 0.0, 4.0).unwrap();
+        // The timestamp was corrected upstream by ten seconds.
+        let cfg = super::tests::config(false);
+        let moved = vec![chapter("Intro", 0.0, 14.0)];
+        let tracks = chapter_tracks(&cfg, &video(&dir, false), &moved, &dir);
+        assert_eq!(tracks[0].status, Status::Pending, "the old cut was kept for a longer chapter");
+        assert!(one.is_file(), "the old file was removed");
+        // A second either way is rounding and not a change.
+        let rounded = vec![chapter("Intro", 0.0, 4.6)];
+        assert_eq!(chapter_tracks(&cfg, &video(&dir, false), &rounded, &dir)[0].status, Status::Have);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // Break it by deleting the `Failed` half: a failed chapter is recorded against the video's own file, which is there.
+    #[test]
+    fn the_full_file_stays_while_a_chapter_failed_and_goes_when_the_rest_are_done_or_unpicked() {
+        let dir = folder("wholedone");
+        let (full, cut, other) = (dir.join("full.opus"), dir.join("cut.opus"), dir.join("other.opus"));
+        for f in [&full, &cut, &other] {
+            std::fs::write(f, "x").unwrap();
+        }
+        let track = |index: usize, status: Status, path: &Path| {
+            let mut t = Track::new(index, format!("vid#0{index}"), "T".into(), path.to_path_buf());
+            t.status = status;
+            t
+        };
+        // Failed, yet pointing at a file that exists and is not the video's.
+        let failed = [track(1, Status::Downloaded, &cut), track(2, Status::Failed, &other)];
+        assert!(!whole_is_done(&failed, &full), "a failed chapter did not keep the video");
+        // Failed against the video's own file.
+        let against_full = [track(1, Status::Downloaded, &cut), track(2, Status::Failed, &full)];
+        assert!(!whole_is_done(&against_full, &full));
+        // Unpicked: no file, and no reason to keep a whole video for it.
+        let unpicked = [track(1, Status::Downloaded, &cut), track(2, Status::Skipped, &dir.join("02.opus"))];
+        assert!(whole_is_done(&unpicked, &full), "an unpicked chapter kept the whole video for good");
+        // And a chapter with no file at all, not unpicked, still counts against it.
+        let missing = [track(1, Status::Downloaded, &cut), track(2, Status::Pending, &dir.join("02.opus"))];
+        assert!(!whole_is_done(&missing, &full));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     // Break it by moving the empty-chapters return back above the `is_split` check.
     #[test]
     fn a_folder_that_was_split_stays_split_when_upstream_loses_its_chapters() {
@@ -9447,6 +10344,22 @@ mod chapter_tests {
         std::fs::remove_dir_all(&other).unwrap();
     }
 
+    // A playlist whose first track is a split video's id is a playlist, whatever its sidecar also holds.
+    #[test]
+    fn held_chapters_replace_a_single_video_and_never_a_playlist() {
+        let dir = folder("splitplaylist");
+        let one = dir.join("01 - Intro.opus");
+        std::fs::write(&one, "a").unwrap();
+        manifest::write(&dir, "https://youtu.be/vid", [("vid#01".to_string(), one)].into_iter()).unwrap();
+        let mut tracks = vec![video(&dir, false), Track::new(2, "other".into(), "Other".into(), dir.join("02 - Other.opus"))];
+        let (tx, _rx) = mpsc::channel();
+        let asker = Asker { tx, enabled: false };
+        let cfg = super::tests::config(false);
+        assert!(settle_split(&cfg, &asker, &Pass::plain(false), Vec::new(), &mut tracks).is_none());
+        assert_eq!(tracks.len(), 2, "the playlist was replaced by one video's chapters");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     // Break it by removing the `Failed` early exit in `tag_tracks`: the reason becomes "no file".
     #[test]
     fn a_failed_cut_keeps_its_reason_through_the_tagging_pass() {
@@ -9472,6 +10385,760 @@ mod chapter_tests {
             !rx.try_iter().any(|m| matches!(m, Msg::Update { note: Some(n), .. } if n == "no file")),
             "the cut's reason was replaced"
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod duplicate_tests {
+    use super::*;
+    use crate::worker::tests::{config, tiny_opus};
+    use std::sync::mpsc::channel;
+
+    fn library_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("earworm-dup-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    // A folder holding one file the sidecar names, as a finished sync leaves it.
+    fn folder_with(dir: &Path, name: &str, id: &str, file: &str) -> PathBuf {
+        let folder = dir.join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join(file), "audio").unwrap();
+        manifest::write(&folder, "u", [(id.to_string(), folder.join(file))].into_iter()).unwrap();
+        folder
+    }
+
+    fn cfg_for(dir: &Path) -> Config {
+        let mut cfg = config(false);
+        cfg.dir = dir.to_path_buf();
+        cfg
+    }
+
+    fn index_for(dir: &Path, here: &Path, wanted: &HashSet<&str>) -> HashMap<String, Held> {
+        let cfg = cfg_for(dir);
+        library_index(&Others::new(&cfg, here), &cfg.format, wanted)
+    }
+
+    fn pending(index: usize, id: &str, name: &str, folder: &Path) -> Track {
+        Track::new(index, id.into(), name.into(), folder.join(format!("{index:02} - {name}.opus")))
+    }
+
+    // The path short of the scan: index, copy under this playlist's number, then the archive names the id.
+    #[test]
+    fn a_video_another_folder_holds_is_copied_and_the_archive_skips_it() {
+        let dir = library_dir("copy");
+        let a = folder_with(&dir, "A", "vid1", "01 - Artist - Song.opus");
+        let b = dir.join("B");
+        let mut tracks = vec![pending(3, "vid1", "Raw Title", &b)];
+
+        let known = index_for(&dir, &b, &HashSet::from(["vid1"]));
+        let (tx, _rx) = channel();
+        assert_eq!(copy_known(&cfg_for(&dir), &tx, &mut tracks, &known), 1);
+
+        let path = tracks[0].path.clone().unwrap();
+        assert_eq!(path, b.join("03 - Artist - Song.opus"));
+        assert_eq!(tracks[0].status, Status::Have);
+        assert_eq!(tracks[0].source, "copied");
+        assert!(a.join("01 - Artist - Song.opus").is_file(), "the source was moved");
+        assert!(!std::fs::read_dir(&b).unwrap().flatten().any(|e| {
+            e.file_name().to_string_lossy().starts_with(SCRATCH)
+        }), "a scratch file was left behind");
+
+        let archive = dir.join("archive.txt");
+        ytdlp::write_archive(&tracks, &archive, &HashSet::new()).unwrap();
+        assert!(std::fs::read_to_string(&archive).unwrap().contains("youtube vid1"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn only_a_file_in_the_right_format_under_a_real_id_is_a_source() {
+        let dir = library_dir("index");
+        folder_with(&dir, "A", "wrongfmt", "01 - X.mp3");
+        folder_with(&dir, "C", "~Song.opus", "Song.opus");
+        let own = folder_with(&dir, "B", "mine", "01 - Own.opus");
+        let wanted = HashSet::from(["wrongfmt", "~Song.opus", "mine"]);
+
+        let known = index_for(&dir, &own, &wanted);
+        assert!(known.is_empty(), "{:?}", known.keys().collect::<Vec<_>>());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_same_video_in_three_folders_copies_from_the_first_by_name() {
+        let dir = library_dir("order");
+        folder_with(&dir, "Z", "vid", "01 - Z.opus");
+        folder_with(&dir, "A", "vid", "01 - A.opus");
+        let here = dir.join("M");
+        let known = index_for(&dir, &here, &HashSet::from(["vid"]));
+        assert_eq!(known["vid"].folder, "A");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // A run quit during the download used to leave the copy with no sidecar line, so the next scan did not know it.
+    #[test]
+    fn a_copy_is_recorded_in_the_sidecar_as_soon_as_it_is_made() {
+        let dir = library_dir("recorded");
+        folder_with(&dir, "A", "vid1", "01 - Artist - Song.opus");
+        let b = dir.join("B");
+        let mut tracks = vec![pending(3, "vid1", "Raw Title", &b)];
+        let known = index_for(&dir, &b, &HashSet::from(["vid1"]));
+        let (tx, _rx) = channel();
+        assert_eq!(copy_known(&cfg_for(&dir), &tx, &mut tracks, &known), 1);
+        let held: Vec<(String, PathBuf)> = manifest::entries(&b);
+        assert_eq!(held.len(), 1, "the copy is on disk and nothing names it: {held:?}");
+        assert_eq!(held[0].0, "vid1");
+        assert_eq!(Some(held[0].1.as_path()), tracks[0].path.as_deref());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_name_already_taken_is_left_alone_and_the_track_downloads() {
+        let dir = library_dir("taken");
+        folder_with(&dir, "A", "vid1", "01 - Song.opus");
+        let b = dir.join("B");
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(b.join("02 - Song.opus"), "somebody else's").unwrap();
+        let mut tracks = vec![pending(2, "vid1", "Song", &b)];
+        let known = index_for(&dir, &b, &HashSet::from(["vid1"]));
+        let (tx, _rx) = channel();
+        assert_eq!(copy_known(&cfg_for(&dir), &tx, &mut tracks, &known), 0);
+        assert_eq!(tracks[0].status, Status::Pending);
+        assert_eq!(std::fs::read_to_string(b.join("02 - Song.opus")).unwrap(), "somebody else's");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn shelf_with(name: &str, files: &[&str]) -> Shelf {
+        Shelf {
+            path: PathBuf::from("/music").join(name),
+            name: name.into(),
+            files: files.iter().map(|f| ((*f).to_string(), true)).collect(),
+            ..Shelf::default()
+        }
+    }
+
+    #[test]
+    fn two_rows_with_one_title_and_length_are_flagged_and_two_lengths_are_not() {
+        let b = PathBuf::from("/music/B");
+        let mut tracks = vec![
+            pending(1, "a", "Song", &b),
+            pending(2, "b", "Song", &b),
+            pending(3, "c", "Other", &b),
+            pending(4, "d", "Other", &b),
+        ];
+        (tracks[0].duration, tracks[1].duration) = (200, 201);
+        (tracks[2].duration, tracks[3].duration) = (200, 260);
+        mark_twins(&mut tracks, &HashMap::new(), &[], &b);
+        assert_eq!(tracks[1].twin.as_deref(), Some("same as track 1"));
+        assert_eq!(tracks[0].twin, None);
+        assert_eq!(tracks[3].twin, None, "a live cut a minute longer is not a twin");
+    }
+
+    #[test]
+    fn a_title_in_another_folder_is_a_maybe_and_a_known_id_says_it_will_be_copied() {
+        let b = PathBuf::from("/music/B");
+        let mut tracks = vec![
+            pending(1, "a", "Song", &b),
+            pending(2, "b", "Artist - Song", &b),
+            pending(3, "held", "Lullaby", &b),
+            pending(4, "c", "Live - Intro", &b),
+        ];
+        let held = Held { file: PathBuf::from("/x"), folder: "A".into() };
+        let known = HashMap::from([("held".to_string(), held)]);
+        let shelves = [
+            shelf_with(
+                "A",
+                &["01 - Artist - Song.opus", "02 - Artist - Intro.opus", "03 - Artist - Lullaby.opus"],
+            ),
+            // The folder being synced is not somewhere a twin can be.
+            shelf_with("B", &["01 - Song.opus"]),
+        ];
+        mark_twins(&mut tracks, &known, &shelves, &b);
+        assert_eq!(tracks[0].twin.as_deref(), Some("maybe in A"));
+        assert_eq!(tracks[1].twin.as_deref(), Some("maybe in A"));
+        assert_eq!(tracks[2].twin.as_deref(), Some("copy from A"), "the sync copies this one");
+        // Two tails never meet: every `Intro` would match every other.
+        assert_eq!(tracks[3].twin, None);
+    }
+
+    #[test]
+    fn a_hit_from_the_lookup_writes_its_isrc_into_the_tag() {
+        let dir = library_dir("isrc");
+        let file = dir.join("01 - A.opus");
+        if tiny_opus(&file).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            return;
+        }
+        let (tx, _rx) = channel();
+        let asker = Asker { tx, enabled: false };
+        let mut cfg = config(false);
+        cfg.cover = false;
+        let m = crate::lookup::Match {
+            title: "Autobahn".into(),
+            artist: "Kraftwerk".into(),
+            album: None,
+            mbid: None,
+            cover_url: None,
+            score: None,
+            isrc: Some("GB01A0900374".into()),
+            source: "test",
+        };
+        tag::apply(&file, &m, &cfg, &mut CoverState::default(), &asker, 1, "").unwrap();
+
+        use lofty::file::TaggedFileExt;
+        let tagged = lofty::read_from_path(&file).unwrap();
+        let isrc = tagged
+            .primary_tag()
+            .and_then(|t| t.get_string(lofty::tag::ItemKey::Isrc).map(str::to_string));
+        assert_eq!(isrc.as_deref(), Some("GB01A0900374"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn two_videos_with_one_isrc_are_one_recording_but_one_video_twice_is_not() {
+        let dir = library_dir("isrc-twin");
+        let a = folder_with(&dir, "A", "old", "01 - Song.opus");
+        manifest::set_isrcs(&a, &[("old".into(), "GB01A0900374".into())]).unwrap();
+        let b = dir.join("B");
+        let mut tracks = vec![
+            pending(1, "new", "Song", &b),
+            pending(2, "old", "Song", &b),
+        ];
+        tracks[0].isrc = Some("GB01A0900374".into());
+        tracks[1].isrc = Some("GB01A0900374".into());
+        let cfg = cfg_for(&dir);
+        let marked = flag_isrc_twins(&Others::new(&cfg, &b), &mut tracks);
+
+        assert_eq!(tracks[0].twin.as_deref(), Some("same recording in A"));
+        // The same video in both folders is what a copy makes.
+        assert_eq!(tracks[1].twin.as_deref(), Some("same recording as track 1"));
+        assert_eq!(marked.len(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn a_hit_with_no_isrc_clears_the_one_a_different_recording_left() {
+        let dir = library_dir("isrc-stale");
+        let file = dir.join("01 - A.opus");
+        if tiny_opus(&file).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            return;
+        }
+        let (tx, _rx) = channel();
+        let asker = Asker { tx, enabled: false };
+        let mut cfg = config(false);
+        cfg.cover = false;
+        let hit = |title: &str, isrc: Option<&str>| crate::lookup::Match {
+            title: title.into(),
+            artist: "Kraftwerk".into(),
+            album: None,
+            mbid: None,
+            cover_url: None,
+            score: None,
+            isrc: isrc.map(Into::into),
+            source: "test",
+        };
+        let mut cover = CoverState::default();
+        tag::apply(&file, &hit("Autobahn", Some("GB01A0900374")), &cfg, &mut cover, &asker, 1, "").unwrap();
+        assert_eq!(tag::read(&file).unwrap().isrc.as_deref(), Some("GB01A0900374"));
+        tag::apply(&file, &hit("Kometenmelodie", None), &cfg, &mut cover, &asker, 1, "").unwrap();
+        assert_eq!(tag::read(&file).unwrap().isrc, None, "the old song's ISRC outlived the song");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // The flag follows the file, so a track from an earlier run is compared and a reopened folder shows what a sync did.
+    #[test]
+    fn a_track_already_on_disk_is_compared_by_the_isrc_in_its_tag() {
+        let dir = library_dir("isrc-have");
+        let a = folder_with(&dir, "A", "old", "01 - Song.opus");
+        manifest::set_isrcs(&a, &[("old".into(), "GB01A0900374".into())]).unwrap();
+        let b = dir.join("B");
+        std::fs::create_dir_all(&b).unwrap();
+        let file = b.join("01 - Song.opus");
+        if tiny_opus(&file).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            return;
+        }
+        let (tx, _rx) = channel();
+        let asker = Asker { tx, enabled: false };
+        let mut cfg = config(false);
+        cfg.cover = false;
+        let m = crate::lookup::Match {
+            title: "Song".into(),
+            artist: "Artist".into(),
+            album: None,
+            mbid: None,
+            cover_url: None,
+            score: None,
+            isrc: Some("GB01A0900374".into()),
+            source: "test",
+        };
+        tag::apply(&file, &m, &cfg, &mut CoverState::default(), &asker, 1, "").unwrap();
+        let mut tracks = vec![Track::new(1, "new".into(), "Song".into(), file.clone())];
+        tracks[0].status = Status::Have;
+        let cfg = cfg_for(&dir);
+        let (tx, _rx) = channel();
+        let asker = Asker { tx: tx.clone(), enabled: false };
+        let cancel = AtomicBool::new(false);
+        tag_tracks(&cfg, &tx, &cancel, &mut tracks, "B", &asker, &mut CoverState::default(), None);
+        assert_eq!(tracks[0].isrc.as_deref(), Some("GB01A0900374"), "the Have branch did not read it");
+        flag_isrc_twins(&Others::new(&cfg, &b), &mut tracks);
+        assert_eq!(tracks[0].twin.as_deref(), Some("same recording in A"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_copy_clears_the_marker_the_pick_gate_gave_it() {
+        let dir = library_dir("copy-twin");
+        folder_with(&dir, "A", "vid1", "01 - Song.opus");
+        let b = dir.join("B");
+        let mut tracks = vec![pending(1, "vid1", "Song", &b)];
+        let known = index_for(&dir, &b, &HashSet::from(["vid1"]));
+        mark_twins(&mut tracks, &known, &[], &b);
+        assert_eq!(tracks[0].twin.as_deref(), Some("copy from A"));
+        let (tx, rx) = channel();
+        copy_known(&cfg_for(&dir), &tx, &mut tracks, &known);
+        assert_eq!(tracks[0].twin, None);
+        assert!(rx.try_iter().any(|m| matches!(m, Msg::Twin { twin: None, .. })));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_rest_of_the_library_is_read_once_however_many_questions_ask() {
+        let dir = library_dir("once");
+        folder_with(&dir, "A", "vid1", "01 - Song.opus");
+        let cfg = cfg_for(&dir);
+        let here = dir.join("B");
+        let others = Others::new(&cfg, &here);
+        let first = others.all().as_ptr();
+        // A sidecar that changes after the first read is not read again.
+        std::fs::remove_file(manifest::path(&dir.join("A"))).unwrap();
+        assert_eq!(others.all().as_ptr(), first);
+        assert_eq!(others.all().len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    // An acoustid or Apple hit has no ISRC to give, and that is no reason to lose the one the file has.
+    #[test]
+    fn a_hit_with_no_isrc_keeps_the_one_the_same_song_already_has() {
+        let dir = library_dir("isrc-keep");
+        let file = dir.join("01 - A.opus");
+        if tiny_opus(&file).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            return;
+        }
+        let (tx, _rx) = channel();
+        let asker = Asker { tx, enabled: false };
+        let mut cfg = config(false);
+        cfg.cover = false;
+        let hit = |isrc: Option<&str>| crate::lookup::Match {
+            title: "Autobahn".into(),
+            artist: "Kraftwerk".into(),
+            album: None,
+            mbid: None,
+            cover_url: None,
+            score: None,
+            isrc: isrc.map(Into::into),
+            source: "test",
+        };
+        let mut cover = CoverState::default();
+        tag::apply(&file, &hit(Some("GB01A0900374")), &cfg, &mut cover, &asker, 1, "").unwrap();
+        tag::apply(&file, &hit(None), &cfg, &mut cover, &asker, 1, "").unwrap();
+        assert_eq!(tag::read(&file).unwrap().isrc.as_deref(), Some("GB01A0900374"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_copy_that_does_not_happen_does_not_leave_its_marker() {
+        let dir = library_dir("copy-skip");
+        folder_with(&dir, "A", "vid1", "01 - Song.opus");
+        let b = dir.join("B");
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(b.join("02 - Song.opus"), "somebody else's").unwrap();
+        let mut tracks = vec![pending(2, "vid1", "Song", &b)];
+        let known = index_for(&dir, &b, &HashSet::from(["vid1"]));
+        mark_twins(&mut tracks, &known, &[], &b);
+        let (tx, rx) = channel();
+        assert_eq!(copy_known(&cfg_for(&dir), &tx, &mut tracks, &known), 0);
+        assert_eq!(tracks[0].twin, None, "it still says it was copied");
+        assert!(rx.try_iter().any(|m| matches!(m, Msg::Twin { twin: None, .. })));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // The ISRC is the stronger answer, so it replaces a title guess it contradicts.
+    #[test]
+    fn an_isrc_replaces_the_title_marker_it_contradicts() {
+        let dir = library_dir("isrc-replaces");
+        let a = folder_with(&dir, "A", "old", "01 - Song.opus");
+        manifest::set_isrcs(&a, &[("old".into(), "AAAA".into())]).unwrap();
+        let b = dir.join("B");
+        let mut tracks = vec![pending(1, "new", "Song", &b)];
+        tracks[0].twin = Some("maybe in A".into());
+        tracks[0].isrc = Some("BBBB".into());
+        let cfg = cfg_for(&dir);
+        let changed = flag_isrc_twins(&Others::new(&cfg, &b), &mut tracks);
+        assert_eq!(tracks[0].twin, None);
+        assert_eq!(changed, [(1, None)]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    // A copy of this very video in one folder must not stand in for the real twin in the next.
+    #[test]
+    fn a_copy_of_this_video_does_not_hide_a_twin_in_another_folder() {
+        let dir = library_dir("isrc-holders");
+        let a = folder_with(&dir, "A", "new", "01 - Song.opus");
+        manifest::set_isrcs(&a, &[("new".into(), "GBAYE9200070".into())]).unwrap();
+        let b = folder_with(&dir, "B", "other", "01 - Song.opus");
+        manifest::set_isrcs(&b, &[("other".into(), "GBAYE9200070".into())]).unwrap();
+        let c = dir.join("C");
+        let mut tracks = vec![pending(1, "new", "Song", &c)];
+        tracks[0].isrc = Some("GBAYE9200070".into());
+        flag_isrc_twins(&Others::new(&cfg_for(&dir), &c), &mut tracks);
+        assert_eq!(tracks[0].twin.as_deref(), Some("same recording in B"), "A holds this very video");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // A row the gate left out is not copied, so its marker described something that would not happen.
+    #[test]
+    fn an_unpicked_row_loses_its_copy_marker() {
+        let dir = library_dir("unpicked-copy");
+        folder_with(&dir, "A", "vid1", "01 - Song.opus");
+        let b = dir.join("B");
+        let mut tracks = vec![pending(1, "vid1", "Song", &b), pending(2, "vid2", "Other", &b)];
+        tracks[0].twin = Some("copy from A".into());
+        tracks[0].status = Status::Skipped;
+        tracks[1].twin = Some("maybe in A".into());
+        tracks[1].status = Status::Skipped;
+        let known = index_for(&dir, &b, &HashSet::from(["vid1"]));
+        let (tx, rx) = channel();
+        copy_known(&cfg_for(&dir), &tx, &mut tracks, &known);
+        assert_eq!(tracks[0].twin, None);
+        assert_eq!(tracks[1].twin.as_deref(), Some("maybe in A"), "a title guess is still a guess");
+        assert!(rx.try_iter().any(|m| matches!(m, Msg::Twin { index: 1, twin: None })), "the screen was not told");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // A guess is dropped only for a recording that is known to differ. Most files have no ISRC at all.
+    #[test]
+    fn a_title_guess_survives_an_isrc_that_nothing_contradicts() {
+        let dir = library_dir("isrc-keeps");
+        let a = folder_with(&dir, "A", "old", "01 - Song.opus");
+        let b = dir.join("B");
+        let cfg = cfg_for(&dir);
+        // The other file has no ISRC recorded.
+        let mut tracks = vec![pending(1, "new", "Song", &b)];
+        tracks[0].twin = Some("maybe in A".into());
+        tracks[0].isrc = Some("BBBB".into());
+        assert!(flag_isrc_twins(&Others::new(&cfg, &b), &mut tracks).is_empty());
+        assert_eq!(tracks[0].twin.as_deref(), Some("maybe in A"));
+
+        // A copy is not a guess either, and an ISRC does not clear it.
+        tracks[0].twin = Some("copy from A".into());
+        flag_isrc_twins(&Others::new(&cfg, &b), &mut tracks);
+        assert_eq!(tracks[0].twin.as_deref(), Some("copy from A"));
+
+        // Within the listing: same title, and the other track has a different recording.
+        let mut pair = vec![pending(1, "x", "Song", &b), pending(2, "y", "Song", &b)];
+        pair[1].twin = Some("same as track 1".into());
+        pair[1].isrc = Some("BBBB".into());
+        flag_isrc_twins(&Others::new(&cfg, &b), &mut pair);
+        assert_eq!(pair[1].twin.as_deref(), Some("same as track 1"), "track 1 has no ISRC to contradict it");
+        pair[0].isrc = Some("AAAA".into());
+        flag_isrc_twins(&Others::new(&cfg, &b), &mut pair);
+        assert_eq!(pair[1].twin, None, "a different ISRC on the other side contradicts the guess");
+        let _ = a;
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // The whole reopen path on real files: tag, sidecar, `open_shelf`, then the screen.
+    #[test]
+    fn a_reopened_folder_shows_the_twin_marker_on_screen() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let dir = library_dir("screen");
+        let (tx, rx) = channel();
+        let asker = Asker { tx: tx.clone(), enabled: false };
+        let mut cfg = cfg_for(&dir);
+        cfg.cover = false;
+        let tagged = |file: &Path| {
+            if tiny_opus(file).is_none() {
+                return false;
+            }
+            let m = crate::lookup::Match {
+                title: "Creep".into(),
+                artist: "Radiohead".into(),
+                album: None,
+                mbid: None,
+                cover_url: None,
+                score: None,
+                isrc: Some("GBAYE9200070".into()),
+                source: "test",
+            };
+            tag::apply(file, &m, &cfg, &mut CoverState::default(), &asker, 1, "").unwrap();
+            true
+        };
+        let (a, c) = (dir.join("A"), dir.join("C"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&c).unwrap();
+        let (fa, fc) = (a.join("01 - Creep.opus"), c.join("01 - Creep.opus"));
+        if !tagged(&fa) || !tagged(&fc) {
+            eprintln!("no ffmpeg, skipping");
+            return;
+        }
+        manifest::write(&a, "u", [("old".to_string(), fa)].into_iter()).unwrap();
+        manifest::set_isrcs(&a, &[("old".into(), "GBAYE9200070".into())]).unwrap();
+        manifest::write(&c, "u", [("new".to_string(), fc)].into_iter()).unwrap();
+
+        let shelf = library(&dir).into_iter().find(|s| s.name == "C").unwrap();
+        let mut tracks = Vec::new();
+        open_shelf(&mut cfg, &tx, &mut tracks, &shelf).unwrap();
+
+        let (ui_tx, _ui_rx) = channel();
+        let mut app = crate::app::App::new(ui_tx, "settings".into());
+        app.intro_done = true;
+        for msg in rx.try_iter() {
+            app.apply(msg);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 10)).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let screen: String = (0..10)
+            .map(|y| (0..120).map(|x| buffer[(x, y)].symbol().to_string()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("≈ same recording in A"), "{screen}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    // Two folders holding one video are what a copy makes, so reopening either shows no marker.
+    #[test]
+    fn a_reopened_folder_whose_video_is_also_elsewhere_shows_no_marker() {
+        use ratatui::{Terminal, backend::TestBackend};
+        let dir = library_dir("screen-control");
+        let (tx, rx) = channel();
+        let asker = Asker { tx: tx.clone(), enabled: false };
+        let mut cfg = cfg_for(&dir);
+        cfg.cover = false;
+        let (a, b) = (dir.join("A"), dir.join("B"));
+        for folder in [&a, &b] {
+            std::fs::create_dir_all(folder).unwrap();
+            let file = folder.join("01 - Creep.opus");
+            if tiny_opus(&file).is_none() {
+                eprintln!("no ffmpeg, skipping");
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            }
+            let m = crate::lookup::Match {
+                title: "Creep".into(),
+                artist: "Radiohead".into(),
+                album: None,
+                mbid: None,
+                cover_url: None,
+                score: None,
+                isrc: Some("GBAYE9200070".into()),
+                source: "test",
+            };
+            tag::apply(&file, &m, &cfg, &mut CoverState::default(), &asker, 1, "").unwrap();
+            manifest::write(folder, "u", [("same".to_string(), file)].into_iter()).unwrap();
+            manifest::set_isrcs(folder, &[("same".into(), "GBAYE9200070".into())]).unwrap();
+        }
+        let shelf = library(&dir).into_iter().find(|s| s.name == "A").unwrap();
+        let mut tracks = Vec::new();
+        open_shelf(&mut cfg, &tx, &mut tracks, &shelf).unwrap();
+        let (ui_tx, _ui_rx) = channel();
+        let mut app = crate::app::App::new(ui_tx, "settings".into());
+        app.intro_done = true;
+        for msg in rx.try_iter() {
+            app.apply(msg);
+        }
+        let mut terminal = Terminal::new(TestBackend::new(120, 10)).unwrap();
+        terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        let screen: String = (0..10)
+            .map(|y| (0..120).map(|x| buffer[(x, y)].symbol().to_string()).collect::<String>())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(screen.contains("Creep") && !screen.contains('≈'), "{screen}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod playlist_tests {
+    use super::*;
+    use crate::playlists::Entry;
+
+    fn root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("earworm-resolve-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn folder(dir: &Path, name: &str, files: &[(&str, &str)]) {
+        let folder = dir.join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        for (_, file) in files {
+            std::fs::write(folder.join(file), "audio").unwrap();
+        }
+        let entries = files.iter().map(|(id, file)| (id.to_string(), folder.join(file)));
+        manifest::write(&folder, "u", entries).unwrap();
+    }
+
+    fn entry(id: &str, hint: &str) -> Entry {
+        Entry { id: id.into(), hint: hint.into() }
+    }
+
+    fn cfg_in(dir: &Path) -> Config {
+        let mut cfg = crate::worker::tests::config(false);
+        cfg.dir = dir.to_path_buf();
+        cfg
+    }
+
+    fn resolve(dir: &Path, entries: &[Entry]) -> Vec<Option<PathBuf>> {
+        let cfg = cfg_in(dir);
+        resolve_entries(&Others::new(&cfg, Path::new("")), dir, entries)
+    }
+
+    // The exit test for the storage decision: an edit renames the file and the entry still finds it.
+    #[test]
+    fn an_entry_still_resolves_after_its_file_and_its_folder_are_renamed() {
+        let dir = root("rename");
+        folder(&dir, "A", &[("vid1", "01 - Old.opus")]);
+        let entries = [entry("vid1", "A/01 - Old.opus")];
+        assert_eq!(resolve(&dir, &entries), [Some(dir.join("A/01 - Old.opus"))]);
+
+        // What `write_track` does: the file moves and the sidecar follows.
+        std::fs::rename(dir.join("A/01 - Old.opus"), dir.join("A/01 - New.opus")).unwrap();
+        manifest::write(&dir.join("A"), "u", [("vid1".to_string(), dir.join("A/01 - New.opus"))].into_iter()).unwrap();
+        assert_eq!(resolve(&dir, &entries), [Some(dir.join("A/01 - New.opus"))]);
+
+        // And what `rename_shelf` does: the whole folder moves.
+        std::fs::rename(dir.join("A"), dir.join("Renamed")).unwrap();
+        assert_eq!(resolve(&dir, &entries), [Some(dir.join("Renamed/01 - New.opus"))]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_video_in_two_folders_prefers_the_one_the_entry_came_from() {
+        let dir = root("two");
+        folder(&dir, "A", &[("vid", "01 - A.opus")]);
+        folder(&dir, "B", &[("vid", "01 - B.opus")]);
+        assert_eq!(resolve(&dir, &[entry("vid", "B/01 - B.opus")]), [Some(dir.join("B/01 - B.opus"))]);
+        // The home folder lost it, so the other copy answers rather than the entry going dead.
+        std::fs::remove_file(dir.join("B/01 - B.opus")).unwrap();
+        assert_eq!(resolve(&dir, &[entry("vid", "B/01 - B.opus")]), [Some(dir.join("A/01 - A.opus"))]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // Two folders can both hold a local file with one name, and it is only that folder's.
+    #[test]
+    fn a_local_id_only_means_something_in_its_own_folder() {
+        let dir = root("local");
+        folder(&dir, "A", &[("~Song.opus", "Song.opus")]);
+        folder(&dir, "B", &[("~Song.opus", "Song.opus")]);
+        assert_eq!(resolve(&dir, &[entry("~Song.opus", "B/Song.opus")]), [Some(dir.join("B/Song.opus"))]);
+        std::fs::remove_file(dir.join("B/Song.opus")).unwrap();
+        assert_eq!(resolve(&dir, &[entry("~Song.opus", "B/Song.opus")]), [None], "it borrowed A's song");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_chapter_resolves_and_a_gone_entry_is_none_not_a_guess() {
+        let dir = root("chapter");
+        folder(&dir, "A", &[("vid#02", "02 - Cut.opus")]);
+        std::fs::write(dir.join("A/unlisted.opus"), "audio").unwrap();
+        let got = resolve(
+            &dir,
+            &[entry("vid#02", "A/02 - Cut.opus"), entry("gone", "A/missing.opus"), entry("unlisted", "A/unlisted.opus")],
+        );
+        assert_eq!(got, [Some(dir.join("A/02 - Cut.opus")), None, Some(dir.join("A/unlisted.opus"))]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_playlist_store_is_not_a_folder_to_read_from() {
+        let dir = root("store");
+        folder(&dir, ".playlists", &[("vid", "x.opus")]);
+        assert_eq!(resolve(&dir, &[entry("vid", "Gone/x.opus")]), [None]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn a_hint_that_leaves_the_library_is_never_resolved() {
+        let dir = root("escape");
+        let outside = std::env::temp_dir().join(format!("earworm-outside-{}.opus", std::process::id()));
+        std::fs::write(&outside, "not music").unwrap();
+        let up = format!("../{}", outside.file_name().unwrap().to_string_lossy());
+        let got = resolve(&dir, &[entry("a", &up), entry("b", &outside.to_string_lossy()), entry("c", "")]);
+        assert_eq!(got, [None, None, None]);
+        std::fs::remove_file(&outside).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // The case `an_entry_still_resolves_after_its_file_and_its_folder_are_renamed` leaves out: a local id.
+    #[test]
+    fn a_local_entry_follows_its_folder_through_rehome() {
+        let dir = root("rehome");
+        folder(&dir, "A", &[("~Song.opus", "Song.opus")]);
+        let list = playlists::Playlist { name: "Mix".into(), entries: vec![entry("~Song.opus", "A/Song.opus")] };
+        playlists::save(&dir, &list).unwrap();
+
+        std::fs::rename(dir.join("A"), dir.join("Renamed")).unwrap();
+        let stale = playlists::load(&dir, "Mix").unwrap().entries;
+        assert_eq!(resolve(&dir, &stale), [None], "the old hint should not resolve");
+
+        assert_eq!(playlists::rehome(&dir, "A", "Renamed").unwrap(), 1);
+        let fresh = playlists::load(&dir, "Mix").unwrap().entries;
+        assert_eq!(resolve(&dir, &fresh), [Some(dir.join("Renamed/Song.opus"))]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    #[test]
+    fn a_custom_playlist_is_a_library_row_but_never_a_folder() {
+        let dir = root("rows");
+        folder(&dir, "A", &[("a1", "01 - One.opus")]);
+        folder(&dir, "B", &[("b1", "01 - Two.opus")]);
+        let mix = playlists::Playlist {
+            name: "Mix".into(),
+            entries: vec![entry("b1", "B/01 - Two.opus"), entry("gone", "A/05 - Lost.opus"), entry("a1", "A/01 - One.opus")],
+        };
+        playlists::save(&dir, &mix).unwrap();
+
+        let all = library_all(&dir);
+        let row = all.iter().find(|s| s.name == "Mix").expect("the playlist is not on the library");
+        assert_eq!(row.kind, Some(manifest::Kind::Custom));
+        assert_eq!((row.tracks, row.missing), (2, 1));
+        assert_eq!(row.path, playlists::path_of(&dir, "Mix"), "a folder command would be handed the wrong thing");
+        // In the playlist's order, with the missing one named and flagged.
+        assert_eq!(
+            row.files,
+            [("01 - Two.opus".to_string(), true), ("05 - Lost.opus".to_string(), false), ("01 - One.opus".to_string(), true)]
+        );
+        assert_eq!(all.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["A", "B", "Mix"]);
+
+        // Resync, `--list`, `--check` and the duplicate checks walk this, and a list is none of those.
+        assert_eq!(library(&dir).iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["A", "B"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+    // `remove_dir_all` does not come back, and a custom row's path is a file in the store, not a folder.
+    #[test]
+    fn no_folder_command_will_act_on_a_custom_playlists_path() {
+        let dir = root("lock");
+        folder(&dir, "A", &[("a1", "01 - One.opus")]);
+        let list = playlists::Playlist { name: "Mix".into(), entries: vec![entry("a1", "A/01 - One.opus")] };
+        playlists::save(&dir, &list).unwrap();
+        let mut cfg = cfg_in(&dir);
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let asker = Asker { tx: tx.clone(), enabled: false };
+        let mut tracks = Vec::new();
+
+        for target in [playlists::path_of(&dir, "Mix"), playlists::folder(&dir)] {
+            for (what, err) in [
+                ("remove", remove_shelf(&mut cfg, &tx, &asker, &mut tracks, &target).unwrap_err()),
+                ("rename", rename_shelf(&mut cfg, &tx, &asker, &tracks, &target).unwrap_err()),
+                ("open", open_row(&mut cfg, &tx, &mut tracks, &target, None).unwrap_err()),
+            ] {
+                assert!(err.to_string().contains("custom playlist"), "{what}: {err}");
+            }
+        }
+        assert!(playlists::load(&dir, "Mix").is_some(), "a folder command took the list");
+        assert!(dir.join("A/01 - One.opus").is_file());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

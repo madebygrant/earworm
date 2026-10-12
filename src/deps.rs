@@ -121,6 +121,7 @@ pub struct Facts<'a> {
     /// badly. A `[colors]` table makes the name "custom".
     pub theme: &'a str,
     pub theme_warnings: &'a [String],
+    pub icons: &'a str,
     /* How this terminal would draw a cover, as the protocol handshake
        answered it. Gathered by the caller like everything else here, because
        the query needs a real terminal and `--check` is meant to work without
@@ -222,6 +223,8 @@ pub fn report(facts: &Facts) -> (String, bool) {
             format!("{} · {}", facts.theme, facts.theme_warnings.join(" · "))
         },
     ));
+    // The answer to "why is there a box on my screen".
+    out.push_str(&row(true, "icons", facts.icons));
     /* The answer to "did my format change take", which is otherwise one
        folder at a time. Silent at zero: a row saying nothing is wrong is a
        row the reader has to check every time. */
@@ -329,6 +332,7 @@ mod tests {
             extension: "opus",
             theme: "warm",
             theme_warnings: &[],
+            icons: "symbols",
             graphics: "halfblocks",
             dir,
             playlists: Some(7),

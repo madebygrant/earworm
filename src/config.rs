@@ -24,7 +24,7 @@ pub struct Cli {
     #[arg(short, long, default_value = "~/Music")]
     pub dir: String,
 
-    /// Audio format: opus, m4a, mp3, flac, vorbis or alac
+    /// Audio format: m4a, opus, mp3, flac, vorbis or alac
     #[arg(short, long, value_name = "NAME")]
     pub format: Option<String>,
 
@@ -103,6 +103,11 @@ pub struct Cli {
     #[arg(long, conflicts_with = "url")]
     pub resync: bool,
 
+    /// Download the YouTube links in a markdown file as one playlist, named
+    /// by the file's `#` heading
+    #[arg(long, value_name = "FILE", conflicts_with_all = ["url", "resync", "list", "check"])]
+    pub import: Option<String>,
+
     /// Print the playlists already under --dir and exit
     #[arg(long, conflicts_with = "url")]
     pub list: bool,
@@ -149,6 +154,7 @@ pub struct FileConfig {
     pub achievements: Option<bool>,
     pub extra: Option<Vec<String>>,
     pub acoustid_key: Option<String>,
+    pub icons: Option<String>,
     pub theme: Option<String>,
     /// Field name to `#rrggbb`, painted on top of whichever theme is named. A
     /// map rather than a struct so the error can name the field that was
@@ -207,15 +213,15 @@ impl FileConfig {
    added here without a working encoder fails in the fixtures that read this
    same column rather than in somebody's folder. */
 pub const FORMATS: [(&str, &str, &[&str]); 6] = [
-    ("opus", "opus", &["libopus", "opus"]),
     ("m4a", "m4a", &["aac", "libfdk_aac"]),
+    ("opus", "opus", &["libopus", "opus"]),
     ("mp3", "mp3", &["libmp3lame", "mp3"]),
     ("flac", "flac", &["flac"]),
     ("vorbis", "ogg", &["libvorbis", "vorbis"]),
     ("alac", "m4a", &["alac"]),
 ];
 
-pub const DEFAULT_FORMAT: &str = "opus";
+pub const DEFAULT_FORMAT: &str = "m4a";
 
 /// The palette earworm has always drawn in, and the first stop on the `^t`
 /// walk. A name rather than `Palette::default()` because the theme is now
@@ -607,6 +613,8 @@ pub struct Config {
        the playlist being synced, and `Msg::Restart` territory rather than
        config, which is why every path that starts a run sets or clears it. */
     pub folder: Option<String>,
+    /// A markdown file of links from `--import`, which the worker reads in place of a URL.
+    pub import: Option<String>,
     /// Where a setting changed in the tool gets written back. `None` under
     /// --no-config, which asked for the file to be left out of the run and
     /// so cannot be the place a choice is remembered.
@@ -642,6 +650,7 @@ pub struct Config {
        that goes stale the first time the key is pressed. The help overlay
        reads it off the UI's own state. */
     pub theme: Palette,
+    pub icons: crate::icons::Icons,
     /* What it is called, tracked beside the colours rather than derived from
        them: a `[colors]` table makes the palette match no entry in the
        registry, and the walk still has to know where it is. */
@@ -712,6 +721,12 @@ impl Config {
             anyhow::bail!("unknown format \"{format}\", expected one of {}", known.join(", "));
         }
 
+        let icons = match file.icons.as_deref() {
+            None => crate::icons::Icons::Symbols,
+            Some(name) => crate::icons::Icons::parse(name).ok_or_else(|| {
+                anyhow::anyhow!("unknown icons \"{name}\", expected one of {}", crate::icons::NAMES)
+            })?,
+        };
         let themes = registry(file.themes.as_ref())?;
         let (theme_name, palette, theme_warnings) = theme(
             &themes,
@@ -724,6 +739,7 @@ impl Config {
             url: cli.url.unwrap_or_default(),
             dir: expand(&dir),
             folder: None,
+            import: cli.import,
             format,
             convert: opt_in("no_convert", file.convert),
             loudness: opt_in("no_loudness", file.loudness),
@@ -748,6 +764,7 @@ impl Config {
             achievements: off("no_achievements", file.achievements),
             extra,
             theme: palette,
+            icons,
             theme_name,
             themes,
             theme_warnings,
@@ -773,9 +790,10 @@ impl Config {
             .map(|(name, _)| format!(" · {name} on"))
             .collect();
         format!(
-            "format {} · convert {}{extras} · parse {} · lookup {} · apple {} · cover {} · m3u8 {} · prompts {} · rename {}",
+            "format {} · convert {}{extras} · icons {} · parse {} · lookup {} · apple {} · cover {} · m3u8 {} · prompts {} · rename {}",
             self.format,
             on(self.convert),
+            self.icons.name(),
             on(self.parse),
             on(self.lookup),
             on(self.apple),
@@ -832,11 +850,19 @@ mod tests {
     }
 
     #[test]
+    fn icons_default_to_symbols_and_an_unknown_tier_stops_the_start() {
+        assert_eq!(build("", &[]).icons, crate::icons::Icons::Symbols);
+        assert_eq!(build("icons = \"text\"\n", &[]).icons, crate::icons::Icons::Text);
+        let err = refuse("icons = \"emoji\"\n", &[]);
+        assert!(err.contains("unknown icons \"emoji\"") && err.contains("text, symbols, nerd"), "{err}");
+    }
+
+    #[test]
     fn the_settings_line_names_loudness_and_lyrics_only_when_they_are_on() {
         let plain = build("", &[]).describe();
         assert!(!plain.contains("loudness") && !plain.contains("lyrics"), "{plain}");
         let both = build("loudness = true\nlyrics = true\n", &[]).describe();
-        assert!(both.contains("convert off · loudness on · lyrics on · parse on"), "{both}");
+        assert!(both.contains("convert off · loudness on · lyrics on · icons symbols · parse on"), "{both}");
     }
 
     #[test]

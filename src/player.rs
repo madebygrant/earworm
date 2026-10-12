@@ -70,13 +70,11 @@ fn tag(path: &Path) -> String {
     format!("{:04x}", hash & 0xffff)
 }
 
-/* Prefixed because importing deletes whatever already holds the name, and a
-   bare folder name would reach a playlist the user built by hand. Suffixed
-   because two `--dir` roots can both hold a `Focus`, and without the path in
-   the name the second would quietly replace the first. An ASCII colon is the
-   one separator cliamp rejects outright. */
+// Prefixed because importing deletes whatever already holds the name, and a bare name would reach a playlist
+// built by hand. Suffixed because two `--dir` roots can both hold a `Focus`. An ASCII colon is the one
+// character cliamp rejects, and a custom playlist's own name can hold one, so it becomes a dash here.
 fn stored(folder: &Path) -> String {
-    let name = folder.file_name().unwrap_or_default().to_string_lossy();
+    let name = folder.file_name().unwrap_or_default().to_string_lossy().replace(':', "-");
     // Resolved so a symlinked and a direct route to one folder agree.
     let real = folder.canonicalize().unwrap_or_else(|_| folder.to_path_buf());
     format!("earworm - {name} ({})", tag(&real))
@@ -243,10 +241,28 @@ fn load_with(bin: &str, store: Duration, ipc: Duration, folder: &Path) -> Result
            that brought no playlist file and has not been synced. */
         bail!("no .m3u8 in this folder  ·  sync it without --no-m3u8, or add one yourself");
     };
+    play_with(bin, store, ipc, &playlist, &stored(folder))
+}
+
+/// Hands cliamp a playlist file that is not one folder's, under the name `key` gives it.
+// A custom playlist lives beside the others in one store, so `playlist_of` has no single answer for it.
+// `key` is any path whose last component is the list's name, which is what `stored` reads.
+pub fn load_list(m3u8: &Path, key: &Path) -> Result<String> {
+    play_with(BIN, STORE, IPC, m3u8, &stored(key))
+}
+
+/// The counterpart of `forget` for a custom playlist, after it is renamed or deleted.
+pub fn forget_list(key: &Path) {
+    if installed() {
+        let _ = cliamp(BIN, STORE, &["playlist", "delete", &stored(key)]);
+    }
+}
+
+fn play_with(bin: &str, store: Duration, ipc: Duration, playlist: &Path, name: &str) -> Result<String> {
     let Some(file) = playlist.to_str() else {
         bail!("playlist path is not valid UTF-8  ·  rename the folder and sync again");
     };
-    let name = stored(folder);
+    let name = name.to_string();
 
     let _ = cliamp(bin, store, &["playlist", "delete", &name]);
     let imported = match cliamp(bin, store, &["playlist", "import", "--name", &name, file]) {
@@ -495,6 +511,13 @@ exit 0"#,
         assert!(first.starts_with("earworm - Focus ("), "{first}");
         assert_ne!(first, second, "both folders claim one playlist");
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a_playlist_name_with_a_colon_is_stored_without_one() {
+        let name = stored(Path::new("/music/.earworm-playlists/Road trip: 2026.m3u8"));
+        assert!(!name.contains(':'), "cliamp rejects this: {name}");
+        assert!(name.starts_with("earworm - Road trip- 2026"), "{name}");
     }
 
     /* Pinned against an independent FNV-1a, because the name has to survive

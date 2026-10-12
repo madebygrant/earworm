@@ -92,6 +92,8 @@ pub struct Match {
     pub mbid: Option<String>,
     pub cover_url: Option<String>,
     pub score: Option<f64>,
+    /// The recording's identity, which two different videos of one song share.
+    pub isrc: Option<String>,
     pub source: &'static str,
 }
 
@@ -286,6 +288,7 @@ pub fn acoustid(path: &Path, key: &str) -> Option<Match> {
                     .map(str::to_string),
                 cover_url: None,
                 score: Some(score),
+                isrc: None,
                 source: "acoustid",
             });
         }
@@ -326,6 +329,11 @@ pub fn deezer(artist: &str, title: &str) -> Option<Match> {
             .map(str::to_string),
         mbid: None,
         score: None,
+        isrc: hit
+            .get("isrc")
+            .and_then(Value::as_str)
+            .filter(|isrc| !isrc.is_empty())
+            .map(str::to_string),
         source: "deezer",
     })
 }
@@ -350,6 +358,7 @@ fn itunes_match(hit: &Value) -> Option<Match> {
             .map(upscale_artwork),
         mbid: None,
         score: None,
+        isrc: None,
         source: "apple",
     })
 }
@@ -712,9 +721,12 @@ fn lyrics_via(
             encode(album)
         );
         match fetch(&url) {
+            // The exact lookup is the slow one, so the search still gets its turn unless that was the third strike.
             Reply::Down => {
                 breaker.record(false, Instant::now());
-                return Lookup::Unavailable;
+                if breaker.paused(Instant::now()) {
+                    return Lookup::Unavailable;
+                }
             }
             Reply::Found(hit) => {
                 breaker.record(true, Instant::now());
@@ -944,6 +956,7 @@ mod tests {
             mbid: None,
             cover_url: None,
             score: None,
+            isrc: None,
             source: "apple",
         };
         assert!(plausible(&good, "Boards of Canada", "Roygbiv"));
@@ -954,6 +967,7 @@ mod tests {
             mbid: None,
             cover_url: None,
             score: None,
+            isrc: None,
             source: "apple",
         };
         assert!(!plausible(&bad, "Boards of Canada", "Roygbiv"));
@@ -1048,6 +1062,35 @@ mod tests {
         lyrics_via(&Breaker::new(), "Kraftwerk", "Autobahn", "", 213, fetch);
         assert_eq!(urls.borrow().len(), 1);
         assert!(urls.borrow()[0].ends_with("/search"));
+    }
+
+    // The exact lookup is the slow one, so an error there does not cost the search it would have fallen to.
+    #[test]
+    fn a_failed_exact_lookup_still_tries_the_search_until_the_service_is_given_up_on() {
+        let urls = std::cell::RefCell::new(Vec::new());
+        let fetch = |url: &str| {
+            urls.borrow_mut().push(url.split('?').next().unwrap().to_string());
+            if url.contains("/get?") {
+                Reply::Down
+            } else {
+                Reply::Found(serde_json::json!([
+                    {"artistName": "Kraftwerk", "trackName": "Autobahn", "duration": 213.0, "plainLyrics": "words"}
+                ]))
+            }
+        };
+        let breaker = Breaker::new();
+        let got = lyrics_via(&breaker, "Kraftwerk", "Autobahn", "Autobahn", 213, fetch);
+        assert_eq!(got, Lookup::Found("words".into()));
+        assert_eq!(urls.borrow().len(), 2);
+
+        // The strike that pauses the breaker ends the lookup: there is nobody left to ask.
+        urls.borrow_mut().clear();
+        let now = Instant::now();
+        breaker.record(false, now);
+        breaker.record(false, now);
+        let got = lyrics_via(&breaker, "Kraftwerk", "Autobahn", "Autobahn", 213, fetch);
+        assert_eq!(got, Lookup::Unavailable);
+        assert_eq!(urls.borrow().len(), 1, "searched after giving up");
     }
 
     // Three failures in a row stop the asking, so a down service costs a few timeouts and not a whole sync.

@@ -42,6 +42,101 @@ has no URL, earworm rewrites only a playlist it wrote itself. Giving it a URL
 changes that: from the first sync the playlist upstream is what the folder
 holds, in that order, and earworm writes `<folder>.m3u8` to say so.
 
+## The same song on two playlists
+
+When a playlist wants a video that another folder under `--dir` already holds,
+earworm copies the file instead of downloading it again. The copy keeps the
+other folder's tags, album included, and its cover, takes this playlist's number, and the log says
+`copied track 3 from Focus`. It only copies a file that is already in the
+format you have chosen, so changing the format never leaves two in a folder.
+`--resync` copies too. If the other folder's album tag was only its playlist
+name, the copy has that name too; `A` sets the album you want.
+
+Two things are only marked, never skipped. At the pick screen a row ends in
+`≈ same as track 4` when the same listing holds a track with the same title and
+nearly the same length, and `≈ maybe in Focus` when a file of that title is
+already in another folder. A live version can share a title with the studio
+one, so you decide. After tagging, `≈ same recording in Focus` means Deezer gave
+two different videos the same ISRC, the recording's own id, which is also
+written into the file's tag.
+
+## Custom playlists
+
+A custom playlist is a list you build from tracks already in your library, in
+any folders. It shows in the library with a `◈` (or ` custom ` in text mode)
+and `built here` where a synced folder says when it was synced, and `a` can
+narrow to them.
+
+`N` on the library names a list, then opens a picker over every track.
+
+- Type to fuzzy-match the track name and its folder, so `focus creep` finds
+  Creep in the Focus folder. Letters type, so help is `F1`.
+- Tab marks or unmarks the track under the cursor. `^a` marks everything
+  showing, or unmarks it if all of it is marked. `F2` shows only the marked
+  tracks, to review them.
+- Enter adds the marked tracks in the order you marked them, or the track under
+  the cursor if none are marked. Esc keeps the list empty, and asks first if
+  you have marks to lose.
+
+`a` on a custom playlist's own screen reopens the picker for it. Its tracks
+start marked as `•`. Unmark one (`−`) and Enter takes it off the list, never
+off disk, and a new mark (`✓`) adds it.
+
+To fill one later, press `P` on a track in the search results (`t`), or on a track
+list for the marked tracks, or the one under the cursor. A chooser lists your
+lists and a new one. A track already in the list is not added twice.
+
+Enter on a custom playlist opens it. `a` there reopens the picker for that list. `J` and `K` move a track, `x` takes it
+off the list and never off disk, `p` plays it in cliamp, and Enter goes to the
+track's own folder, which is where you edit its tags. A track that is no longer
+on disk keeps its row with a `!`.
+
+The list follows a track when you edit it, because it holds the video and not
+the filename. The first time you add a track from a folder earworm has not
+touched, earworm writes a `.earworm` there so the list can keep following it.
+`e` renames a list and `D` deletes it after asking, and the tracks stay in
+their folders. Lists live in `.playlists` under your library folder.
+
+## Exporting
+
+`E` on a library row copies it somewhere else: a USB stick or SD card, a synced
+cloud folder, or a folder you then move to a phone. It works on a folder or on
+a custom playlist. earworm asks for the destination, which must already exist
+and sit outside your library (the mounted volumes are listed in the prompt),
+then how to spell accents and, for a custom playlist, how to lay it out.
+
+- **Accents.** iPhone compares filenames byte for byte and needs the decomposed
+  spelling. Most other players want the composed one.
+- **Names.** Characters FAT and exFAT refuse (`? : * " < > |`), trailing dots
+  and spaces and reserved names like `CON` are replaced on the device only.
+  Your library's own filenames are not touched. Two names that collapse to one
+  get ` (2)`.
+- **A folder** lands as a folder of the same name with its playlist inside, in
+  the order earworm last wrote.
+- **A custom playlist** is either one folder of copies, which plays anywhere
+  and repeats audio the folders already hold, or each track in its own folder
+  with the playlist at the top pointing into them.
+- **A second export** copies only files whose size and modification time
+  differ, so it is cheap. It checks free space first, and quitting part-way
+  leaves no half-written file.
+- **Format.** The default is the files as they are. Pick another and earworm
+  re-encodes each track that is not already in it, for a player that cannot
+  read opus. Tags and the picture are carried across. A converted copy is a
+  generation further from the source, and a second export skips it by
+  modification time, since its size differs by design.
+- **Removing.** Nothing is deleted unless you say so. Each folder earworm
+  writes into gets a hidden `.earworm-export` listing the files it put there.
+  When a later export no longer includes one of those (a track you took off
+  the list, or a different format), it lists every one and asks. Files it did
+  not write are never offered and never replaced, so an unrelated `Music`
+  folder already on the stick is left alone and the export says which files it
+  skipped. A file that two exports both put there is claimed by neither.
+  Names are compared the way the device compares them, ignoring case and
+  accent form.
+
+macOS leaves a hidden `._name` beside everything it writes to exFAT. Export
+removes the ones it caused and no others.
+
 ## Giving one a URL
 
 `S` on a folder with no URL asks for one, then syncs. That sync is different
@@ -116,6 +211,15 @@ whichever way earworm arrived at the answer, so a release it recognised by its
 id is as visible as one you marked. A playlist wears nothing, and a library
 with no album in it draws exactly as it did before.
 
+With `icons = "symbols"`, the default, the library draws icons instead:
+`●` for an album, `▤` for a playlist and `◆` for a folder with no URL, and
+the library's `h` lists them. Every row gets a kind icon, so `[playlist]` is
+dropped from the name as `[album]` is. Set `icons = "nerd"` for larger Nerd Font glyphs, which need a patched
+terminal font and show as boxes without one. Set `icons = "text"` in the
+config for the pills and words above, which is the layout earworm had before icons. Your
+font needs those three glyphs; most have them, and `earworm --check` names the
+tier in use.
+
 A folder you marked `[album]` yourself shows the pill instead of the word, not
 both. Only that row is shortened: the folder keeps its name, `e` opens on the
 real one, and `/[album]` still finds it.
@@ -189,7 +293,19 @@ track you half remember narrows the library to whatever holds it. Nothing is
 read off disk to do it.
 
 `t` takes the same query and lists every match flat, with the folder each is
-in.
+in. Unlike `/`, it is a fuzzy match, the one the custom playlist picker uses:
+`autbn` finds Autobahn, the folder name counts, the closest match comes first
+and the matched letters are underlined.
+While the box is open, ↑ ↓ move through the results and Enter moves the keys
+to the list, where Enter opens the track's folder. Esc in the box clears the
+query and goes back to the library. Esc from a folder opened this way comes
+back to the results.
+
+Tab marks the result under the cursor (`✓`), and `P` adds the marked tracks, or
+the one under the cursor if none are marked, to a custom playlist. A file that
+is gone from disk cannot be marked. One or two letters must appear as typed,
+since a fuzzy match on so few letters would take almost every track. When `/`
+finds no folder but `t` would find tracks, the library says so.
 
 ```
  earworm  ·  search  ·  4 tracks in 3 playlists

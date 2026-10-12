@@ -2,8 +2,15 @@
 
 ## Choosing one
 
-Opus by default. `--format` takes `opus`, `m4a`, `mp3`, `flac`, `vorbis` or
+m4a by default. `--format` takes `m4a`, `opus`, `mp3`, `flac`, `vorbis` or
 `alac`. wav and aac are left out because neither carries tags or cover art.
+
+m4a plays everywhere, which is why it leads. Most YouTube videos carry an AAC
+stream as well as the Opus one, and an m4a download takes that stream as it
+is, with nothing re-encoded. A video without one falls back to the Opus,
+re-encoded to AAC. The AAC stream is 128k (256k with a Premium account's
+cookies), and Opus at a similar rate usually sounds a little better, so choose
+`opus` for the copy closest to the source.
 
 Typing a URL offers the format before the download starts. The choice is
 written to the config, so the next playlist arrives the same way, and `f` on
@@ -22,11 +29,11 @@ With it on, each playlist comes across the next time it syncs. Tracks already
 in the target format are left alone, as are ones whose video has left the
 playlist. Most of the rest are re-encoded in place.
 
-Three aren't. YouTube hands yt-dlp an Opus stream, so `m4a`, `mp3` and
-`vorbis` on disk have already been re-encoded once, and converting them again
+Three aren't. `mp3` and `vorbis` on disk have already been re-encoded once
+from YouTube's Opus, and an `m4a` may have been, and converting them again
 would cost a third generation where a fresh download costs two. Those get
-downloaded. So does anything on its way *to* `opus`, since opus is the one
-format a download copies rather than re-encodes.
+downloaded. So does anything on its way *to* `opus` or `m4a`, since those are
+the formats a download copies from YouTube rather than re-encodes.
 
 Tags, cover art and any name you typed all come across, and nothing is deleted
 until the replacement is written and read back. A track whose download fails

@@ -44,7 +44,7 @@ acoustid_key = "..."                # or use ACOUSTID_API_KEY
 | Flag | Effect |
 | --- | --- |
 | `-d`, `--dir` | output directory (default `~/Music`) |
-| `-f`, `--format` | opus, m4a, mp3, flac, vorbis or alac (default opus) |
+| `-f`, `--format` | m4a, opus, mp3, flac, vorbis or alac (default m4a) |
 | `--theme` | warm, light, cool, neon, or one you defined (default warm) |
 | `--no-convert` | leave tracks already on disk in the format they have |
 | `--no-loudness` | don't write loudness tags, whatever the config says |
@@ -62,6 +62,7 @@ acoustid_key = "..."                # or use ACOUSTID_API_KEY
 | `--no-notify` | don't ring the bell when a long run finishes |
 | `--no-update-check` | never ask GitHub about a newer release |
 | `--no-achievements` | no achievement popups, and no file of earned ones |
+| `--import FILE` | download the YouTube links in a markdown file as one playlist |
 | `--resync` | sync every playlist already under `--dir` |
 | `--list` | print the playlists already under `--dir` and exit |
 | `--check` | check the tools, the key and the config, then exit |

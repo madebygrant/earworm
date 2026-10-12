@@ -37,6 +37,15 @@ const KIND: &str = "#kind";
 /// Set when somebody has told earworm to stop listing this folder. The files
 /// stay exactly where they are; only the row goes.
 const HIDDEN: &str = "#hidden";
+/// One line per recording: `#isrc`, a tab, the video id, a space and the ISRC.
+// A header and not an entry column, which an older binary would read as part of the filename.
+const ISRC: &str = "#isrc";
+/// The video ids this folder was split into chapters for: the record of the choice, which has to exist before
+/// the first cut does, or a kill in between reads as a video that was never split.
+const SPLIT: &str = "#split";
+/// One line per chapter cut: `#chapter`, a tab, the id, then its start and end in seconds, space-separated.
+// Chapter ids are positions, so these spans are what says whether the chapter at a position is still the one cut.
+const CHAPTER: &str = "#chapter";
 
 /// Marks an id earworm invented rather than one YouTube gave it.
 /* A folder earworm did not download has no video ids, and the first edit in
@@ -100,7 +109,29 @@ pub fn is_chapter(id: &str) -> bool {
 /// next sync does the same without asking again.
 pub fn is_split(folder: &Path, video: &str) -> bool {
     let prefix = format!("{video}#");
-    entries(folder).iter().any(|(id, _)| id.starts_with(&prefix))
+    let was = load(folder);
+    was.splits.iter().any(|v| v == video) || was.entries.iter().any(|(id, _)| id.starts_with(&prefix))
+}
+
+/// Records that this video was split, before anything is cut.
+pub fn set_split(folder: &Path, video: &str) -> std::io::Result<()> {
+    let was = load(folder);
+    if was.splits.iter().any(|v| v == video) {
+        return Ok(());
+    }
+    let mut splits = was.splits.clone();
+    splits.push(video.to_string());
+    let headers = Headers { splits, ..Headers::of(&was) };
+    body(folder, &headers, was.entries.into_iter())
+}
+
+/// Records the span a chapter was cut from, replacing any earlier one for the same id.
+pub fn set_chapter(folder: &Path, id: &str, start: f64, end: f64) -> std::io::Result<()> {
+    let was = load(folder);
+    let mut chapters: Vec<(String, f64, f64)> = was.chapters.iter().filter(|(known, _, _)| known != id).cloned().collect();
+    chapters.push((id.to_string(), start, end));
+    let headers = Headers { chapters, ..Headers::of(&was) };
+    body(folder, &headers, was.entries.into_iter())
 }
 
 /// Whether a folder holds one record or a collection of them.
@@ -111,6 +142,8 @@ pub fn is_split(folder: &Path, video: &str) -> bool {
 pub enum Kind {
     Album,
     Playlist,
+    // A list built from tracks in other folders. Only the library makes this one: no name or header can claim it.
+    Custom,
 }
 
 impl Kind {
@@ -118,6 +151,7 @@ impl Kind {
         match self {
             Kind::Album => "album",
             Kind::Playlist => "playlist",
+            Kind::Custom => "custom",
         }
     }
 
@@ -251,6 +285,12 @@ pub struct Sidecar {
     /// Whether the library is to leave this folder out. Set by `D`, cleared
     /// only by hand, and the audio is untouched either way.
     pub hidden: bool,
+    /// Video id and ISRC, for the tracks a lookup gave one.
+    pub isrcs: Vec<(String, String)>,
+    /// Videos that were split into their chapters.
+    pub splits: Vec<String>,
+    /// Chapter id with the span it was cut from.
+    pub chapters: Vec<(String, f64, f64)>,
     /// In the order the file holds them, files that have since been deleted
     /// included. `read` drops both the order and the deleted ones.
     pub entries: Vec<(String, PathBuf)>,
@@ -265,6 +305,9 @@ struct Headers {
     playlist: Option<String>,
     kind: Option<Kind>,
     hidden: bool,
+    isrcs: Vec<(String, String)>,
+    splits: Vec<String>,
+    chapters: Vec<(String, f64, f64)>,
 }
 
 impl Headers {
@@ -278,6 +321,9 @@ impl Headers {
             playlist: was.playlist.clone(),
             kind: was.kind,
             hidden: was.hidden,
+            isrcs: was.isrcs.clone(),
+            splits: was.splits.clone(),
+            chapters: was.chapters.clone(),
         }
     }
 }
@@ -290,6 +336,9 @@ pub fn load(folder: &Path) -> Sidecar {
         kind: None,
         playlist: None,
         hidden: false,
+        isrcs: Vec::new(),
+        splits: Vec::new(),
+        chapters: Vec::new(),
         entries: Vec::new(),
     };
     let Ok(text) = std::fs::read_to_string(path(folder)) else {
@@ -304,6 +353,20 @@ pub fn load(folder: &Path) -> Sidecar {
             KIND => found.kind = Kind::parse(value),
             // Present is hidden, whatever it says, like `NO_COLOR`.
             HIDDEN => found.hidden = true,
+            ISRC => {
+                if let Some((id, isrc)) = value.trim().split_once(' ') {
+                    found.isrcs.push((id.to_string(), isrc.trim().to_string()));
+                }
+            }
+            SPLIT => found.splits.push(value.trim().to_string()),
+            CHAPTER => {
+                let mut parts = value.split_whitespace();
+                if let (Some(id), Some(start), Some(end)) = (parts.next(), parts.next(), parts.next())
+                    && let (Ok(start), Ok(end)) = (start.parse(), end.parse())
+                {
+                    found.chapters.push((id.to_string(), start, end));
+                }
+            }
             // A header this reader predates, which is why they carry a `#`.
             _ if key.starts_with('#') => {}
             _ => found.entries.push((key.to_string(), folder.join(value))),
@@ -366,6 +429,47 @@ pub fn set_kind(folder: &Path, kind: Kind) -> std::io::Result<()> {
     }
     let headers = Headers {
         kind: Some(kind),
+        ..Headers::of(&was)
+    };
+    body(folder, &headers, was.entries.into_iter())
+}
+
+// A space splits the id from the ISRC, and a local id is no listing's: neither can be held.
+fn isrc_line_ok(id: &str, isrc: &str) -> bool {
+    !is_local(id) && !id.contains(['\t', '\n', ' ']) && !isrc.contains(['\t', '\n', ' '])
+}
+
+/// Records the ISRCs a pass found, keeping the ones already there.
+// Only ids that still have an entry are kept, so a departed track leaves no line.
+// Called after the entries are written, since that rewrite decides which ids remain.
+pub fn set_isrcs(folder: &Path, found: &[(String, String)]) -> std::io::Result<()> {
+    let was = load(folder);
+    let mut isrcs = was.isrcs.clone();
+    for (id, isrc) in found.iter().filter(|(id, isrc)| isrc_line_ok(id, isrc)) {
+        match isrcs.iter_mut().find(|(known, _)| known == id) {
+            Some(entry) => entry.1.clone_from(isrc),
+            None => isrcs.push((id.clone(), isrc.clone())),
+        }
+    }
+    isrcs.retain(|(id, _)| was.entries.iter().any(|(entry, _)| entry == id));
+    if isrcs == was.isrcs {
+        return Ok(());
+    }
+    let headers = Headers {
+        isrcs,
+        ..Headers::of(&was)
+    };
+    body(folder, &headers, was.entries.into_iter())
+}
+
+/// Forgets the ISRC recorded for one id, for a track whose recording changed.
+pub fn drop_isrc(folder: &Path, id: &str) -> std::io::Result<()> {
+    let was = load(folder);
+    if !was.isrcs.iter().any(|(known, _)| known == id) {
+        return Ok(());
+    }
+    let headers = Headers {
+        isrcs: was.isrcs.iter().filter(|(known, _)| known != id).cloned().collect(),
         ..Headers::of(&was)
     };
     body(folder, &headers, was.entries.into_iter())
@@ -451,6 +555,15 @@ fn body(
     if headers.hidden {
         body.push_str(&format!("{HIDDEN}\tyes\n"));
     }
+    for (id, isrc) in headers.isrcs.iter().filter(|(id, isrc)| isrc_line_ok(id, isrc)) {
+        body.push_str(&format!("{ISRC}\t{id} {isrc}\n"));
+    }
+    for video in headers.splits.iter().filter(|v| !v.is_empty() && !v.contains(['\t', '\n'])) {
+        body.push_str(&format!("{SPLIT}\t{video}\n"));
+    }
+    for (id, start, end) in headers.chapters.iter().filter(|(id, _, _)| !id.contains(['\t', '\n', ' '])) {
+        body.push_str(&format!("{CHAPTER}\t{id} {start:.2} {end:.2}\n"));
+    }
     for (id, file) in entries {
         let Some(name) = file.file_name().map(|n| n.to_string_lossy().to_string()) else {
             continue;
@@ -473,6 +586,96 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn a_split_and_its_spans_are_headers_that_survive_every_writer_and_an_older_reader_skips() {
+        let dir = scratch("split");
+        let file = dir.join("01 - A.opus");
+        std::fs::write(&file, "x").unwrap();
+        write(&dir, "u", [("vid#01".to_string(), file.clone())].into_iter()).unwrap();
+        set_split(&dir, "vid").unwrap();
+        set_split(&dir, "vid").unwrap();
+        set_chapter(&dir, "vid#01", 0.0, 61.5).unwrap();
+        set_chapter(&dir, "vid#01", 0.0, 62.0).unwrap();
+        // Every other writer carries them.
+        write_synced(&dir, "u", [("vid#01".to_string(), file.clone())].into_iter()).unwrap();
+        hide(&dir).unwrap();
+        let held = load(&dir);
+        assert_eq!(held.splits, ["vid"], "written once");
+        assert_eq!(held.chapters, [("vid#01".to_string(), 0.0, 62.0)]);
+        // A video with the header and no entry yet is split all the same.
+        let bare = scratch("split-bare");
+        std::fs::write(path(&bare), "#url\tu\n").unwrap();
+        assert!(!is_split(&bare, "vid"));
+        set_split(&bare, "vid").unwrap();
+        assert!(is_split(&bare, "vid"));
+        // An older binary reads a `#` key as nothing, so these lines add no entry for it.
+        let text = std::fs::read_to_string(path(&dir)).unwrap();
+        let entries: Vec<&str> = text.lines().filter(|l| !l.starts_with('#')).collect();
+        assert_eq!(entries, ["vid#01\t01 - A.opus"], "{text}");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&bare);
+    }
+
+    // A header, never a third column: an older binary splits an entry on its first tab,
+    // reads `01 - A.opus\tGB01A…` as a filename and downloads the library again.
+    #[test]
+    fn isrcs_ride_in_headers_beside_an_old_format_entry_and_vanish_with_it() {
+        let dir = scratch("isrc");
+        std::fs::write(dir.join("01 - A.opus"), "x").unwrap();
+        let file = dir.join("01 - A.opus");
+        // Written by a binary that knew nothing of ISRCs.
+        std::fs::write(path(&dir), "#url\tu\nid1\t01 - A.opus\n").unwrap();
+        assert!(load(&dir).isrcs.is_empty());
+
+        set_isrcs(&dir, &[("id1".into(), "GB01A0900374".into()), ("gone".into(), "XX".into())]).unwrap();
+        let text = std::fs::read_to_string(path(&dir)).unwrap();
+        assert!(text.contains("#isrc\tid1 GB01A0900374\n"), "{text}");
+        assert!(text.contains("id1\t01 - A.opus\n"), "the entry line changed: {text}");
+        let sidecar = load(&dir);
+        assert_eq!(sidecar.isrcs, [("id1".to_string(), "GB01A0900374".to_string())]);
+        assert_eq!(sidecar.entries, [("id1".to_string(), file.clone())], "a header read as an entry");
+
+        // A rewrite of the entries keeps the line for an id that is still there.
+        write_synced(&dir, "u", [("id1".to_string(), file)].into_iter()).unwrap();
+        assert_eq!(load(&dir).isrcs.len(), 1);
+        // And an id with no entry has no line.
+        write(&dir, "u", std::iter::empty()).unwrap();
+        set_isrcs(&dir, &[]).unwrap();
+        assert!(load(&dir).isrcs.is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // A local id with a space cannot be held, and must not look like a change on every pass.
+    #[test]
+    fn an_isrc_that_cannot_be_written_is_not_held() {
+        let dir = scratch("isrc-space");
+        let file = dir.join("Song name.opus");
+        std::fs::write(&file, "x").unwrap();
+        write(&dir, "", [("~Song name.opus".to_string(), file)].into_iter()).unwrap();
+        set_isrcs(&dir, &[("~Song name.opus".into(), "GB01A0900374".into())]).unwrap();
+        assert!(load(&dir).isrcs.is_empty());
+        let before = std::fs::metadata(path(&dir)).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        set_isrcs(&dir, &[("~Song name.opus".into(), "GB01A0900374".into())]).unwrap();
+        assert_eq!(std::fs::metadata(path(&dir)).unwrap().modified().unwrap(), before, "rewritten for nothing");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn dropping_one_isrc_leaves_the_others_and_the_entries() {
+        let dir = scratch("isrc-drop");
+        let (a, b) = (dir.join("01 - A.opus"), dir.join("02 - B.opus"));
+        std::fs::write(&a, "x").unwrap();
+        std::fs::write(&b, "x").unwrap();
+        write(&dir, "u", [("a".to_string(), a), ("b".to_string(), b)].into_iter()).unwrap();
+        set_isrcs(&dir, &[("a".into(), "X1".into()), ("b".into(), "X2".into())]).unwrap();
+        drop_isrc(&dir, "a").unwrap();
+        let sidecar = load(&dir);
+        assert_eq!(sidecar.isrcs, [("b".to_string(), "X2".to_string())]);
+        assert_eq!(sidecar.entries.len(), 2);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /* The folder is named from the playlist's title on every download, so a

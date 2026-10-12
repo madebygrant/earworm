@@ -1,9 +1,11 @@
 # What proved it
 
-Evidence behind rules in CLAUDE.md, and trade-offs taken with eyes open. It
-lives here rather than there because CLAUDE.md is read at the start of every
-session and this is read when somebody doubts a rule, which is rarer and worth
-the extra click. Nothing here is a rule. Every rule stayed where it was.
+Evidence behind the rules in `docs/rules/`, and trade-offs taken with eyes open.
+It lives here rather than there because the rules are read before touching their
+area and this is read when somebody doubts a rule, which is rarer and worth the
+extra click. Nothing here is a rule. Every rule stayed where it was. Where
+this file or a code comment says CLAUDE.md, the rule is in the file for its
+area in `docs/rules/`.
 
 ## Decomposed filenames in the `.m3u8`
 
@@ -84,3 +86,73 @@ yet. It is what a design has to start from.
   tried.
 - ffmpeg warns "Referenced QT chapter track not found" on an m4a that carries
   chapter metadata. The cut still came out right.
+
+## Library icons
+
+- Not measured: the glyph table was chosen from the plan's candidates without
+  rendering them in a terminal. `●`, `▤` and `◆` are one cell wide by
+  `unicode-width`, which `every_glyph_is_one_cell_wide` checks, and that is
+  not the same as a font drawing them one cell wide.
+- Not measured: `tb-tui-common`'s `font_probe`, so there is no detection.
+- The `nerd` tier was added after `●▤◆` still drew small. Codepoints are
+  `md-album` f0025, `md-playlist_music` f0cb8 and `md-folder_music` f1359,
+  read from Nerd Fonts' glyphnames.json. Not yet looked at in a patched font.
+- `◉`, `≡` and `⌂` drew small in the first real terminal, so they became `●`,
+  `▤` and `◆`, bold. `☰` was tried and is two cells wide by `unicode-width`.
+
+## Songs on more than one playlist
+
+- Deezer's `/search` hit carries `isrc`: `Autobahn (2009 Remaster)` by
+  Kraftwerk came back with `GB01A0900374`, on a live request on 2026-10-06. No
+  extra request is needed. iTunes and AcoustID were not checked and carry none.
+- A third column on a sidecar entry would be read by an older binary as part of
+  the filename, so per-track data went in `#isrc` lines, which `load` skips by
+  the `#` rule.
+- Not done: the Art Track versus video investigation, the `OLAK5uy_` album page
+  check and the `fpcalc` thresholds. The first two are only needed for the
+  Art Track preference, the last for the fingerprint comparison, and neither of
+  those was built.
+- Not tried in a live sync: `copy_known` has only run against fixtures.
+
+## Art Track versus music video
+
+Measured 2026-10-06 on `Kraftwerk Autobahn` search results, against
+`vkOZNJYAZ7c` (the Art Track, channel `Kraftwerk`) and `iukUMRlaBBE` (a
+fan upload of the video).
+
+- The flat listing tells them apart by nothing. `media_type` and `availability`
+  print `NA` for both, and the channel is the bare artist name on one and an
+  ordinary channel on the other, which is what CLAUDE.md already says of the
+  uploader.
+- A full per-video extraction does. The Art Track has `track`, `album` and
+  `artist` set and a description opening `Provided to YouTube by Parlophone UK`;
+  the video has all of them null. That is one request per video, so it is only
+  affordable for the rows `mark_twins` has already flagged, never for a
+  whole playlist.
+
+## Exporting to a device
+
+Measured 2026-10-07 on a 30MB exFAT disk image mounted at `/Volumes`, with
+macOS and cliamp v2.3.0.
+
+- `std::fs::copy`, a plain read-and-write copy and `cp` all leave a `._name`
+  AppleDouble file beside every file they write, and one for each directory.
+  The cause is not the source's attributes: a source with no extended
+  attributes does it too, because macOS tagged every file this process created
+  with `com.apple.provenance`, and exFAT has nowhere to put an attribute but a
+  `._` file. Measured from a process started by Claude Code, and macOS decides
+  the tag from the process's lineage, so earworm started from a plain terminal
+  may leave none. Not yet re-measured there; the cleanup only removes a `._`
+  that exists, so it is safe either way. Copying data only does not avoid it. Deleting `._name` afterwards
+  works, and `dot_clean -m` does the same for a whole folder. So export removes
+  the one `._` it caused for each file it wrote, and never any other.
+- macOS writes `? : * " |` and a trailing dot or space into exFAT names
+  without complaint, and reads them back as written. So the failure CLAUDE.md
+  guessed at, a filename that fails to copy, does not happen here. The risk is
+  the other direction: a stick written on macOS can hold names the exFAT
+  specification forbids, which Windows and some players may refuse. Not tested
+  on Windows. Export maps those characters for that reason,
+  and `clean()` is still left alone.
+- cliamp `playlist import` accepts `../Folder/file` entries and lists both
+  tracks (checked with real files). It does not check that an entry exists:
+  an import of two missing files reported two tracks.

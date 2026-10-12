@@ -58,6 +58,7 @@ pub struct Info {
     /// zero: one is unknown and the other is a claim.
     pub year: Option<u16>,
     pub duration: u64,
+    pub isrc: Option<String>,
 }
 
 /* What an edit writes. Album and year travel beside artist and title because
@@ -89,6 +90,10 @@ pub fn read(path: &Path) -> Result<Info> {
            year, which is the only one of the two earworm ever writes. */
         year: tag.and_then(|t| t.date()).map(|d| d.year),
         duration: file.properties().duration().as_secs(),
+        isrc: tag
+            .and_then(|t| t.get_string(ItemKey::Isrc))
+            .filter(|isrc| !isrc.is_empty())
+            .map(str::to_string),
     })
 }
 
@@ -99,6 +104,7 @@ pub struct Outcome {
     pub artist: String,
     pub title: String,
     pub mbid: Option<String>,
+    pub isrc: Option<String>,
 }
 
 fn with_tag<F: FnOnce(&mut Tag)>(path: &Path, edit: F) -> Result<()> {
@@ -146,6 +152,56 @@ pub fn set_fields(path: &Path, fields: &Fields) -> Result<()> {
                 tag.remove_date();
             }
         }
+    })
+}
+
+/* Everything earworm models about a file, read before the file can change so that it can be put on its
+   replacement. Loudness is left out on purpose: R128 and ReplayGain are different tags against different
+   reference levels, and the next sync measures the new file where it is wanted. */
+pub struct Kept {
+    info: Option<Info>,
+    lyrics: Option<String>,
+    cover: Option<Vec<u8>>,
+}
+
+impl Kept {
+    pub fn read(path: &Path) -> Kept {
+        Kept {
+            info: read(path).ok(),
+            lyrics: extra(path, Extra::Lyrics).ok().flatten(),
+            cover: read_cover(path),
+        }
+    }
+
+    /// Writes the lot onto `to`. A failure of the tags is an error; the picture is not worth failing for, so
+    /// its failure comes back as a message for the caller to log.
+    pub fn write(&self, to: &Path) -> Result<Option<String>> {
+        if let Some(info) = &self.info {
+            let fields = Fields {
+                artist: info.artist.clone(),
+                title: info.title.clone(),
+                album: info.album.clone(),
+                year: info.year,
+            };
+            set_fields(to, &fields).context("could not carry the tags across")?;
+            if let Some(isrc) = &info.isrc {
+                set_isrc(to, isrc).context("could not carry the ISRC across")?;
+            }
+        }
+        if let Some(words) = &self.lyrics {
+            set_extra(to, Extra::Lyrics, words).context("could not carry the lyrics across")?;
+        }
+        Ok(self.cover.as_deref().and_then(|image| set_cover(to, image).err()).map(|e| e.to_string()))
+    }
+
+    pub fn isrc(&self) -> Option<&str> {
+        self.info.as_ref().and_then(|i| i.isrc.as_deref())
+    }
+}
+
+pub fn set_isrc(path: &Path, isrc: &str) -> Result<()> {
+    with_tag(path, |tag| {
+        tag.insert_text(ItemKey::Isrc, isrc.to_string());
     })
 }
 
@@ -327,7 +383,12 @@ pub fn write_album_loudness(paths: &[&Path]) -> (usize, usize) {
     let Some(album) = album_lufs(&weighted) else {
         return (0, skipped);
     };
-    let peak = measured.iter().filter_map(|(_, _, p, _)| *p).fold(None, |a: Option<f64>, p| Some(a.map_or(p, |a| a.max(p))));
+    // Only when every track has one: the largest of a few understates the album's, and a player trusts it to avoid clipping.
+    let peak = measured
+        .iter()
+        .map(|(_, _, p, _)| *p)
+        .collect::<Option<Vec<f64>>>()
+        .and_then(|peaks| peaks.into_iter().reduce(f64::max));
     let mut changed = 0;
     for (path, _, _, _) in measured {
         let written = (|| -> Result<bool> {
@@ -360,8 +421,9 @@ pub fn write_album_loudness(paths: &[&Path]) -> (usize, usize) {
 pub fn write_loudness(path: &Path) -> Result<bool> {
     use lofty::file::FileType;
     let opus = open(path)?.file_type() == FileType::Opus;
-    let marker = if opus { Extra::R128TrackGain } else { Extra::TrackGain };
-    if extra(path, marker)?.is_some() {
+    // One that reads back is another tool's value and stays. One that does not (`-3,2 dB`) would leave the
+    // track out of every album mean for good and log the skip on every sync, so it is measured and replaced.
+    if matches!(stored_loudness(path), Ok(Some(_))) {
         return Ok(false);
     }
     set_extras(path, &gain_tags(measure(path)?, opus))?;
@@ -759,6 +821,7 @@ pub fn identify(
         artist: info.artist.clone(),
         title: info.title.clone(),
         mbid: None,
+        isrc: None,
     };
 
     let mut found: Option<Match> = None;
@@ -800,6 +863,7 @@ pub fn identify(
         out.status = Status::Ok;
         out.source = m.source.into();
         out.mbid = m.mbid.clone();
+        out.isrc = m.isrc.clone();
         if let Some(score) = m.score {
             out.note = format!("score {score:.2}");
         }
@@ -825,6 +889,7 @@ pub fn identify(
         out.status = Status::Manual;
         out.source = "typed".into();
         out.note.clear();
+        out.isrc = typed.isrc.clone();
         let (artist, title, _) = apply(path, &typed, cfg, cover, asker, index, "")?;
         out.artist = artist;
         out.title = title;
@@ -886,8 +951,24 @@ fn manual(
         cover_url: extra.as_ref().and_then(|m| m.cover_url.clone()),
         mbid: None,
         score: None,
+        isrc: extra.as_ref().and_then(|m| m.isrc.clone()),
         source: "manual",
     })
+}
+
+// The same name composed and lowercased, as every comparison here is, with a trailing bracket group ignored:
+// Deezer says "Autobahn (2009 Remaster)" where an AcoustID or Apple hit says "Autobahn", and calling those two
+// songs would strip the right ISRC off the file.
+fn same_title(a: &str, b: &str) -> bool {
+    let key = |text: &str| crate::config::composed(text.trim()).to_lowercase();
+    let bare = |text: &str| {
+        let text = key(text);
+        match (text.strip_suffix(')').or_else(|| text.strip_suffix(']')), text.rfind(['(', '['])) {
+            (Some(_), Some(at)) if at > 0 => text[..at].trim_end().to_string(),
+            _ => text,
+        }
+    };
+    key(a) == key(b) || bare(a) == bare(b)
 }
 
 /// Writes a lookup hit into the file: tags, embedded art, and the folder
@@ -919,10 +1000,19 @@ pub fn apply(
     });
     let album = album_name(cover, m.album.clone());
     with_tag(path, |tag| {
+        let same_song = tag.title().is_some_and(|had| same_title(&had, &m.title));
         tag.set_title(m.title.clone());
         tag.set_artist(artist.clone());
         if let Some(album) = &album {
             tag.set_album(album.clone());
+        }
+        // Acoustid and Apple hits carry none, so absence only clears it when the song changed.
+        match &m.isrc {
+            Some(isrc) => {
+                tag.insert_text(ItemKey::Isrc, isrc.clone());
+            }
+            None if !same_song => tag.remove_key(ItemKey::Isrc),
+            None => {}
         }
         if let Some(data) = &jpeg {
             tag.remove_picture_type(PictureType::CoverFront);
@@ -1347,6 +1437,51 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    // Another tool's gain that reads back stays. One that does not left the track out of every album mean for good.
+    #[test]
+    fn a_gain_that_reads_back_is_kept_and_one_that_does_not_is_measured_again() {
+        let dir = std::env::temp_dir().join(format!("earworm-badgain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (kept, bad) = (dir.join("kept.flac"), dir.join("bad.flac"));
+        assert!(tone(&kept, &["flac"]) && tone(&bad, &["flac"]), "no flac encoder");
+        set_extra(&kept, Extra::TrackGain, "-3.20 dB").unwrap();
+        set_extra(&bad, Extra::TrackGain, "-3,2 dB").unwrap();
+        assert!(!write_loudness(&kept).unwrap());
+        assert_eq!(extra(&kept, Extra::TrackGain).unwrap().as_deref(), Some("-3.20 dB"));
+        assert!(write_loudness(&bad).unwrap(), "an unreadable gain was kept");
+        assert!(matches!(stored_loudness(&bad), Ok(Some(_))), "and it still does not read back");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // The largest of the peaks that exist understates the album's, and a player trusts it to avoid clipping.
+    #[test]
+    fn an_album_peak_is_written_only_when_every_track_has_one() {
+        let dir = std::env::temp_dir().join(format!("earworm-peak-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (a, b) = (dir.join("a.flac"), dir.join("b.flac"));
+        assert!(tone(&a, &["flac"]) && tone(&b, &["flac"]), "no flac encoder");
+        write_loudness(&a).unwrap();
+        // Another tool wrote a gain and no peak.
+        set_extra(&b, Extra::TrackGain, "-6.00 dB").unwrap();
+        assert_eq!(write_album_loudness(&[a.as_path(), b.as_path()]), (2, 0));
+        assert_eq!(extra(&a, Extra::AlbumPeak).unwrap(), None);
+        assert_eq!(extra(&b, Extra::AlbumPeak).unwrap(), None);
+        assert!(extra(&a, Extra::AlbumGain).unwrap().is_some());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_version_suffix_and_an_accent_form_do_not_make_two_songs() {
+        assert!(same_title("Autobahn (2009 Remaster)", "Autobahn"));
+        assert!(same_title("Autobahn", "Autobahn [Remastered]"));
+        assert!(same_title("Cafe\u{301}", "Caf\u{e9}"));
+        assert!(same_title(" AUTOBAHN ", "autobahn"));
+        assert!(!same_title("Autobahn", "Radio-Aktivitat"));
+        assert!(!same_title("(Intro)", "Outro"), "a title that is only a bracket group has nothing to strip");
+    }
+
     // The numbers by hand: -20 and -30 LUFS at equal length average to -22.60 in energy, not -25.
     #[test]
     fn an_opus_album_gain_is_the_energy_mean_in_q78_and_follows_a_changed_track() {
@@ -1674,6 +1809,28 @@ mod tests {
         assert_eq!(image_extension(b"<html>"), None);
         assert_eq!(image_extension(b""), None);
     }
+
+    // Dozens of tests skip with a line on stderr when ffmpeg cannot make their fixture, and a skip is a pass.
+    // On a machine without the encoders that is a suite proving nothing while reporting green, so this one
+    // fails instead. `EARWORM_NO_FFMPEG=1` says the machine is meant to be without.
+    #[test]
+    fn the_encoders_the_fixture_tests_skip_without_are_all_there() {
+        if std::env::var_os("EARWORM_NO_FFMPEG").is_some() {
+            return;
+        }
+        let listed = |tool: &str, args: &[&str]| {
+            std::process::Command::new(tool)
+                .args(args)
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                .unwrap_or_default()
+        };
+        let encoders = listed("ffmpeg", &["-hide_banner", "-encoders"]);
+        let missing: Vec<&str> = ["libopus", "flac", "aac", "alac"]
+            .into_iter()
+            .filter(|e| !encoders.split_whitespace().any(|word| word == *e))
+            .collect();
+        assert!(missing.is_empty(), "ffmpeg is missing {missing:?}, so the tests that need them passed without running");
+        assert!(!listed("ffprobe", &["-version"]).is_empty(), "ffprobe is missing, so its tests passed without running");
+    }
 }
-
-
