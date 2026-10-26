@@ -5,6 +5,7 @@ mod cheats;
 mod config;
 mod custom;
 mod deps;
+mod discover;
 mod export;
 mod icons;
 mod import;
@@ -588,6 +589,10 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         handle_library_key(app, code, mods);
         return;
     }
+    if app.view == View::Artist {
+        handle_page_key(app, code, mods);
+        return;
+    }
     // Its own query box, so the library's `typing_filter` never applies here.
     if app.view == View::Artists {
         handle_artists_key(app, code, mods);
@@ -789,7 +794,7 @@ fn handle_found_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     }
 }
 
-// The artists screen. Enter leaves for the library narrowed to the artist, which is where their folders open.
+// The artists screen. Enter opens an artist's page and `o` the library narrowed to their folders.
 fn handle_artists_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     if app.artists.typing {
@@ -838,7 +843,32 @@ fn handle_artists_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 app.send(Cmd::Star(name));
             }
         }
-        KeyCode::Enter if app.can_artists() => app.artist_folders(),
+        KeyCode::Enter if app.can_artists() => app.open_page(),
+        KeyCode::Char('o') if app.can_artists() => app.artist_folders(),
+        _ => {}
+    }
+}
+
+// One artist's discography. Nothing here acts on a release yet, so the keys move, narrow and leave.
+fn handle_page_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    match code {
+        KeyCode::Char('c') if ctrl => app.quit = true,
+        KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
+        KeyCode::Char('q') => app.quit = true,
+        // The artists cursor was never moved, so the screen comes back on the row it left from.
+        KeyCode::Esc => app.view = View::Artists,
+        KeyCode::Char('l') => app.show_logs = !app.show_logs,
+        KeyCode::Char('j') | KeyCode::Down => app.page_move(true, 1),
+        KeyCode::Char('k') | KeyCode::Up => app.page_move(false, 1),
+        KeyCode::PageDown => app.page_move(true, app.viewport.max(1)),
+        KeyCode::PageUp => app.page_move(false, app.viewport.max(1)),
+        KeyCode::Char('d') if ctrl => app.page_move(true, app.viewport.max(1)),
+        KeyCode::Char('u') if ctrl => app.page_move(false, app.viewport.max(1)),
+        KeyCode::Char('g') => app.page_jump(false),
+        KeyCode::Char('G') => app.page_jump(true),
+        KeyCode::Char('a') => app.page_kinds(),
+        KeyCode::Char('o') if app.can_page() => app.artist_folders(),
         _ => {}
     }
 }
@@ -2526,7 +2556,7 @@ mod tests {
 
     // AC/DC's files say `AC-DC`, and "Can" is inside "Scandal": only the folders the tags were read in will do.
     #[test]
-    fn enter_on_an_artist_narrows_the_library_to_the_folders_their_tags_are_in() {
+    fn o_on_an_artist_narrows_the_library_to_the_folders_their_tags_are_in() {
         let mut acdc = artist("AC/DC", 1, false);
         acdc.folders = vec!["/music/Rock".into()];
         let (mut app, _cmds) = on_artists(
@@ -2534,7 +2564,7 @@ mod tests {
             vec![artist("Can", 1, false), acdc],
         );
         handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
-        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE);
         assert_eq!(app.view, View::Library);
         assert_eq!(app.shelf_rows(), vec![0]);
         assert_eq!(app.selected_shelf().map(|s| s.name.as_str()), Some("Rock"));
@@ -2546,9 +2576,9 @@ mod tests {
 
     // A screen of nothing behind a narrowed library is a dead end, so the key says why and stays.
     #[test]
-    fn enter_on_an_artist_with_no_folder_left_stays_and_says_so() {
+    fn o_on_an_artist_with_no_folder_left_stays_and_says_so() {
         let (mut app, _cmds) = on_artists(vec![shelf("Focus", &["01 - Can - A.opus"])], vec![artist("Ghost", 0, true)]);
-        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE);
         assert_eq!(app.view, View::Artists);
         assert!(app.by_artist.is_none());
         assert!(app.stage.contains("no folder"), "{}", app.stage);
@@ -2627,5 +2657,80 @@ mod tests {
         let (app, _cmds) = on_artists(vec![shelf("Focus", &["01 A.opus"])], vec![artist("Can", 3, false)]);
         assert!(app.can_artists());
         assert!(!app.can_browse() && !app.can_command() && !app.can_find() && !app.can_playlist() && !app.can_pick());
+    }
+
+    fn album(title: &str, kind: &str, have: usize, of: Option<usize>) -> crate::app::AlbumRow {
+        crate::app::AlbumRow { id: 1, title: title.into(), year: Some(1971), kind: kind.into(), have, of }
+    }
+
+    #[test]
+    fn enter_opens_the_page_and_esc_comes_back_to_the_same_artist() {
+        let (mut app, cmds) = on_artists(vec![], vec![artist("Can", 3, false), artist("Neu!", 1, false)]);
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.view, View::Artist);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::Discography(name)) if name == "Neu!"));
+        app.apply(app::Msg::Idle);
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.view, View::Artists);
+        assert_eq!(app.artist_selected().map(|r| r.name.as_str()), Some("Neu!"));
+    }
+
+    // Leaving one page and opening another before Deezer answers must not show the first one's releases.
+    #[test]
+    fn an_answer_for_a_page_already_left_is_dropped() {
+        let (mut app, _cmds) = on_artists(vec![], vec![artist("Can", 3, false), artist("Neu!", 1, false)]);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        app.apply(app::Msg::Idle);
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        app.apply(app::Msg::Discography { name: "Can".into(), found: None, rows: Ok(vec![album("Tago Mago", "album", 7, Some(7))]) });
+        assert!(!app.page.loaded && app.page.rows.is_empty());
+    }
+
+    #[test]
+    fn a_shows_singles_and_back_and_the_cursor_stays_on_a_row_that_shows() {
+        let (mut app, _cmds) = on_artists(vec![], vec![artist("Can", 3, false)]);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        app.apply(app::Msg::Discography {
+            name: "Can".into(),
+            found: Some(("Can".into(), 57000)),
+            rows: Ok(vec![album("Spoon", "single", 0, None), album("Tago Mago", "album", 7, Some(7)), album("Moonshake", "single", 0, None)]),
+        });
+        app.apply(app::Msg::Idle);
+        assert_eq!(app.page_rows(), vec![1]);
+        assert_eq!(app.page.cursor, 1, "the page opened on a hidden single");
+        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('G'), KeyModifiers::NONE);
+        assert_eq!(app.page.cursor, 2);
+        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        assert_eq!(app.page.cursor, 1);
+    }
+
+    #[test]
+    fn o_on_the_page_narrows_the_library_to_the_artists_folders() {
+        let mut can = artist("Can", 1, false);
+        can.folders = vec!["/music/Kraut".into()];
+        let (mut app, _cmds) = on_artists(vec![shelf("Kraut", &["01 A.opus"]), shelf("Jazz", &["01 B.opus"])], vec![can]);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        app.apply(app::Msg::Idle);
+        handle_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE);
+        assert_eq!(app.view, View::Library);
+        assert_eq!(app.shelf_rows(), vec![0]);
+    }
+
+    // Counts arrive one by one after the page, and one for a page already left must not land on this one.
+    #[test]
+    fn a_count_fills_its_release_on_the_open_page_only() {
+        let (mut app, _cmds) = on_artists(vec![], vec![artist("Can", 3, false)]);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        let mut tago = album("Tago Mago", "album", 7, None);
+        tago.id = 42;
+        app.apply(app::Msg::Discography { name: "Can".into(), found: None, rows: Ok(vec![tago]) });
+        app.apply(app::Msg::Counted { name: "Neu!".into(), id: 42, of: 9 });
+        assert_eq!(app.page.rows[0].of, None);
+        app.apply(app::Msg::Counted { name: "Can".into(), id: 42, of: 7 });
+        assert_eq!(app.page.rows[0].of, Some(7));
     }
 }

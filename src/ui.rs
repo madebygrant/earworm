@@ -82,6 +82,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_picker_bar(frame, app, rule);
     } else if app.picking.is_some() {
         draw_pick_bar(frame, app, rule);
+    } else if app.view == View::Artist {
+        draw_rule(frame, rule, p);
     } else if app.view == View::Artists {
         if app.artists.typing || !app.artists.query.is_empty() {
             draw_artists_bar(frame, app, rule);
@@ -552,7 +554,7 @@ fn draw_filter_bar(frame: &mut Frame, app: &App, area: Rect) {
         ),
         View::Tracks => (app.shown(), app.tracks.len()),
         // No filter here: the list is the playlist's own order. The artists screen has a band of its own.
-        View::Playlist | View::Pick | View::Artists => (0, 0),
+        View::Playlist | View::Pick | View::Artists | View::Artist => (0, 0),
     };
     let caret = if app.typing_filter { "\u{2588}" } else { "" };
     let word = match (app.view, app.only, app.review) {
@@ -654,11 +656,14 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     spans.push(dim("  ·  ", p));
     // The stage belongs to the last run, which the library screen is not.
     let stage = match app.view {
+        // What a key just said, which a fixed word would otherwise hide for as long as the screen is open.
+        _ if app.flashing() => app.stage.clone(),
         View::Library if !app.busy => "library".to_string(),
         View::Found if !app.busy => "search".to_string(),
         View::Playlist if !app.busy => "custom playlist".to_string(),
         View::Pick if !app.busy => "pick tracks".to_string(),
         View::Artists if !app.busy => "artists".to_string(),
+        View::Artist => app.page.name.clone(),
         _ => app.stage.clone(),
     };
     spans.push(Span::styled(stage, Style::new().fg(p.text)));
@@ -676,6 +681,14 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
             format!("{} {tracks} in {} {plural}", rows.len(), folders.len()),
             Style::new().fg(p.text),
         ));
+    } else if app.view == View::Artist {
+        // Deezer's spelling and following, so a wrong pick among acts sharing the name shows.
+        if let Some((name, fans)) = &app.page.found {
+            spans.push(dim("  ·  ", p));
+            spans.push(Span::styled(format!("Deezer: {name}, {fans} fans"), Style::new().fg(p.text)));
+        }
+        spans.push(dim("  ·  ", p));
+        spans.push(Span::styled(format!("{} tracks here", app.page.tracks), Style::new().fg(p.text)));
     } else if app.view == View::Artists && app.artists.loaded {
         let all = app.artists.rows.len();
         let starred = app.artists.rows.iter().filter(|r| r.starred).count();
@@ -775,6 +788,7 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
         View::Playlist => draw_playlist(frame, app, area),
         View::Pick => draw_picker(frame, app, area),
         View::Artists => draw_artists(frame, app, area),
+        View::Artist => draw_artist_page(frame, app, area),
     }
 }
 
@@ -939,6 +953,58 @@ fn draw_playlist(frame: &mut Frame, app: &mut App, area: Rect) {
     app.custom.scroll = app::scroll_to(app.custom.scroll, cursor, items.len(), area.height as usize);
     let mut state = ListState::default().with_offset(app.custom.scroll);
     state.select(Some(cursor));
+    frame.render_stateful_widget(List::new(items), area, &mut state);
+}
+
+// One row per release. The mark is a glyph and a word, so it reads without colour.
+fn draw_artist_page(frame: &mut Frame, app: &mut App, area: Rect) {
+    let p = app.theme;
+    let rows = app.page_rows();
+    if rows.is_empty() {
+        let page = &app.page;
+        let said = if !page.loaded {
+            format!(" asking Deezer about {}", page.name)
+        } else if let Some(why) = &page.error {
+            format!(" {why}")
+        } else if page.rows.is_empty() {
+            format!(" Deezer lists no releases for {}   esc goes back", page.name)
+        } else {
+            format!(" no albums or EPs   a shows the other {}", app.page_hidden())
+        };
+        frame.render_widget(Paragraph::new(Line::from(dim(said, p))), area);
+        return;
+    }
+    let width = area.width as usize;
+    app.viewport = area.height as usize;
+    let title_width = width.saturating_sub(32).max(12);
+    let cursor = app.page.cursor;
+    let items: Vec<ListItem> = rows
+        .iter()
+        .map(|at| {
+            let row = &app.page.rows[*at];
+            let (mark, colour) = match row.of {
+                _ if row.have == 0 => ("○ missing".to_string(), p.muted),
+                Some(of) if row.have < of => (format!("◐ {} of {of}", row.have), p.unsure),
+                Some(_) => ("● owned".to_string(), p.accent),
+                // Deezer sent no length, so the count is all that can be said, not a claim to the whole record.
+                None => (format!("● {} here", row.have), p.accent),
+            };
+            let year = row.year.map_or("    ".to_string(), |y| y.to_string());
+            let title = truncate(&row.title, title_width);
+            let pad = title_width.saturating_sub(cols(&title));
+            ListItem::new(Line::from(vec![
+                Span::styled(if *at == cursor { "▌" } else { " " }, Style::new().fg(p.cursor)),
+                Span::styled(format!(" {mark:<11}"), Style::new().fg(colour)),
+                dim(format!(" {year}  "), p),
+                Span::styled(title, row_style(*at == cursor, p)),
+                dim(format!("{:pad$}  {}", "", row.kind), p),
+            ]))
+        })
+        .collect();
+    let at = rows.iter().position(|r| *r == cursor).unwrap_or(0);
+    app.page.scroll = app::scroll_to(app.page.scroll, at, items.len(), area.height as usize);
+    let mut state = ListState::default().with_offset(app.page.scroll);
+    state.select(Some(at));
     frame.render_stateful_widget(List::new(items), area, &mut state);
 }
 
@@ -1857,8 +1923,18 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     } else if app.view == View::Artists && app.artists.typing {
         hints.push(("   enter keeps".to_string(), Style::new().fg(p.accent)));
         hints.push(("   esc clears".to_string(), Style::new().fg(p.muted)));
+    } else if app.view == View::Artist {
+        // Only when it would change something: nothing hidden, or nothing loaded yet, is a dead key.
+        if app.page.all_kinds {
+            hints.push(("   a albums and EPs".to_string(), Style::new().fg(p.accent)));
+        } else if app.page_hidden() > 0 {
+            hints.push((format!("   a show {} more", app.page_hidden()), Style::new().fg(p.accent)));
+        }
+        hints.push(("   o their folders".to_string(), Style::new().fg(p.muted)));
+        hints.push(("   esc artists".to_string(), Style::new().fg(p.muted)));
     } else if app.view == View::Artists {
-        hints.push(("   enter their folders".to_string(), Style::new().fg(p.accent)));
+        hints.push(("   enter discography".to_string(), Style::new().fg(p.accent)));
+        hints.push(("   o their folders".to_string(), Style::new().fg(p.muted)));
         hints.push(("   * star".to_string(), Style::new().fg(p.muted)));
         hints.push(("   / filter".to_string(), Style::new().fg(p.muted)));
         hints.push(("   esc library".to_string(), Style::new().fg(p.muted)));
@@ -2034,11 +2110,20 @@ fn draw_help(frame: &mut Frame, app: &App) {
         rows.extend([("view", "l", "yt-dlp output"), ("back", "Esc", "the library"), ("quit", "q  ^c", "")]);
     } else if app.view == View::Artists {
         rows.extend([
-            ("open", "enter", "the library, narrowed to this artist's folders"),
+            ("open", "enter", "their discography, marked against the library"),
+            ("", "o", "the library, narrowed to their folders"),
             ("star", "*", "star or unstar this artist"),
             ("find", "/", "filter by name"),
             ("view", "l", "yt-dlp output"),
             ("back", "Esc", "the library"),
+            ("quit", "q  ^c", ""),
+        ]);
+    } else if app.view == View::Artist {
+        rows.extend([
+            ("show", "a", "albums and EPs, or every release"),
+            ("open", "o", "the library, narrowed to their folders"),
+            ("view", "l", "yt-dlp output"),
+            ("back", "Esc", "the artists"),
             ("quit", "q  ^c", ""),
         ]);
     } else if app.view == View::Pick {
@@ -5741,5 +5826,74 @@ mod tests {
         let band = screen.lines().nth(1).unwrap_or_default();
         assert!(band.contains("ARTIST  AC/DC") && band.contains("1 of 2 shown"), "{screen}");
         assert!(screen.contains("Rock") && !screen.contains("Jazz"), "{screen}");
+    }
+
+    fn page_app(rows: Result<Vec<crate::app::AlbumRow>, String>) -> App {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        app.view = View::Artist;
+        app.page.name = "Can".into();
+        app.page.tracks = 15;
+        app.apply(Msg::Discography { name: "Can".into(), found: Some(("CAN".into(), 57000)), rows });
+        app
+    }
+
+    fn release(title: &str, year: u16, have: usize, of: Option<usize>) -> crate::app::AlbumRow {
+        crate::app::AlbumRow { id: 1, title: title.into(), year: Some(year), kind: "album".into(), have, of }
+    }
+
+    #[test]
+    fn a_release_reads_owned_partial_or_missing_in_words() {
+        let mut app = page_app(Ok(vec![
+            release("Tago Mago", 1971, 7, Some(7)),
+            release("Ege Bamyasi", 1972, 2, Some(7)),
+            release("Future Days", 1973, 0, None),
+            release("Soon Over Babaluma", 1974, 3, None),
+        ]));
+        let screen = screen_of(&mut app, 90, 10);
+        let line = |name: &str| screen.lines().find(|l| l.contains(name)).unwrap_or_default().to_string();
+        assert!(screen.lines().next().unwrap().contains("Deezer: CAN, 57000 fans  ·  15 tracks here"), "{screen}");
+        assert!(line("Tago Mago").contains("● owned") && line("Tago Mago").contains("1971"), "{screen}");
+        assert!(line("Ege Bamyasi").contains("◐ 2 of 7"), "{screen}");
+        assert!(line("Future Days").contains("○ missing"), "{screen}");
+        assert!(line("Soon Over Babaluma").contains("● 3 here"), "{screen}");
+        assert!(line("Tago Mago").starts_with('▌'), "{screen}");
+    }
+
+    #[test]
+    fn the_page_says_it_is_asking_until_deezer_answers_and_why_when_it_did_not() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        app.view = View::Artist;
+        app.page.name = "Can".into();
+        assert!(screen_of(&mut app, 80, 10).contains("asking Deezer about Can"));
+        let mut app = page_app(Err("Deezer has no artist called Can, or did not answer".into()));
+        assert!(screen_of(&mut app, 80, 10).contains("did not answer"));
+    }
+
+    // Every screen with a fixed header word hid what its keys said, so a refusal read as a dead key.
+    #[test]
+    fn a_message_from_a_key_shows_in_the_header_over_the_screens_own_word() {
+        let mut app = page_app(Ok(vec![release("Tago Mago", 1971, 7, Some(7))]));
+        app.say("no folder holds a track by Can now");
+        assert!(screen_of(&mut app, 90, 10).lines().next().unwrap().contains("no folder holds a track by Can now"));
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        app.apply(Msg::Library { shelves: vec![kinded("Rock", None)], show: true });
+        app.say("this is the top  ·  q quits");
+        assert!(screen_of(&mut app, 90, 10).lines().next().unwrap().contains("this is the top"));
+    }
+
+    #[test]
+    fn the_kind_hint_shows_only_when_a_would_change_the_list() {
+        let mut app = page_app(Ok(vec![release("Tago Mago", 1971, 7, Some(7))]));
+        assert!(!screen_of(&mut app, 100, 10).contains("a show"), "a hint for a key that hides nothing");
+        let mut single = release("Spoon", 1972, 0, None);
+        single.kind = "single".into();
+        let mut app = page_app(Ok(vec![release("Tago Mago", 1971, 7, Some(7)), single]));
+        assert!(screen_of(&mut app, 100, 10).contains("a show 1 more"));
     }
 }

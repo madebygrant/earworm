@@ -81,7 +81,7 @@ every later wave hangs off.
 Exit: a `TestBackend` test renders the screen from a built `App`, and a pty
 run against a rebuilt fixture stars an artist and the favourites file appears.
 
-## 3. Artist page and discography
+## 3. Artist page and discography [done 2026-10-26]
 
 Why now: this is the feature asked for. It needs waves 1 and 2.
 

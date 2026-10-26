@@ -19,6 +19,8 @@ pub struct Artist {
     pub albums: usize,
     /// The folders holding their tracks, in the order they were read.
     pub folders: Vec<PathBuf>,
+    /// Each album as first spelt, with how many of its tracks are here. What the discography is matched to.
+    pub held: Vec<(String, usize)>,
 }
 
 /// What two spellings of one artist share, so "Björk" and "bjork" are one row and one star.
@@ -36,7 +38,8 @@ pub fn group<'a>(tracks: impl IntoIterator<Item = (&'a str, &'a str, &'a Path, b
         key: String,
         spellings: Vec<(String, usize)>,
         tracks: usize,
-        albums: HashSet<String>,
+        // Keyed on `normalise`, so two spellings of one album are one album.
+        albums: Vec<(String, String, usize)>,
         folders: Vec<PathBuf>,
     }
     let mut seen: Vec<Seen> = Vec::new();
@@ -48,7 +51,7 @@ pub fn group<'a>(tracks: impl IntoIterator<Item = (&'a str, &'a str, &'a Path, b
         }
         let k = key(&lead);
         let i = *at.entry(k.clone()).or_insert_with(|| {
-            seen.push(Seen { key: k, spellings: Vec::new(), tracks: 0, albums: HashSet::new(), folders: Vec::new() });
+            seen.push(Seen { key: k, spellings: Vec::new(), tracks: 0, albums: Vec::new(), folders: Vec::new() });
             seen.len() - 1
         });
         let one = &mut seen[i];
@@ -63,9 +66,12 @@ pub fn group<'a>(tracks: impl IntoIterator<Item = (&'a str, &'a str, &'a Path, b
             Some((_, n)) => *n += 1,
             None => one.spellings.push((lead, 1)),
         }
-        let album = normalise(album);
-        if !album.is_empty() {
-            one.albums.insert(album);
+        let album_key = normalise(album);
+        if !album_key.is_empty() {
+            match one.albums.iter_mut().find(|(k, ..)| *k == album_key) {
+                Some((.., n)) => *n += 1,
+                None => one.albums.push((album_key, album.trim().to_string(), 1)),
+            }
         }
     }
     seen.sort_by(|a, b| b.tracks.cmp(&a.tracks).then_with(|| a.key.cmp(&b.key)));
@@ -73,7 +79,8 @@ pub fn group<'a>(tracks: impl IntoIterator<Item = (&'a str, &'a str, &'a Path, b
         .map(|one| {
             // `rev` so a tie goes to the spelling seen first: `max_by_key` keeps the last of equals.
             let name = one.spellings.iter().rev().max_by_key(|(_, n)| *n).map(|(s, _)| s.clone()).unwrap_or_default();
-            Artist { name, tracks: one.tracks, albums: one.albums.len(), folders: one.folders }
+            let held: Vec<(String, usize)> = one.albums.into_iter().map(|(_, title, n)| (title, n)).collect();
+            Artist { name, tracks: one.tracks, albums: held.len(), folders: one.folders, held }
         })
         .collect()
 }
@@ -230,8 +237,6 @@ fn position(list: &[Favourite], name: &str) -> Option<usize> {
 }
 
 /// Records the Deezer id a starred artist resolved to. Nothing happens for one not starred.
-// The artist page (wave 3) is the first caller.
-#[cfg_attr(not(test), allow(dead_code))]
 pub fn set_id(root: &Path, name: &str, id: u64) -> Result<()> {
     let mut store = load(root);
     let Some(at) = position(&store.list, name) else {

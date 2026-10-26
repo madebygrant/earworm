@@ -360,6 +360,8 @@ pub enum View {
     Pick,
     // Every artist the library's tags name, starred ones first. Reached by `b` from the library.
     Artists,
+    // One artist's Deezer discography against what the library holds. Enter on the artists screen.
+    Artist,
 }
 
 /// One track of a custom playlist as the screen shows it.
@@ -393,6 +395,35 @@ pub struct ArtistRow {
     pub starred: bool,
     /// Where their tracks are, for Enter to narrow the library to.
     pub folders: Vec<PathBuf>,
+}
+
+/// One release on an artist's page, marked with how much of it the library holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlbumRow {
+    pub id: u64,
+    pub title: String,
+    pub year: Option<u16>,
+    pub kind: String,
+    /// Tracks of it here; none is missing.
+    pub have: usize,
+    /// Its length on Deezer, asked only for one held, so `have < of` is partial.
+    pub of: Option<usize>,
+}
+
+/// One artist's page. `cursor` is a position in `rows`, which `all_kinds` narrows as a view.
+#[derive(Clone, Debug, Default)]
+pub struct ArtistPage {
+    pub name: String,
+    pub tracks: usize,
+    /// Deezer's name and follower count, so a wrong pick among same-named acts is visible.
+    pub found: Option<(String, u64)>,
+    pub rows: Vec<AlbumRow>,
+    pub cursor: usize,
+    pub scroll: usize,
+    // Singles and compilations too. Off by default: a band's singles outnumber its albums.
+    pub all_kinds: bool,
+    pub loaded: bool,
+    pub error: Option<String>,
 }
 
 /// The artists screen. `cursor` is a position in `rows`, which the filter narrows as a view.
@@ -506,6 +537,8 @@ pub enum Cmd {
     Artists,
     /// Star an artist, or unstar one already starred. By name: the rows reorder when a star moves one.
     Star(String),
+    /// An artist's Deezer releases, marked against the library.
+    Discography(String),
 }
 
 /* A question the UI asks on its own account. Nothing is blocked on the
@@ -642,6 +675,11 @@ pub enum Msg {
     FoundUnmark,
     /// The artists screen's rows. `focus` is the artist to land on, since starring moves a row.
     Artists { rows: Vec<ArtistRow>, focus: Option<String> },
+    /// An artist page's releases, or why there are none. `name` is the page it was asked for, so an answer
+    /// for a page already left is dropped.
+    Discography { name: String, found: Option<(String, u64)>, rows: Result<Vec<AlbumRow>, String> },
+    /// One release's length, sent after the page as each request lands.
+    Counted { name: String, id: u64, of: usize },
     /// A list was just made: open the track picker with it as the target.
     PickTracks(String),
     /// A list changed its name, so the one cliamp is on keeps its marker.
@@ -936,6 +974,19 @@ fn nearest(rows: &[usize], at: usize) -> usize {
     rows.iter().copied().min_by_key(|pos| pos.abs_diff(at)).unwrap_or(at)
 }
 
+/// A cursor moved `by` rows through a narrowed list, clamped at both ends, or to the nearest row when the
+/// one it is on stopped showing.
+fn step_in(rows: &[usize], at: usize, down: bool, by: usize) -> usize {
+    let Some(pos) = rows.iter().position(|r| *r == at) else {
+        return nearest(rows, at);
+    };
+    rows[if down { (pos + by).min(rows.len() - 1) } else { pos.saturating_sub(by) }]
+}
+
+fn end_of(rows: &[usize], last: bool, at: usize) -> usize {
+    (if last { rows.last() } else { rows.first() }).copied().unwrap_or(at)
+}
+
 pub fn shelf_matches(shelf: &Shelf, needle: &str) -> bool {
     shelf.name.to_lowercase().contains(needle)
         || shelf
@@ -1046,6 +1097,7 @@ pub struct App {
     pub custom: CustomView,
     pub pick: PickView,
     pub artists: ArtistsView,
+    pub page: ArtistPage,
     // The search screen's matches, computed once per frame by `draw` so the header, the band and the list read one answer.
     pub found_cache: Vec<crate::picker::Hit>,
     // Tracks marked on the search screen for `P`, by folder and filename like the picker's.
@@ -1206,6 +1258,7 @@ impl App {
             found_scroll: 0,
             pick: PickView::default(),
             artists: ArtistsView::default(),
+            page: ArtistPage::default(),
             found_cache: Vec::new(),
             found_marks: crate::picker::Marks::default(),
             from_found: false,
@@ -1481,6 +1534,24 @@ impl App {
             }
             Msg::PickTracks(name) => self.open_picker(name),
             Msg::FoundUnmark => self.found_marks.clear(),
+            Msg::Discography { name, found, rows } => {
+                if self.page.name == name {
+                    self.page.found = found;
+                    self.page.loaded = true;
+                    match rows {
+                        Ok(rows) => self.page.rows = rows,
+                        Err(why) => self.page.error = Some(why),
+                    }
+                    self.page.cursor = self.page_rows().first().copied().unwrap_or(0);
+                }
+            }
+            Msg::Counted { name, id, of } => {
+                if self.page.name == name {
+                    for row in self.page.rows.iter_mut().filter(|r| r.id == id) {
+                        row.of = Some(of);
+                    }
+                }
+            }
             Msg::Artists { rows, focus } => {
                 let keep = focus.or_else(|| self.artist_selected().map(|r| r.name.clone()));
                 self.artists.rows = rows;
@@ -1889,20 +1960,11 @@ impl App {
     }
 
     pub fn artist_move(&mut self, down: bool, by: usize) {
-        let rows = self.artist_rows();
-        let Some(at) = rows.iter().position(|r| *r == self.artists.cursor) else {
-            self.artist_snap();
-            return;
-        };
-        let next = if down { (at + by).min(rows.len() - 1) } else { at.saturating_sub(by) };
-        self.artists.cursor = rows[next];
+        self.artists.cursor = step_in(&self.artist_rows(), self.artists.cursor, down, by);
     }
 
     pub fn artist_jump(&mut self, last: bool) {
-        let rows = self.artist_rows();
-        if let Some(at) = if last { rows.last() } else { rows.first() } {
-            self.artists.cursor = *at;
-        }
+        self.artists.cursor = end_of(&self.artist_rows(), last, self.artists.cursor);
     }
 
     /// Types into the artists screen's own query, never the library's: one box would move both cursors.
@@ -1917,7 +1979,7 @@ impl App {
         self.send(Cmd::Artists);
     }
 
-    /// Enter on an artist: the library narrowed to the folders holding their tracks.
+    /// `o` on the artists screen or an artist's page: the library narrowed to the folders holding their tracks.
     // The folders the index read their tags in, not a match on filenames: those say `AC-DC` for AC/DC, and
     // "Can" is inside "Scandal". The library's query and kind go, or they could hide every one of them.
     pub fn artist_folders(&mut self) {
@@ -1935,6 +1997,54 @@ impl App {
         self.only = None;
         self.view = View::Library;
         self.snap();
+    }
+
+    pub fn can_page(&self) -> bool {
+        self.view == View::Artist && self.prompt.is_none() && !self.busy
+    }
+
+    /// Enter on the artists screen. The page opens at once and fills when the worker answers.
+    pub fn open_page(&mut self) {
+        let Some(row) = self.artist_selected() else {
+            return;
+        };
+        self.page = ArtistPage { name: row.name.clone(), tracks: row.tracks, ..ArtistPage::default() };
+        self.view = View::Artist;
+        self.send(Cmd::Discography(self.page.name.clone()));
+    }
+
+    // Albums and EPs unless `all_kinds`: a band's singles and compilations outnumber its records.
+    fn page_keeps(&self, row: &AlbumRow) -> bool {
+        self.page.all_kinds || matches!(row.kind.as_str(), "album" | "ep")
+    }
+
+    /// Positions in `page.rows` the kind keeps.
+    pub fn page_rows(&self) -> Vec<usize> {
+        (0..self.page.rows.len()).filter(|at| self.page_keeps(&self.page.rows[*at])).collect()
+    }
+
+    /// How many releases `a` would show that are hidden now.
+    pub fn page_hidden(&self) -> usize {
+        self.page.rows.iter().filter(|r| !self.page_keeps(r)).count()
+    }
+
+    pub fn page_move(&mut self, down: bool, by: usize) {
+        self.page.cursor = step_in(&self.page_rows(), self.page.cursor, down, by);
+    }
+
+    pub fn page_jump(&mut self, last: bool) {
+        self.page.cursor = end_of(&self.page_rows(), last, self.page.cursor);
+    }
+
+    /// Whether an expiring message is up, which the screens with a fixed header word give way to.
+    pub fn flashing(&self) -> bool {
+        self.flash_until.is_some()
+    }
+
+    pub fn page_kinds(&mut self) {
+        self.page.all_kinds = !self.page.all_kinds;
+        self.page.cursor = nearest(&self.page_rows(), self.page.cursor);
+        self.say(if self.page.all_kinds { "showing every release" } else { "showing albums and EPs" });
     }
 
     /// `*` on the track list: stars the lead artist of the track under the cursor.

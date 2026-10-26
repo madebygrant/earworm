@@ -136,7 +136,7 @@ fn get_bytes(url: &str) -> Option<Vec<u8>> {
         .ok()
 }
 
-fn encode(value: &str) -> String {
+pub(crate) fn encode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.as_bytes() {
         match byte {
@@ -336,6 +336,13 @@ pub fn deezer(artist: &str, title: &str) -> Option<Match> {
             .map(str::to_string),
         source: "deezer",
     })
+}
+
+/// A Deezer API path, paced by the same gate as the tag lookups so browsing and tagging share one rate.
+// Deezer answers a bad id with an `error` object and a 200, which is no answer as far as callers go.
+pub fn deezer_get(path: &str) -> Option<Value> {
+    DEEZER_RATE.wait();
+    get_json(&format!("https://api.deezer.com/{path}")).filter(|v| v.get("error").is_none())
 }
 
 /// iTunes Search API hit turned into a `Match`. Kept apart from the fetch so
