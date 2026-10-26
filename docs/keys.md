@@ -91,10 +91,10 @@ touch, and failures](images/keys.png)
 | --- | --- |
 | `tab` | releases, top tracks, related artists |
 | `j` `k` `↑` `↓` `g` `G` | move |
-| `enter` | get a missing release or the missing top tracks from YouTube Music (once unlocked), or open a related artist's page |
+| `enter` | open a related artist's page |
 | `a` | albums and EPs, or every release |
 | `o` | the library, narrowed to their folders |
-| `Esc` | stop a YouTube Music search, else the page before, else the artists |
+| `Esc` | the page before, else the artists |
 
 ## Settings
 
@@ -109,7 +109,7 @@ What each row means is in [configuration](configuration.md#the-settings-screen).
 ## The details
 
 `Esc` never ends the session, and does nothing at all while a run or a command
-is going, except on an artist page, where it stops a YouTube Music search. `q` and `ctrl+c` are the way out. `q` asks before it kills a
+is going. `q` and `ctrl+c` are the way out. `q` asks before it kills a
 download, since that's the last thing in the tool one keypress can lose. A
 second `q` answers the question, so `qq` never makes you read the box.
 

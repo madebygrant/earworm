@@ -97,12 +97,18 @@
   refusal read as a dead key
   (`a_message_from_a_key_shows_in_the_header_over_the_screens_own_word`).
 - **Fetching anything from the artist page needs the YouTube Music unlock,
-  checked three times.** The UI refuses with `cheats::LOCKED` and does not
-  advertise the key, the worker checks before it searches, and the URL goes
+  checked three times, and is a secret until then.** Locked, Enter on a
+  release or the top tracks does nothing and says nothing, and neither the
+  status bar nor the help mentions getting or stopping a search: the unlock is
+  a cheat code, and a refusal naming it gives it away. This is the one place
+  the "a silent key reads as broken" rule in `docs/rules/keys-and-screens.md`
+  gives way. The worker checks before it searches, and the URL goes
   through `settle`, which is why an album's link keeps the
-  `music.youtube.com` host (`settle` only refuses that host). Locked, the lists
-  still show
+  `music.youtube.com` host (`settle` only refuses that host). `README.md` and
+  `docs/keys.md` stay quiet about it too; `docs/discovery.md` is the one place
+  that explains it
   (`enter_on_a_missing_album_asks_the_worker_only_once_unlocked`,
+  `a_locked_page_lists_and_never_offers_a_download`,
   `a_locked_album_says_so_and_never_searches`,
   `locked_top_tracks_are_never_searched`).
 - **An album is found by search then resolve, and must be by the artist.**

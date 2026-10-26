@@ -2783,7 +2783,8 @@ mod tests {
         let (mut app, cmds) = on_page(vec![album("Future Days", "album", 0, None)]);
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(cmds.try_recv().is_err(), "a locked get reached the worker");
-        assert!(app.stage.contains(crate::cheats::LOCKED), "{}", app.stage);
+        // Locked, nothing says fetching exists.
+        assert!(!app.stage.contains(crate::cheats::LOCKED) && !app.stage.contains("YouTube"), "{}", app.stage);
         app.unlocked.grant(crate::cheats::Feature::Music);
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(matches!(cmds.try_recv(), Ok(Cmd::GetAlbum { artist, title }) if artist == "Can" && title == "Future Days"));
@@ -2877,7 +2878,7 @@ mod tests {
         let _ = cmds.try_iter().count();
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(cmds.try_recv().is_err(), "a locked get reached the worker");
-        assert!(app.stage.contains(crate::cheats::LOCKED), "{}", app.stage);
+        assert!(!app.stage.contains(crate::cheats::LOCKED) && !app.stage.contains("YouTube"), "{}", app.stage);
         app.unlocked.grant(crate::cheats::Feature::Music);
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(matches!(cmds.try_recv(), Ok(Cmd::GetTop { titles, .. }) if titles == ["Spoon", "Vitamin C"]));

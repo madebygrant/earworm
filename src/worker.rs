@@ -3574,6 +3574,8 @@ fn get_top(
 
 // The same stops as `album_link`. One search per track, so the header counts them off as it goes.
 fn top_link(cfg: &Config, tx: &Sender<Msg>, asker: &Asker, find: impl Fn(&str, &str) -> Result<Option<String>, String>, halted: impl Fn() -> bool, artist: &str, titles: &[String]) -> Option<Link> {
+    // A tripwire: the UI never sends this locked. Loud on purpose, so a lost UI check shows instead of
+    // fetching quietly.
     if !cfg.unlocked.has(Feature::Music) {
         let _ = tx.send(Msg::Flash(format!("{LOCKED}  ·  tracks come from YouTube Music")));
         return None;
@@ -3638,6 +3640,8 @@ fn stopped(tx: &Sender<Msg>) -> Option<Link> {
 // Every step that can stop the download, each saying why. The unlock is checked before the search, and the
 // found URL goes through `settle` too, so the gate holds even if this check were lost.
 fn album_link(cfg: &Config, tx: &Sender<Msg>, asker: &Asker, find: impl Fn(&str, &str) -> Result<Option<ytdlp::AlbumHit>, String>, halted: impl Fn() -> bool, artist: &str, title: &str) -> Option<Link> {
+    // A tripwire: the UI never sends this locked. Loud on purpose, so a lost UI check shows instead of
+    // fetching quietly.
     if !cfg.unlocked.has(Feature::Music) {
         let _ = tx.send(Msg::Flash(format!("{LOCKED}  ·  albums come from YouTube Music")));
         return None;

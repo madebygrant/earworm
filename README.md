@@ -72,8 +72,8 @@ download from a music library:
 - **Artists, and what you're missing of them.** `b` lists every artist your
   tags name. Star the ones you follow, open an artist to see their
   discography marked owned, partial or missing, their top tracks and who's
-  related, and hear about their new releases each time earworm starts. With YouTube
-  Music unlocked, Enter fetches what's missing. [Details](docs/discovery.md).
+  related, and hear about their new releases each time earworm starts.
+  [Details](docs/discovery.md).
 - **Retries and undos.** `r` re-downloads whatever failed. `u` puts back the
   last tag edit.
 

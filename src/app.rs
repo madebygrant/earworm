@@ -2296,7 +2296,10 @@ impl App {
 
     /// Enter on the page, which means the list's own action.
     pub fn section_enter(&mut self) {
+        // Locked, fetching is a secret: Enter on a release or a top track does nothing and nothing says it could.
+        let unlocked = self.unlocked.has(crate::cheats::Feature::Music);
         match self.page.section {
+            Section::Releases | Section::Top if !unlocked => {}
             Section::Releases => self.get_album(),
             Section::Top => self.get_top(),
             Section::Related => {
@@ -2309,7 +2312,7 @@ impl App {
         }
     }
 
-    /// The missing top tracks, as one download. Locked, it says why, as `get_album` does.
+    /// The missing top tracks, as one download.
     pub fn get_top(&mut self) {
         let Some(Ok(rows)) = &self.page.top else {
             return;
@@ -2317,8 +2320,6 @@ impl App {
         let titles: Vec<String> = rows.iter().filter(|r| !r.have).map(|r| r.title.clone()).collect();
         if titles.is_empty() {
             self.say("every one of these is already here");
-        } else if !self.unlocked.has(crate::cheats::Feature::Music) {
-            self.say(format!("{}  ·  tracks come from YouTube Music", crate::cheats::LOCKED));
         } else {
             self.search(Cmd::GetTop { artist: self.page.name.clone(), titles });
         }
@@ -2377,7 +2378,7 @@ impl App {
             && self.page_selected().is_some_and(|r| !r.complete())
     }
 
-    /// Enter on a release. The worker checks the unlock again: this only saves a round trip and says why.
+    /// Enter on a release, once unlocked. The worker checks the unlock again.
     pub fn get_album(&mut self) {
         let Some(row) = self.page_selected() else {
             return;
@@ -2385,8 +2386,6 @@ impl App {
         let title = row.title.clone();
         if row.complete() {
             self.say(format!("{title} is already here  ·  o shows its folder"));
-        } else if !self.unlocked.has(crate::cheats::Feature::Music) {
-            self.say(format!("{}  ·  albums come from YouTube Music", crate::cheats::LOCKED));
         } else {
             self.search(Cmd::GetAlbum { artist: self.page.name.clone(), title });
         }

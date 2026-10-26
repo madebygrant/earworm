@@ -2321,17 +2321,23 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("quit", "q  ^c", ""),
         ]);
     } else if app.view == View::Artist {
+        // Fetching is a secret until the YouTube Music unlock, so locked, nothing here mentions it.
+        let unlocked = app.unlocked.has(crate::cheats::Feature::Music);
+        if unlocked {
+            rows.push(("get", "enter", "a missing release, or the missing top tracks, from YouTube Music"));
+        }
         rows.extend([
-            ("get", "enter", "a missing release, or the missing top tracks, from YouTube Music"),
-            ("", "enter", "on a related artist, their page"),
             ("show", "tab", "releases, top tracks, related artists"),
             ("", "a", "albums and EPs, or every release"),
-            ("open", "o", "the library, narrowed to their folders"),
+            ("open", "enter", "on a related artist, their page"),
+            ("", "o", "the library, narrowed to their folders"),
             ("view", "l", "yt-dlp output"),
             ("back", "Esc", "the page before, or the artists"),
-            ("stop", "Esc", "a YouTube Music search under way"),
-            ("quit", "q  ^c", ""),
         ]);
+        if unlocked {
+            rows.push(("stop", "Esc", "a YouTube Music search under way"));
+        }
+        rows.push(("quit", "q  ^c", ""));
     } else if app.view == View::Pick {
         rows = vec![
             ("move", "↑ ↓  ^p ^n", ""),
@@ -6077,6 +6083,25 @@ mod tests {
         app.page.tracks = 15;
         app.apply(Msg::Discography { name: "Can".into(), found: Some(("CAN".into(), 57000)), rows });
         app
+    }
+
+    // Fetching is a secret until the unlock: locked, the page, its bar and its help never mention it.
+    #[test]
+    fn a_locked_page_lists_and_never_offers_a_download() {
+        let mut app = page_app(Ok(vec![release("Future Days", 1973, 0, Some(4)), release("Ege Bamyasi", 1972, 2, Some(7))]));
+        app.apply(Msg::Idle);
+        let page = screen_of(&mut app, 100, 12);
+        assert!(page.contains("Future Days") && page.contains("Ege Bamyasi"), "{page}");
+        app.show_help = true;
+        let help = screen_of(&mut app, 100, 30);
+        for screen in [&page, &help] {
+            assert!(!screen.contains("YouTube") && !screen.contains("enter get") && !screen.contains("missing release"), "{screen}");
+        }
+        app.unlocked.grant(crate::cheats::Feature::Music);
+        let help = screen_of(&mut app, 100, 30);
+        assert!(help.contains("YouTube Music"), "{help}");
+        app.show_help = false;
+        assert!(screen_of(&mut app, 100, 12).contains("enter get"));
     }
 
     fn release(title: &str, year: u16, have: usize, of: Option<usize>) -> crate::app::AlbumRow {

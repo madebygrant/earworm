@@ -48,8 +48,9 @@ that artist's tracks. The band says `ARTIST` and Esc clears it.
 
 Enter on a missing or part-owned release, or on the top tracks, downloads them
 from YouTube Music. This needs YouTube Music links unlocked for the session,
-the same unlock the URL prompt asks for. Locked, the lists still show and Enter
-says why.
+the same unlock the URL prompt asks for. Locked, the page only lists: Enter
+on a release or the top tracks does nothing, and no hint or help row mentions
+downloading.
 
 earworm searches YouTube Music for the record by that artist, then asks before
 downloading, naming what it found, who made it and how many tracks. An album
