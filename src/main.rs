@@ -1,5 +1,6 @@
 mod achievements;
 mod app;
+mod artists;
 mod cheats;
 mod config;
 mod custom;

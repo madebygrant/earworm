@@ -546,14 +546,19 @@ pub fn plausible(m: &Match, artist: &str, title: &str) -> bool {
 
 const SYMBOL_SEPARATORS: [char; 3] = [',', '&', '/'];
 const WORD_SEPARATORS: [&str; 3] = ["feat", "ft", "with"];
+const FEATURING: [&str; 2] = ["feat", "ft"];
 
 /// Word separators need boundaries on both sides, or "Wilco" and "Software"
 /// would be split down the middle.
 fn word_separator(chars: &[char], i: usize) -> Option<usize> {
+    separator_of(chars, i, &WORD_SEPARATORS)
+}
+
+fn separator_of(chars: &[char], i: usize, words: &[&str]) -> Option<usize> {
     if i > 0 && chars[i - 1].is_alphanumeric() {
         return None;
     }
-    for word in WORD_SEPARATORS {
+    for word in words {
         let n = word.len();
         if i + n > chars.len() {
             continue;
@@ -609,6 +614,16 @@ fn split_artists(name: &str) -> Vec<String> {
             }
         })
         .collect()
+}
+
+/// The credit before any "feat." or "ft.", which is the artist whose record it is.
+// Not `split_artists`: `&`, `,`, `/` and "with" are inside band names (AC/DC, Simon & Garfunkel, Nurse
+// With Wound), and cutting there names an artist who does not exist.
+pub fn lead_artist(name: &str) -> String {
+    let chars: Vec<char> = name.chars().collect();
+    let end = (0..chars.len()).find(|&i| separator_of(&chars, i, &FEATURING).is_some()).unwrap_or(chars.len());
+    let lead: String = chars[..end].iter().collect();
+    lead.trim_end_matches(|c: char| c.is_whitespace() || c == '(' || c == '[').trim().to_string()
 }
 
 /// True when a match drops a distinct collaborator the tags already had. One
