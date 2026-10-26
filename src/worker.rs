@@ -8,6 +8,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use anyhow::{Context, Result, bail};
 
 use crate::app::{Asker, Cmd, Escape, Msg, Reply, Shelf, Status, Track, Watch};
+use crate::artists;
 use crate::cheats::{Feature, LOCKED, Unlocked};
 use crate::config::{self, Config, composed, decomposed};
 use crate::custom;
@@ -3098,6 +3099,9 @@ fn serve(
     /* Lives for the session rather than per command, since that is what `u`
        means: the last tag write, whichever command made it. */
     let mut held: Option<Undo> = None;
+    // The artist index, built on the first `b` and dropped by any other command: syncs, edits and deletes
+    // all change tags, and listing the ones that do is a list a new command would be left out of.
+    let mut known: Option<Vec<artists::Artist>> = None;
     loop {
         if let Some(now) = watch.poll(player::probe()) {
             let _ = tx.send(Msg::Player(now));
@@ -3111,7 +3115,31 @@ fn serve(
         /* Some commands edit what is on screen and some replace it. Only the
            ones that went to the network have an outcome worth a question at
            the end, which is what `synced` carries. */
+        if !matches!(cmd, Cmd::Artists | Cmd::Star(_)) {
+            known = None;
+        }
         let synced = match cmd {
+            Cmd::Artists => {
+                let index = known.get_or_insert_with(|| artists::index(&cfg.dir));
+                let _ = tx.send(Msg::Artists { rows: artists::rows(&cfg.dir, index), focus: None });
+                None
+            }
+            Cmd::Star(name) => {
+                match artists::toggle(&cfg.dir, &name) {
+                    Ok(on) => {
+                        let said = if on { "starred" } else { "unstarred" };
+                        let _ = tx.send(Msg::Flash(format!("{said} {name}")));
+                        // A star from the track list costs no library walk; the screen asks again on `b`.
+                        if let Some(index) = &known {
+                            let _ = tx.send(Msg::Artists { rows: artists::rows(&cfg.dir, index), focus: Some(name) });
+                        }
+                    }
+                    Err(err) => {
+                        let _ = tx.send(Msg::Flash(format!("failed: {err}")));
+                    }
+                }
+                None
+            }
             Cmd::Open(folder, land_on) => {
                 report(tx, open_row(cfg, tx, tracks, &folder, land_on.as_deref()));
                 None

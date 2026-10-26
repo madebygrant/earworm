@@ -1,11 +1,9 @@
-// The artists screen (wave 2 of docs/plans/2026-10-26-artist-discovery-plan.md) is the first caller.
-#![cfg_attr(not(test), allow(dead_code))]
-
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
+use crate::app::ArtistRow;
 use crate::lookup::{lead_artist, normalise};
 use crate::manifest::{self, Kind};
 use crate::{tag, worker};
@@ -19,6 +17,8 @@ pub struct Artist {
     pub name: String,
     pub tracks: usize,
     pub albums: usize,
+    /// The folders holding their tracks, in the order they were read.
+    pub folders: Vec<PathBuf>,
 }
 
 /// What two spellings of one artist share, so "Björk" and "bjork" are one row and one star.
@@ -28,28 +28,36 @@ pub fn key(name: &str) -> String {
     if key.is_empty() { name.trim().to_lowercase() } else { key }
 }
 
-/// Groups (artist, album) pairs by lead artist, most tracks first, shown under the commonest spelling.
-// "A feat. B" counts towards A only: a guest verse is not one of B's albums.
-pub fn group<'a>(tracks: impl IntoIterator<Item = (&'a str, &'a str)>) -> Vec<Artist> {
+/// Groups (artist, album, folder, counted) by lead artist, most tracks first, under the commonest spelling.
+// "A feat. B" counts towards A only: a guest verse is not one of B's albums. A track not counted is a copy
+// of one already seen, which still says the folder holds the artist.
+pub fn group<'a>(tracks: impl IntoIterator<Item = (&'a str, &'a str, &'a Path, bool)>) -> Vec<Artist> {
     struct Seen {
         key: String,
         spellings: Vec<(String, usize)>,
         tracks: usize,
         albums: HashSet<String>,
+        folders: Vec<PathBuf>,
     }
     let mut seen: Vec<Seen> = Vec::new();
     let mut at: HashMap<String, usize> = HashMap::new();
-    for (artist, album) in tracks {
+    for (artist, album, folder, counted) in tracks {
         let lead = lead_artist(artist);
         if lead.is_empty() {
             continue;
         }
         let k = key(&lead);
         let i = *at.entry(k.clone()).or_insert_with(|| {
-            seen.push(Seen { key: k, spellings: Vec::new(), tracks: 0, albums: HashSet::new() });
+            seen.push(Seen { key: k, spellings: Vec::new(), tracks: 0, albums: HashSet::new(), folders: Vec::new() });
             seen.len() - 1
         });
         let one = &mut seen[i];
+        if !one.folders.iter().any(|f| f == folder) {
+            one.folders.push(folder.to_path_buf());
+        }
+        if !counted {
+            continue;
+        }
         one.tracks += 1;
         match one.spellings.iter_mut().find(|(s, _)| *s == lead) {
             Some((_, n)) => *n += 1,
@@ -65,7 +73,7 @@ pub fn group<'a>(tracks: impl IntoIterator<Item = (&'a str, &'a str)>) -> Vec<Ar
         .map(|one| {
             // `rev` so a tie goes to the spelling seen first: `max_by_key` keeps the last of equals.
             let name = one.spellings.iter().rev().max_by_key(|(_, n)| *n).map(|(s, _)| s.clone()).unwrap_or_default();
-            Artist { name, tracks: one.tracks, albums: one.albums.len() }
+            Artist { name, tracks: one.tracks, albums: one.albums.len(), folders: one.folders }
         })
         .collect()
 }
@@ -87,22 +95,74 @@ pub fn index(dir: &Path) -> Vec<Artist> {
             }
             let path = shelf.path.join(file);
             // A song on two playlists is a copy in each folder. A `~` id is only unique within its folder.
+            let mut first = true;
             if let Some(id) = ids.get(path.as_path()).filter(|id| !id.starts_with('~')) {
                 let recording = [Some(id.to_string()), isrcs.get(id).map(|i| format!("isrc {i}"))];
-                if recording.iter().flatten().any(|r| counted.contains(r)) {
-                    continue;
-                }
+                first = !recording.iter().flatten().any(|r| counted.contains(r));
                 counted.extend(recording.into_iter().flatten());
             }
             if let Ok((artist, mut album)) = tag::artist_album(&path) {
                 if named_album.as_deref() == Some(normalise(&album).as_str()) {
                     album.clear();
                 }
-                read.push((artist, album));
+                read.push((artist, album, shelf.path.clone(), first));
             }
         }
     }
-    group(read.iter().map(|(artist, album)| (artist.as_str(), album.as_str())))
+    group(read.iter().map(|(artist, album, folder, first)| (artist.as_str(), album.as_str(), folder.as_path(), *first)))
+}
+
+/// The artists screen's rows: starred first, then by track count.
+// A starred artist with nothing left in the library still gets a row, so the star can be taken off.
+pub fn rows(root: &Path, index: &[Artist]) -> Vec<ArtistRow> {
+    let favourites = favourites(root);
+    let starred: HashSet<String> = favourites.iter().map(|f| key(&f.name)).collect();
+    let mut rows: Vec<ArtistRow> = index
+        .iter()
+        .map(|a| ArtistRow {
+            name: a.name.clone(),
+            tracks: a.tracks,
+            albums: a.albums,
+            starred: starred.contains(&key(&a.name)),
+            folders: a.folders.clone(),
+        })
+        .collect();
+    let listed: HashSet<String> = index.iter().map(|a| key(&a.name)).collect();
+    for f in favourites {
+        if !listed.contains(&key(&f.name)) {
+            rows.push(ArtistRow { name: f.name, tracks: 0, albums: 0, starred: true, folders: Vec::new() });
+        }
+    }
+    // Stable, so each half keeps the index's order.
+    rows.sort_by_key(|r| !r.starred);
+    rows
+}
+
+/// Stars the artist, or unstars one already starred. True when they end up starred.
+pub fn toggle(root: &Path, name: &str) -> Result<bool> {
+    let name = writable(name)?;
+    let mut store = load(root);
+    let on = match position(&store.list, name) {
+        Some(at) => {
+            store.list.remove(at);
+            false
+        }
+        None => {
+            store.list.push(Favourite { name: name.to_string(), id: None });
+            true
+        }
+    };
+    save(root, &store)?;
+    Ok(on)
+}
+
+// A tab or newline would split the line.
+fn writable(name: &str) -> Result<&str> {
+    let name = name.trim();
+    if name.is_empty() || name.contains(['\t', '\n', '\r']) {
+        bail!("cannot star an artist called {name:?}");
+    }
+    Ok(name)
 }
 
 /// A starred artist. The Deezer id is filled in the first time their page is opened.
@@ -169,33 +229,9 @@ fn position(list: &[Favourite], name: &str) -> Option<usize> {
     list.iter().position(|f| key(&f.name) == k)
 }
 
-/// Stars an artist. False when they already were, under any spelling `group` would merge.
-pub fn star(root: &Path, name: &str) -> Result<bool> {
-    let name = name.trim();
-    if name.is_empty() || name.contains(['\t', '\n', '\r']) {
-        bail!("cannot star an artist called {name:?}");
-    }
-    let mut store = load(root);
-    if position(&store.list, name).is_some() {
-        return Ok(false);
-    }
-    store.list.push(Favourite { name: name.to_string(), id: None });
-    save(root, &store)?;
-    Ok(true)
-}
-
-/// Unstars an artist. False when they were not starred.
-pub fn unstar(root: &Path, name: &str) -> Result<bool> {
-    let mut store = load(root);
-    let Some(at) = position(&store.list, name) else {
-        return Ok(false);
-    };
-    store.list.remove(at);
-    save(root, &store)?;
-    Ok(true)
-}
-
 /// Records the Deezer id a starred artist resolved to. Nothing happens for one not starred.
+// The artist page (wave 3) is the first caller.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn set_id(root: &Path, name: &str, id: u64) -> Result<()> {
     let mut store = load(root);
     let Some(at) = position(&store.list, name) else {
@@ -217,13 +253,18 @@ mod tests {
         dir
     }
 
+    // Every track in one folder, for the tests about grouping rather than about where tracks are.
+    fn grouped<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Vec<Artist> {
+        group(pairs.into_iter().map(|(artist, album)| (artist, album, Path::new("F"), true)))
+    }
+
     fn counts(found: &[Artist]) -> Vec<(&str, usize, usize)> {
         found.iter().map(|a| (a.name.as_str(), a.tracks, a.albums)).collect()
     }
 
     #[test]
     fn a_featured_credit_counts_towards_the_lead_artist_only() {
-        let found = group([
+        let found = grouped([
             ("Massive Attack", "Mezzanine"),
             ("Massive Attack feat. Elizabeth Fraser", "Mezzanine"),
             ("Massive Attack (ft. Tracey Thorn)", "Protection"),
@@ -234,7 +275,7 @@ mod tests {
 
     #[test]
     fn a_band_name_with_an_ampersand_slash_comma_or_with_is_kept_whole() {
-        let found = group([
+        let found = grouped([
             ("AC/DC", "Back in Black"),
             ("Simon & Garfunkel", "Bookends"),
             ("Earth, Wind & Fire", "I Am"),
@@ -246,37 +287,37 @@ mod tests {
 
     #[test]
     fn a_name_of_punctuation_alone_is_an_artist_and_not_every_such_artist() {
-        let found = group([("!!!", "Myth Takes"), ("+/-", "Xs on Your Eyes")]);
+        let found = grouped([("!!!", "Myth Takes"), ("+/-", "Xs on Your Eyes")]);
         assert_eq!(found.len(), 2);
         let dir = root("punct");
-        assert!(star(&dir, "!!!").unwrap());
-        assert!(star(&dir, "+/-").unwrap());
-        assert!(!unstar(&dir, "???").unwrap());
-        assert_eq!(favourites(&dir).len(), 2);
+        assert!(toggle(&dir, "!!!").unwrap());
+        assert!(toggle(&dir, "+/-").unwrap());
+        assert!(toggle(&dir, "???").unwrap(), "a third punctuation name unstarred one of the others");
+        assert_eq!(favourites(&dir).len(), 3);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
     fn case_and_accents_do_not_split_an_artist_and_the_usual_spelling_is_shown() {
-        let found = group([("bjork", "Post"), ("Björk", "Post"), ("BJÖRK", "Homogenic"), ("Björk", "Debut")]);
+        let found = grouped([("bjork", "Post"), ("Björk", "Post"), ("BJÖRK", "Homogenic"), ("Björk", "Debut")]);
         assert_eq!(counts(&found), [("Björk", 4, 3)]);
     }
 
     #[test]
     fn a_tie_between_spellings_goes_to_the_first_seen() {
-        let found = group([("Sigur Rós", "()"), ("Sigur Ros", "()")]);
+        let found = grouped([("Sigur Rós", "()"), ("Sigur Ros", "()")]);
         assert_eq!(found[0].name, "Sigur Rós");
     }
 
     #[test]
     fn an_untagged_track_has_no_artist_and_a_missing_album_is_not_an_album() {
-        let found = group([("", "Loose"), ("Low", ""), ("Low", "Things We Lost in the Fire")]);
+        let found = grouped([("", "Loose"), ("Low", ""), ("Low", "Things We Lost in the Fire")]);
         assert_eq!(counts(&found), [("Low", 2, 1)]);
     }
 
     #[test]
     fn most_tracks_first_then_by_name() {
-        let found = group([("Can", "Tago Mago"), ("Neu!", "Neu!"), ("Can", "Ege Bamyasi"), ("Faust", "IV")]);
+        let found = grouped([("Can", "Tago Mago"), ("Neu!", "Neu!"), ("Can", "Ege Bamyasi"), ("Faust", "IV")]);
         let names: Vec<&str> = found.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, ["Can", "Faust", "Neu!"]);
     }
@@ -305,13 +346,11 @@ mod tests {
     }
 
     #[test]
-    fn a_star_is_kept_once_under_any_spelling_and_an_unstar_removes_it() {
+    fn a_second_star_under_another_spelling_unstars_the_same_artist() {
         let dir = root("star");
-        assert!(star(&dir, "Björk").unwrap());
-        assert!(!star(&dir, "bjork").unwrap());
+        assert!(toggle(&dir, "Björk").unwrap());
         assert_eq!(favourites(&dir), [Favourite { name: "Björk".into(), id: None }]);
-        assert!(unstar(&dir, "BJORK").unwrap());
-        assert!(!unstar(&dir, "Björk").unwrap());
+        assert!(!toggle(&dir, "BJORK").unwrap());
         assert!(favourites(&dir).is_empty());
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -319,9 +358,9 @@ mod tests {
     #[test]
     fn a_resolved_id_survives_a_reload_and_a_later_star() {
         let dir = root("id");
-        star(&dir, "Can").unwrap();
+        toggle(&dir, "Can").unwrap();
         set_id(&dir, "can", 3184).unwrap();
-        star(&dir, "Neu!").unwrap();
+        toggle(&dir, "Neu!").unwrap();
         set_id(&dir, "Faust", 1).unwrap();
         assert_eq!(
             favourites(&dir),
@@ -333,9 +372,9 @@ mod tests {
     #[test]
     fn a_name_that_would_break_the_file_is_refused() {
         let dir = root("refuse");
-        assert!(star(&dir, "A\tB").is_err());
-        assert!(star(&dir, "A\nB").is_err());
-        assert!(star(&dir, "  ").is_err());
+        assert!(toggle(&dir, "A\tB").is_err());
+        assert!(toggle(&dir, "A\nB").is_err());
+        assert!(toggle(&dir, "  ").is_err());
         assert!(!dir.join(FILE).exists());
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -343,8 +382,8 @@ mod tests {
     #[test]
     fn a_name_starting_with_a_hash_or_backslash_round_trips_and_is_not_a_header() {
         let dir = root("hash");
-        star(&dir, "#1 Dads").unwrap();
-        star(&dir, "\\Backslash").unwrap();
+        toggle(&dir, "#1 Dads").unwrap();
+        toggle(&dir, "\\Backslash").unwrap();
         assert_eq!(
             favourites(&dir),
             [Favourite { name: "#1 Dads".into(), id: None }, Favourite { name: "\\Backslash".into(), id: None }]
@@ -360,7 +399,7 @@ mod tests {
             favourites(&dir),
             [Favourite { name: "Can".into(), id: Some(3184) }, Favourite { name: "Neu!".into(), id: None }]
         );
-        star(&dir, "Faust").unwrap();
+        toggle(&dir, "Faust").unwrap();
         let text = std::fs::read_to_string(dir.join(FILE)).unwrap();
         assert!(text.starts_with("#checked\t2026-10-01\n"), "{text}");
         std::fs::remove_dir_all(&dir).unwrap();
@@ -392,7 +431,10 @@ mod tests {
             std::fs::remove_dir_all(&dir).unwrap();
             return;
         }
-        assert_eq!(counts(&index(&dir)), [("Can", 2, 2)]);
+        let found = index(&dir);
+        assert_eq!(counts(&found), [("Can", 2, 2)]);
+        // Counted once, but Road holds it too, and Enter has to find both folders.
+        assert_eq!(found[0].folders, [dir.join("Gym"), dir.join("Road")]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -407,4 +449,16 @@ mod tests {
         assert_eq!(counts(&index(&dir)), [("Can", 2, 1)]);
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[test]
+    fn starred_artists_come_first_and_one_gone_from_the_library_keeps_a_row() {
+        let dir = root("rows");
+        toggle(&dir, "neu!").unwrap();
+        toggle(&dir, "Faust").unwrap();
+        let index = grouped([("Can", "Tago Mago"), ("Can", "Ege Bamyasi"), ("Neu!", "Neu!")]);
+        let found: Vec<(String, usize, bool)> = rows(&dir, &index).into_iter().map(|r| (r.name, r.tracks, r.starred)).collect();
+        assert_eq!(found, [("Neu!".to_string(), 1, true), ("Faust".to_string(), 0, true), ("Can".to_string(), 2, false)]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
 }

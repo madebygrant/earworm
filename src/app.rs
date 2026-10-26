@@ -358,6 +358,8 @@ pub enum View {
     Playlist,
     // Every track in the library, fuzzy-filtered, for filling a custom playlist.
     Pick,
+    // Every artist the library's tags name, starred ones first. Reached by `b` from the library.
+    Artists,
 }
 
 /// One track of a custom playlist as the screen shows it.
@@ -380,6 +382,30 @@ pub struct CustomView {
     pub rows: Vec<PlaylistRow>,
     pub cursor: usize,
     pub scroll: usize,
+}
+
+/// One artist on the artists screen, as the worker counted them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArtistRow {
+    pub name: String,
+    pub tracks: usize,
+    pub albums: usize,
+    pub starred: bool,
+    /// Where their tracks are, for Enter to narrow the library to.
+    pub folders: Vec<PathBuf>,
+}
+
+/// The artists screen. `cursor` is a position in `rows`, which the filter narrows as a view.
+#[derive(Clone, Debug, Default)]
+pub struct ArtistsView {
+    pub rows: Vec<ArtistRow>,
+    pub cursor: usize,
+    pub scroll: usize,
+    // Its own, not the library's `filter`: `snap` checks every cursor against that one.
+    pub query: String,
+    pub typing: bool,
+    // False until the worker's first answer, so an empty screen can say it is still reading.
+    pub loaded: bool,
 }
 
 // The track picker behind `N`. UI state only: the worker is not waiting on it.
@@ -476,6 +502,10 @@ pub enum Cmd {
     DeletePlaylist(String),
     PlayPlaylist(String),
     Export(crate::export::Target),
+    /// The artists screen's rows, read from the tags.
+    Artists,
+    /// Star an artist, or unstar one already starred. By name: the rows reorder when a star moves one.
+    Star(String),
 }
 
 /* A question the UI asks on its own account. Nothing is blocked on the
@@ -610,6 +640,8 @@ pub enum Msg {
     Select(PathBuf),
     /// A search's marked tracks were added to a list, so they are not marks any more.
     FoundUnmark,
+    /// The artists screen's rows. `focus` is the artist to land on, since starring moves a row.
+    Artists { rows: Vec<ArtistRow>, focus: Option<String> },
     /// A list was just made: open the track picker with it as the target.
     PickTracks(String),
     /// A list changed its name, so the one cliamp is on keeps its marker.
@@ -895,6 +927,15 @@ pub fn off_format(shelf: &Shelf, format: &str) -> usize {
    Short-circuited on the name, and the filenames are lowercased per call
    rather than kept twice: this runs over every folder on every frame, and a
    second copy of every filename in the library is the costlier of the two. */
+/// The row a cursor at `at` should be on: itself when it shows, the closest that does when not, and
+/// unchanged when nothing shows.
+fn nearest(rows: &[usize], at: usize) -> usize {
+    if rows.contains(&at) {
+        return at;
+    }
+    rows.iter().copied().min_by_key(|pos| pos.abs_diff(at)).unwrap_or(at)
+}
+
 pub fn shelf_matches(shelf: &Shelf, needle: &str) -> bool {
     shelf.name.to_lowercase().contains(needle)
         || shelf
@@ -1004,6 +1045,7 @@ pub struct App {
     /// The custom playlist's screen, which has its own cursor like the library does.
     pub custom: CustomView,
     pub pick: PickView,
+    pub artists: ArtistsView,
     // The search screen's matches, computed once per frame by `draw` so the header, the band and the list read one answer.
     pub found_cache: Vec<crate::picker::Hit>,
     // Tracks marked on the search screen for `P`, by folder and filename like the picker's.
@@ -1025,6 +1067,9 @@ pub struct App {
     /// `review` is the track list's: neither word is in a folder's name, and
     /// a folder with no answer is a playlist, which no query can say.
     pub only: Option<crate::manifest::Kind>,
+    /// Narrows the library to one artist's folders, set by Enter on the artists screen. Folders and not a
+    /// query, because filenames are rewritten by `clean` and a substring of a name is in other names.
+    pub by_artist: Option<(String, Vec<PathBuf>)>,
     /// Which order the library is in. Not applied to `library` itself, which
     /// stays as the worker built it: `shelf` is a position in that, so a
     /// re-sorted vector would move the row out from under the cursor.
@@ -1142,6 +1187,7 @@ impl App {
             typing_filter: false,
             review: false,
             only: None,
+            by_artist: None,
             sort: Sort::default(),
             marked: HashSet::new(),
             busy: false,
@@ -1159,6 +1205,7 @@ impl App {
             shelf_scroll: 0,
             found_scroll: 0,
             pick: PickView::default(),
+            artists: ArtistsView::default(),
             found_cache: Vec::new(),
             found_marks: crate::picker::Marks::default(),
             from_found: false,
@@ -1434,6 +1481,14 @@ impl App {
             }
             Msg::PickTracks(name) => self.open_picker(name),
             Msg::FoundUnmark => self.found_marks.clear(),
+            Msg::Artists { rows, focus } => {
+                let keep = focus.or_else(|| self.artist_selected().map(|r| r.name.clone()));
+                self.artists.rows = rows;
+                self.artists.loaded = true;
+                if let Some(at) = keep.and_then(|name| self.artists.rows.iter().position(|r| r.name == name)) {
+                    self.artists.cursor = at;
+                }
+            }
             Msg::Select(path) => {
                 if let Some(at) = self.library.iter().position(|s| s.path == path) {
                     self.shelf = at;
@@ -1808,6 +1863,93 @@ impl App {
         self.view == View::Library && self.prompt.is_none() && !self.busy
     }
 
+    pub fn can_artists(&self) -> bool {
+        self.view == View::Artists && self.prompt.is_none() && !self.busy
+    }
+
+    // On `artists::key`, so the query merges spellings the way the rows were merged: `bjork` finds "Björk".
+    fn artist_keeps(&self, row: &ArtistRow) -> bool {
+        let query = crate::artists::key(&self.artists.query);
+        query.is_empty() || crate::artists::key(&row.name).contains(&query)
+    }
+
+    /// Positions in `artists.rows` the query keeps, in order.
+    pub fn artist_rows(&self) -> Vec<usize> {
+        (0..self.artists.rows.len()).filter(|at| self.artist_keeps(&self.artists.rows[*at])).collect()
+    }
+
+    /// Filtered out means not selected, as on the track list.
+    pub fn artist_selected(&self) -> Option<&ArtistRow> {
+        self.artists.rows.get(self.artists.cursor).filter(|r| self.artist_keeps(r))
+    }
+
+    fn artist_snap(&mut self) {
+        let rows = self.artist_rows();
+        self.artists.cursor = nearest(&rows, self.artists.cursor).min(self.artists.rows.len().saturating_sub(1));
+    }
+
+    pub fn artist_move(&mut self, down: bool, by: usize) {
+        let rows = self.artist_rows();
+        let Some(at) = rows.iter().position(|r| *r == self.artists.cursor) else {
+            self.artist_snap();
+            return;
+        };
+        let next = if down { (at + by).min(rows.len() - 1) } else { at.saturating_sub(by) };
+        self.artists.cursor = rows[next];
+    }
+
+    pub fn artist_jump(&mut self, last: bool) {
+        let rows = self.artist_rows();
+        if let Some(at) = if last { rows.last() } else { rows.first() } {
+            self.artists.cursor = *at;
+        }
+    }
+
+    /// Types into the artists screen's own query, never the library's: one box would move both cursors.
+    pub fn artist_query(&mut self, edit: impl FnOnce(&mut String)) {
+        edit(&mut self.artists.query);
+        self.artist_snap();
+    }
+
+    /// `b` on the library.
+    pub fn open_artists(&mut self) {
+        self.view = View::Artists;
+        self.send(Cmd::Artists);
+    }
+
+    /// Enter on an artist: the library narrowed to the folders holding their tracks.
+    // The folders the index read their tags in, not a match on filenames: those say `AC-DC` for AC/DC, and
+    // "Can" is inside "Scandal". The library's query and kind go, or they could hide every one of them.
+    pub fn artist_folders(&mut self) {
+        let Some(row) = self.artist_selected() else {
+            return;
+        };
+        if row.folders.is_empty() {
+            let name = row.name.clone();
+            self.say(format!("no folder holds a track by {name} now  ·  * unstars them"));
+            return;
+        }
+        self.by_artist = Some((row.name.clone(), row.folders.clone()));
+        self.filter.clear();
+        self.typing_filter = false;
+        self.only = None;
+        self.view = View::Library;
+        self.snap();
+    }
+
+    /// `*` on the track list: stars the lead artist of the track under the cursor.
+    pub fn star_track_artist(&mut self) {
+        let Some(track) = self.selected().and_then(|index| self.tracks.iter().find(|t| t.index == index)) else {
+            return;
+        };
+        let name = crate::lookup::lead_artist(&track.artist);
+        if name.is_empty() {
+            self.say("this track has no artist to star  ·  e sets one");
+            return;
+        }
+        self.send(Cmd::Star(name));
+    }
+
     /// Keys for a custom playlist's screen. Exclusive with `can_command`, `can_browse` and `can_find` on `View`.
     pub fn can_playlist(&self) -> bool {
         self.view == View::Playlist && self.prompt.is_none() && !self.busy
@@ -2050,7 +2192,7 @@ impl App {
         self.typing_filter
             || !self.filter.is_empty()
             || (self.view == View::Tracks && self.review)
-            || (self.view == View::Library && self.only.is_some())
+            || (self.view == View::Library && (self.only.is_some() || self.by_artist.is_some()))
     }
 
     /// Whether anything is narrowing the track list, for the keys that clear
@@ -2062,7 +2204,11 @@ impl App {
     /// The same question asked of the library, where the second narrowing is
     /// the kind rather than the review.
     pub fn shelf_narrowed(&self) -> bool {
-        !self.filter.is_empty() || self.only.is_some()
+        !self.filter.is_empty() || self.only.is_some() || self.by_artist.is_some()
+    }
+
+    pub fn artist_shows(&self, shelf: &Shelf) -> bool {
+        self.by_artist.as_ref().is_none_or(|(_, folders)| folders.contains(&shelf.path))
     }
 
     /* Silence is the playlist answer everywhere else in this feature, so a
@@ -2149,7 +2295,7 @@ impl App {
             .library
             .iter()
             .enumerate()
-            .filter(|(_, s)| self.kind_shows(s) && (needle.is_empty() || shelf_matches(s, &needle)))
+            .filter(|(_, s)| self.kind_shows(s) && self.artist_shows(s) && (needle.is_empty() || shelf_matches(s, &needle)))
             .map(|(pos, _)| pos)
             .collect();
         match self.sort {
@@ -2573,19 +2719,12 @@ impl App {
     pub fn snap(&mut self) {
         self.shelf_snap();
         self.found_snap();
+        self.artist_snap();
         // Nothing is hidden, so the cursor is already on a row that shows.
         if !self.narrowed() {
             return;
         }
-        let rows = self.rows();
-        if rows.is_empty() || rows.contains(&self.cursor) {
-            return;
-        }
-        self.cursor = rows
-            .iter()
-            .copied()
-            .min_by_key(|pos| pos.abs_diff(self.cursor))
-            .unwrap_or(self.cursor);
+        self.cursor = nearest(&self.rows(), self.cursor);
     }
 
     /* Following is what drags the cursor to whatever is downloading, so a
@@ -2694,16 +2833,8 @@ impl App {
     /// every key still acts on.
     fn shelf_snap(&mut self) {
         let rows = self.shelf_rows();
-        if rows.is_empty() || rows.contains(&self.shelf) {
-            // Still clamped, since the library is rebuilt after every sync.
-            self.shelf = self.shelf.min(self.library.len().saturating_sub(1));
-            return;
-        }
-        self.shelf = rows
-            .iter()
-            .copied()
-            .min_by_key(|pos| pos.abs_diff(self.shelf))
-            .unwrap_or(self.shelf);
+        // Still clamped, since the library is rebuilt after every sync.
+        self.shelf = nearest(&rows, self.shelf).min(self.library.len().saturating_sub(1));
     }
 
     /* Filtering to the guesses hides the tracks around them, and the run they
@@ -2774,6 +2905,7 @@ impl App {
         self.typing_filter = false;
         self.review = false;
         self.only = None;
+        self.by_artist = None;
         self.snap();
     }
 

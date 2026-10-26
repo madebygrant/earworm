@@ -82,6 +82,12 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         draw_picker_bar(frame, app, rule);
     } else if app.picking.is_some() {
         draw_pick_bar(frame, app, rule);
+    } else if app.view == View::Artists {
+        if app.artists.typing || !app.artists.query.is_empty() {
+            draw_artists_bar(frame, app, rule);
+        } else {
+            draw_rule(frame, rule, p);
+        }
     } else if app.filtering() {
         draw_filter_bar(frame, app, rule);
     } else {
@@ -545,8 +551,8 @@ fn draw_filter_bar(frame: &mut Frame, app: &App, area: Rect) {
                 .sum(),
         ),
         View::Tracks => (app.shown(), app.tracks.len()),
-        // No filter here: the list is the playlist's own order.
-        View::Playlist | View::Pick => (0, 0),
+        // No filter here: the list is the playlist's own order. The artists screen has a band of its own.
+        View::Playlist | View::Pick | View::Artists => (0, 0),
     };
     let caret = if app.typing_filter { "\u{2588}" } else { "" };
     let word = match (app.view, app.only, app.review) {
@@ -562,7 +568,11 @@ fn draw_filter_bar(frame: &mut Frame, app: &App, area: Rect) {
     };
     // A predicate has no text to show, so it says what it kept instead.
     let quiet = app.filter.is_empty() && !app.typing_filter;
-    let left = if quiet && app.review {
+    let artist = app.by_artist.as_ref().filter(|_| app.view == View::Library).map(|(name, _)| name);
+    let left = if let Some(name) = artist {
+        let typed = if quiet { String::new() } else { format!("  /{}{}", app.filter, caret) };
+        format!(" ARTIST  {name}{typed}")
+    } else if quiet && app.review {
         " REVIEW  tracks nothing confirmed".to_string()
     } else if quiet && app.only.is_some() {
         format!(" {word}  the rest of the library is hidden")
@@ -584,6 +594,17 @@ fn draw_filter_bar(frame: &mut Frame, app: &App, area: Rect) {
         format!("{shown} of {total} shown  ·  esc clears ")
     };
     draw_band(frame, area, left, right, p);
+}
+
+fn draw_artists_bar(frame: &mut Frame, app: &App, area: Rect) {
+    let caret = if app.artists.typing { "\u{2588}" } else { "" };
+    let left = format!(" FILTER  /{}{caret}", app.artists.query);
+    let right = if app.artists.typing {
+        "enter keeps  ·  esc clears ".to_string()
+    } else {
+        format!("{} of {} shown  ·  esc clears ", app.artist_rows().len(), app.artists.rows.len())
+    };
+    draw_band(frame, area, left, right, app.theme);
 }
 
 /* Carries the filter too, since the pick band replaces it: a narrowed list
@@ -637,6 +658,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         View::Found if !app.busy => "search".to_string(),
         View::Playlist if !app.busy => "custom playlist".to_string(),
         View::Pick if !app.busy => "pick tracks".to_string(),
+        View::Artists if !app.busy => "artists".to_string(),
         _ => app.stage.clone(),
     };
     spans.push(Span::styled(stage, Style::new().fg(p.text)));
@@ -654,6 +676,11 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
             format!("{} {tracks} in {} {plural}", rows.len(), folders.len()),
             Style::new().fg(p.text),
         ));
+    } else if app.view == View::Artists && app.artists.loaded {
+        let all = app.artists.rows.len();
+        let starred = app.artists.rows.iter().filter(|r| r.starred).count();
+        spans.push(dim("  ·  ", p));
+        spans.push(Span::styled(format!("{all} artists  ·  {starred} starred"), Style::new().fg(p.text)));
     } else if app.view == View::Playlist {
         let (here, all) = (app.custom.rows.iter().filter(|r| r.path.is_some()).count(), app.custom.rows.len());
         let said = if here == all { format!("{all} tracks") } else { format!("{here} of {all} tracks") };
@@ -747,6 +774,7 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
         View::Found => draw_found(frame, app, area),
         View::Playlist => draw_playlist(frame, app, area),
         View::Pick => draw_picker(frame, app, area),
+        View::Artists => draw_artists(frame, app, area),
     }
 }
 
@@ -911,6 +939,49 @@ fn draw_playlist(frame: &mut Frame, app: &mut App, area: Rect) {
     app.custom.scroll = app::scroll_to(app.custom.scroll, cursor, items.len(), area.height as usize);
     let mut state = ListState::default().with_offset(app.custom.scroll);
     state.select(Some(cursor));
+    frame.render_stateful_widget(List::new(items), area, &mut state);
+}
+
+// One row per artist the tags name. The star is a glyph, not a colour, so it reads without colour.
+fn draw_artists(frame: &mut Frame, app: &mut App, area: Rect) {
+    let p = app.theme;
+    let rows = app.artist_rows();
+    if rows.is_empty() {
+        let said = if !app.artists.loaded {
+            " reading the tags in every folder".to_string()
+        } else if app.artists.rows.is_empty() {
+            " no track in the library has an artist tag   esc goes back".to_string()
+        } else {
+            format!(" no artist matches /{}   esc clears", app.filter)
+        };
+        frame.render_widget(Paragraph::new(Line::from(dim(said, p))), area);
+        return;
+    }
+    let width = area.width as usize;
+    app.viewport = area.height as usize;
+    let longest = rows.iter().map(|at| cols(&app.artists.rows[*at].name)).max().unwrap_or(0);
+    let name_width = longest.min(width.saturating_sub(30).max(12));
+    let cursor = app.artists.cursor;
+    let items: Vec<ListItem> = rows
+        .iter()
+        .map(|at| {
+            let row = &app.artists.rows[*at];
+            let name = truncate(&row.name, name_width);
+            let pad = name_width.saturating_sub(cols(&name));
+            let tracks = if row.tracks == 1 { "track" } else { "tracks" };
+            let albums = if row.albums == 1 { "album" } else { "albums" };
+            ListItem::new(Line::from(vec![
+                Span::styled(if *at == cursor { "▌" } else { " " }, Style::new().fg(p.cursor)),
+                Span::styled(if row.starred { " ★" } else { "  " }, Style::new().fg(p.accent)),
+                Span::styled(format!(" {name}"), row_style(*at == cursor, p)),
+                dim(format!("{:pad$}  {:>4} {tracks:<6}  {:>3} {albums}", "", row.tracks, row.albums), p),
+            ]))
+        })
+        .collect();
+    let at = rows.iter().position(|r| *r == cursor).unwrap_or(0);
+    app.artists.scroll = app::scroll_to(app.artists.scroll, at, items.len(), area.height as usize);
+    let mut state = ListState::default().with_offset(app.artists.scroll);
+    state.select(Some(at));
     frame.render_stateful_widget(List::new(items), area, &mut state);
 }
 
@@ -1688,7 +1759,7 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 // Dropped from the library's bar in this order when it is short.
-const LIBRARY_OPTIONAL: [&str; 2] = ["   t find a track", "   S sync"];
+const LIBRARY_OPTIONAL: [&str; 3] = ["   b artists", "   t find a track", "   S sync"];
 
 // The whole library's health in one line, and how many files are missing, which is what colours it.
 fn library_text(app: &App) -> Option<(String, usize)> {
@@ -1783,6 +1854,14 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         hints.push((esc.to_string(), Style::new().fg(p.muted)));
         hints.push(("   F2 marked".to_string(), Style::new().fg(p.muted)));
         hints.push(("   F1 keys".to_string(), Style::new().fg(p.muted)));
+    } else if app.view == View::Artists && app.artists.typing {
+        hints.push(("   enter keeps".to_string(), Style::new().fg(p.accent)));
+        hints.push(("   esc clears".to_string(), Style::new().fg(p.muted)));
+    } else if app.view == View::Artists {
+        hints.push(("   enter their folders".to_string(), Style::new().fg(p.accent)));
+        hints.push(("   * star".to_string(), Style::new().fg(p.muted)));
+        hints.push(("   / filter".to_string(), Style::new().fg(p.muted)));
+        hints.push(("   esc library".to_string(), Style::new().fg(p.muted)));
     } else if app.view == View::Playlist {
         hints.push(("   enter go to source".to_string(), Style::new().fg(p.accent)));
         hints.push(("   a add tracks".to_string(), Style::new().fg(p.muted)));
@@ -1796,11 +1875,13 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         hints.push(("   N create custom playlist".to_string(), Style::new().fg(p.muted)));
         hints.push(("   t find a track".to_string(), Style::new().fg(p.muted)));
         hints.push(("   S sync".to_string(), Style::new().fg(p.muted)));
+        hints.push(("   b artists".to_string(), Style::new().fg(p.muted)));
     } else if !app.tracks.is_empty() && app.picking.is_none() {
         if app.can_command() {
             extra.push(("   e edit".to_string(), Style::new().fg(p.accent)));
             // Not in the help table, which is already as tall as a 24-row terminal allows.
             extra.push(("   P add to a playlist".to_string(), Style::new().fg(p.muted)));
+            extra.push(("   * star".to_string(), Style::new().fg(p.muted)));
             /* Named rather than a bare `u undo`: one level of undo is only
                usable if you can see which level it is holding. */
             if let Some(what) = &app.undoable {
@@ -1848,8 +1929,8 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         Some((text, _)) if app.view == View::Library => cols(&text) + 2,
         _ => TALLY_FLOOR,
     };
-    /* `n` starts a sync and is the key nothing else offers, so it stays. The search and the resync are
-       what a short bar loses, the search first: both are under `h`. */
+    /* `n` starts a sync and is the key nothing else offers, so it stays. The artists, the search and the
+       resync are what a short bar loses, in that order: all three are under `h`. */
     if app.view == View::Library {
         for optional in LIBRARY_OPTIONAL {
             let total: usize = hints.iter().map(|(t, _)| cols(t)).sum();
@@ -1951,6 +2032,15 @@ fn draw_help(frame: &mut Frame, app: &App) {
             rows.push(("play", "p", "hand this list to cliamp"));
         }
         rows.extend([("view", "l", "yt-dlp output"), ("back", "Esc", "the library"), ("quit", "q  ^c", "")]);
+    } else if app.view == View::Artists {
+        rows.extend([
+            ("open", "enter", "the library, narrowed to this artist's folders"),
+            ("star", "*", "star or unstar this artist"),
+            ("find", "/", "filter by name"),
+            ("view", "l", "yt-dlp output"),
+            ("back", "Esc", "the library"),
+            ("quit", "q  ^c", ""),
+        ]);
     } else if app.view == View::Pick {
         rows = vec![
             ("move", "↑ ↓  ^p ^n", ""),
@@ -1983,6 +2073,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("", "E", "copy this to a stick, card or folder"),
             ("find", "/", "filter by name or track"),
             ("", "t", "every matching track, across the library"),
+            ("", "b", "every artist, and the ones you starred"),
             ("", "o", "order: name, last synced, most missing"),
             ("", "a", "kind: every folder, albums, playlists, custom"),
         ]);
@@ -5592,7 +5683,63 @@ mod tests {
             .collect();
         assert!(top.contains("earworm  ·"), "{top:?}");
     }
+
+    fn artists_app() -> App {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        app.view = View::Artists;
+        app
+    }
+
+    #[test]
+    fn the_artists_screen_says_it_is_reading_until_the_rows_arrive() {
+        let mut app = artists_app();
+        assert!(screen_of(&mut app, 80, 10).contains("reading the tags"));
+    }
+
+    #[test]
+    fn an_artist_row_shows_its_star_its_counts_and_the_cursor() {
+        let mut app = artists_app();
+        let row = |name: &str, tracks, albums, starred| crate::app::ArtistRow { name: name.into(), tracks, albums, starred, folders: Vec::new() };
+        app.apply(Msg::Artists { rows: vec![row("Can", 12, 3, true), row("Neu!", 1, 1, false)], focus: None });
+        app.artist_move(true, 1);
+        let screen = screen_of(&mut app, 80, 10);
+        let line = |name: &str| screen.lines().find(|l| l.contains(name)).unwrap_or_default().to_string();
+        assert!(screen.lines().next().unwrap().contains("2 artists  ·  1 starred"), "{screen}");
+        assert!(line("Can").contains('★') && line("Can").contains("12 tracks") && line("Can").contains("3 albums"), "{screen}");
+        assert!(!line("Neu!").contains('★') && line("Neu!").contains("1 track ") && line("Neu!").contains("1 album"), "{screen}");
+        assert!(line("Neu!").starts_with('▌') && !line("Can").starts_with('▌'), "{screen}");
+    }
+
+    // The scroll offset is where a view-mapping bug shows: the `▌` is drawn from the cursor, not the list.
+    #[test]
+    fn a_filtered_artist_list_shows_only_its_matches_and_the_band_counts_them() {
+        let mut app = artists_app();
+        let rows = (0..30).map(|n| crate::app::ArtistRow { name: format!("Band {n:02}"), tracks: 1, albums: 1, starred: false, folders: Vec::new() });
+        app.apply(Msg::Artists { rows: rows.collect(), focus: None });
+        app.artist_query(|q| q.push_str("band 2"));
+        // The first match, not the last: `ListState` clamps, so a last-row answer passes either way.
+        app.artist_jump(false);
+        let screen = screen_of(&mut app, 80, 10);
+        assert!(screen.contains("10 of 30 shown"), "{screen}");
+        assert!(!screen.contains("Band 01"), "{screen}");
+        let cursor = screen.lines().find(|l| l.starts_with('▌')).unwrap_or_default();
+        assert!(cursor.contains("Band 20"), "{screen}");
+    }
+
+    // A narrowing with no text in the box still has to say it is there, or Esc clears something unseen.
+    #[test]
+    fn a_library_narrowed_to_an_artist_names_them_in_the_band() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        app.apply(Msg::Library { shelves: vec![kinded("Rock", None), kinded("Jazz", None)], show: true });
+        app.by_artist = Some(("AC/DC".into(), vec!["/music/Rock".into()]));
+        app.snap();
+        let screen = screen_of(&mut app, 80, 10);
+        let band = screen.lines().nth(1).unwrap_or_default();
+        assert!(band.contains("ARTIST  AC/DC") && band.contains("1 of 2 shown"), "{screen}");
+        assert!(screen.contains("Rock") && !screen.contains("Jazz"), "{screen}");
+    }
 }
-
-
-

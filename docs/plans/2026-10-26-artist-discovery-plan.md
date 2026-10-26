@@ -55,7 +55,7 @@ and the store format is the expensive thing to change later.
 Exit: `cargo test` passes with the new grouping tests, and breaking
 `split_artists` use in the grouping makes at least one fail.
 
-## 2. Artists screen
+## 2. Artists screen [done 2026-10-26]
 
 Why here: it's useful on its own with no network, and it's the entry point
 every later wave hangs off.

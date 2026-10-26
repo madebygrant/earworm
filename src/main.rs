@@ -588,6 +588,11 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         handle_library_key(app, code, mods);
         return;
     }
+    // Its own query box, so the library's `typing_filter` never applies here.
+    if app.view == View::Artists {
+        handle_artists_key(app, code, mods);
+        return;
+    }
     // Before the track keys, which are where an unhandled key would otherwise fall to.
     if app.view == View::Playlist {
         handle_playlist_key(app, code, mods);
@@ -690,6 +695,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             let targets = app.targets();
             app.send(Cmd::Artist(targets));
         }
+        KeyCode::Char('*') if app.can_command() => app.star_track_artist(),
         // The marks, or the row under the cursor, into a custom playlist.
         KeyCode::Char('P') if app.can_command() => {
             let picks = app.picks();
@@ -779,6 +785,60 @@ fn handle_found_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 app.send(Cmd::AddToPlaylist(picks, None));
             }
         }
+        _ => {}
+    }
+}
+
+// The artists screen. Enter leaves for the library narrowed to the artist, which is where their folders open.
+fn handle_artists_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    if app.artists.typing {
+        match code {
+            KeyCode::Esc => {
+                app.artists.typing = false;
+                app.artist_query(String::clear);
+            }
+            KeyCode::Enter => app.artists.typing = false,
+            KeyCode::Char('c') if ctrl => app.quit = true,
+            KeyCode::Char('u') if ctrl => app.artist_query(String::clear),
+            // The same word delete the library's box takes.
+            KeyCode::Char('w') if ctrl => app.artist_query(|q| {
+                let cut = q.trim_end().rfind(' ').map_or(0, |i| i + 1);
+                q.truncate(cut);
+            }),
+            KeyCode::Backspace => app.artist_query(|q| {
+                q.pop();
+            }),
+            KeyCode::Down => app.artist_move(true, 1),
+            KeyCode::Up => app.artist_move(false, 1),
+            KeyCode::Char(c) if !ctrl => app.artist_query(|q| q.push(c)),
+            _ => {}
+        }
+        return;
+    }
+    match code {
+        KeyCode::Char('c') if ctrl => app.quit = true,
+        KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
+        KeyCode::Char('q') => app.quit = true,
+        // The query first, as on every other screen, then back to the library.
+        KeyCode::Esc if !app.artists.query.is_empty() => app.artist_query(String::clear),
+        KeyCode::Esc => app.view = View::Library,
+        KeyCode::Char('/') => app.artists.typing = true,
+        KeyCode::Char('l') => app.show_logs = !app.show_logs,
+        KeyCode::Char('j') | KeyCode::Down => app.artist_move(true, 1),
+        KeyCode::Char('k') | KeyCode::Up => app.artist_move(false, 1),
+        KeyCode::PageDown => app.artist_move(true, app.viewport.max(1)),
+        KeyCode::PageUp => app.artist_move(false, app.viewport.max(1)),
+        KeyCode::Char('d') if ctrl => app.artist_move(true, app.viewport.max(1)),
+        KeyCode::Char('u') if ctrl => app.artist_move(false, app.viewport.max(1)),
+        KeyCode::Char('g') => app.artist_jump(false),
+        KeyCode::Char('G') => app.artist_jump(true),
+        KeyCode::Char('*') if app.can_artists() => {
+            if let Some(name) = app.artist_selected().map(|r| r.name.clone()) {
+                app.send(Cmd::Star(name));
+            }
+        }
+        KeyCode::Enter if app.can_artists() => app.artist_folders(),
         _ => {}
     }
 }
@@ -963,6 +1023,7 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
            preview says which tracks one folder at a time; this is the whole
            library at once, which is what fifty folders needs. */
         KeyCode::Char('t') if app.can_browse() => app.find_tracks(),
+        KeyCode::Char('b') if app.can_browse() => app.open_artists(),
         /* Name is what the worker hands over; the other two answer the
            question this screen is for, which is what needs syncing. */
         KeyCode::Char('o') => {
@@ -2425,5 +2486,146 @@ mod tests {
         handle_key(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
         assert!(app.marked.is_empty(), "the answer also marked a track");
         assert_eq!(app.confirm, None);
+    }
+
+    fn artist(name: &str, tracks: usize, starred: bool) -> crate::app::ArtistRow {
+        crate::app::ArtistRow { name: name.into(), tracks, albums: 1, starred, folders: Vec::new() }
+    }
+
+    // On the artists screen with these rows, the worker's `Cmd::Artists` taken and the keys live again.
+    fn on_artists(shelves: Vec<crate::app::Shelf>, rows: Vec<crate::app::ArtistRow>) -> (App, mpsc::Receiver<Cmd>) {
+        let (mut app, cmds) = browsing(shelves);
+        handle_key(&mut app, KeyCode::Char('b'), KeyModifiers::NONE);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::Artists)));
+        app.apply(app::Msg::Artists { rows, focus: None });
+        app.apply(app::Msg::Idle);
+        (app, cmds)
+    }
+
+    // One shared box made `snap` move the library's cursor to whatever folder matched an artist query.
+    #[test]
+    fn an_artist_query_leaves_the_librarys_filter_and_cursor_alone() {
+        let (mut app, _cmds) = on_artists(
+            vec![shelf("Can Live", &["01 A.opus"]), shelf("Focus", &["01 B.opus"]), shelf("Sleep", &["01 C.opus"])],
+            vec![artist("Can", 3, false)],
+        );
+        app.view = View::Library;
+        app.shelf = 2;
+        handle_key(&mut app, KeyCode::Char('b'), KeyModifiers::NONE);
+        app.apply(app::Msg::Idle);
+        handle_key(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
+        type_keys(&mut app, "can");
+        assert!(app.filter.is_empty(), "the artist query went into the library's box");
+        assert_eq!(app.shelf, 2, "the library cursor moved to a folder matching the artist query");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.view, View::Library);
+        assert_eq!(app.shelf, 2);
+    }
+
+    // AC/DC's files say `AC-DC`, and "Can" is inside "Scandal": only the folders the tags were read in will do.
+    #[test]
+    fn enter_on_an_artist_narrows_the_library_to_the_folders_their_tags_are_in() {
+        let mut acdc = artist("AC/DC", 1, false);
+        acdc.folders = vec!["/music/Rock".into()];
+        let (mut app, _cmds) = on_artists(
+            vec![shelf("Rock", &["01 - AC-DC - Back in Black.opus"]), shelf("Scandal Hits", &["01 - Scandal - X.opus"])],
+            vec![artist("Can", 1, false), acdc],
+        );
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.view, View::Library);
+        assert_eq!(app.shelf_rows(), vec![0]);
+        assert_eq!(app.selected_shelf().map(|s| s.name.as_str()), Some("Rock"));
+        // Esc unwinds it with the other narrowings.
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.by_artist.is_none());
+        assert_eq!(app.shelf_rows().len(), 2);
+    }
+
+    // A screen of nothing behind a narrowed library is a dead end, so the key says why and stays.
+    #[test]
+    fn enter_on_an_artist_with_no_folder_left_stays_and_says_so() {
+        let (mut app, _cmds) = on_artists(vec![shelf("Focus", &["01 - Can - A.opus"])], vec![artist("Ghost", 0, true)]);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.view, View::Artists);
+        assert!(app.by_artist.is_none());
+        assert!(app.stage.contains("no folder"), "{}", app.stage);
+    }
+
+    // Filtered so the row under the cursor is not the first one, which a lookup by position would get wrong.
+    #[test]
+    fn star_sends_the_artist_the_query_left_under_the_cursor() {
+        let (mut app, cmds) = on_artists(vec![], vec![artist("Can", 3, false), artist("Neu!", 1, false)]);
+        handle_key(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
+        type_keys(&mut app, "neu");
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('*'), KeyModifiers::NONE);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::Star(name)) if name == "Neu!"));
+    }
+
+    // The rows were merged on `artists::key`, so the query has to be too.
+    #[test]
+    fn an_artist_query_without_accents_finds_the_merged_row() {
+        let (mut app, _cmds) = on_artists(vec![], vec![artist("Can", 3, false), artist("Björk", 2, false)]);
+        handle_key(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
+        type_keys(&mut app, "bjork");
+        assert_eq!(app.artist_selected().map(|r| r.name.as_str()), Some("Björk"));
+    }
+
+    // Starring moves the row to the top, and the cursor goes with the artist, not the position.
+    #[test]
+    fn the_cursor_follows_a_starred_artist_to_its_new_row() {
+        let (mut app, _cmds) = on_artists(vec![], vec![artist("Can", 3, false), artist("Neu!", 1, false)]);
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        app.apply(app::Msg::Artists { rows: vec![artist("Neu!", 1, true), artist("Can", 3, false)], focus: Some("Neu!".into()) });
+        assert_eq!(app.artist_selected().map(|r| r.name.as_str()), Some("Neu!"));
+        // A refresh with no focus keeps the artist too.
+        app.apply(app::Msg::Artists { rows: vec![artist("Can", 3, true), artist("Neu!", 1, true)], focus: None });
+        assert_eq!(app.artist_selected().map(|r| r.name.as_str()), Some("Neu!"));
+    }
+
+    // A rebuild can drop the row the cursor was on. `apply` snaps after every message, which is what keeps it.
+    #[test]
+    fn rows_that_shrink_under_the_cursor_leave_it_on_a_row() {
+        let (mut app, _cmds) = on_artists(vec![], vec![artist("Can", 3, false), artist("Neu!", 1, false), artist("Ghost", 0, true)]);
+        app.artist_jump(true);
+        app.apply(app::Msg::Artists { rows: vec![artist("Can", 3, false)], focus: None });
+        assert_eq!(app.artist_selected().map(|r| r.name.as_str()), Some("Can"));
+    }
+
+    #[test]
+    fn esc_unwinds_the_artist_query_then_goes_back_to_the_library() {
+        let (mut app, _cmds) = on_artists(vec![], vec![artist("Can", 3, false)]);
+        app.only = Some(crate::manifest::Kind::Album);
+        handle_key(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
+        type_keys(&mut app, "x");
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.view, View::Artists);
+        assert!(app.artists.query.is_empty() && !app.artists.typing);
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.view, View::Library);
+        assert_eq!(app.only, Some(crate::manifest::Kind::Album), "leaving the artists screen dropped the library's kind");
+    }
+
+    #[test]
+    fn star_on_a_track_sends_its_lead_artist() {
+        let (tx, cmds) = mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        let mut track = crate::app::Track::new(1, "a".into(), "01 - A.opus".into(), "/music/F/01 - A.opus".into());
+        track.artist = "Can feat. Damo Suzuki".into();
+        app.tracks = vec![track];
+        app.done = Some(Ok(String::new()));
+        handle_key(&mut app, KeyCode::Char('*'), KeyModifiers::NONE);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::Star(name)) if name == "Can"));
+    }
+
+    #[test]
+    fn the_artists_screen_takes_none_of_the_other_screens_keys() {
+        let (app, _cmds) = on_artists(vec![shelf("Focus", &["01 A.opus"])], vec![artist("Can", 3, false)]);
+        assert!(app.can_artists());
+        assert!(!app.can_browse() && !app.can_command() && !app.can_find() && !app.can_playlist() && !app.can_pick());
     }
 }
