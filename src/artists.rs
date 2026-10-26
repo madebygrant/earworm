@@ -79,7 +79,7 @@ pub fn group<'a>(tracks: impl IntoIterator<Item = (&'a str, &'a str, &'a Path, b
         .map(|one| {
             // `rev` so a tie goes to the spelling seen first: `max_by_key` keeps the last of equals.
             let name = one.spellings.iter().rev().max_by_key(|(_, n)| *n).map(|(s, _)| s.clone()).unwrap_or_default();
-            let held: Vec<(String, usize)> = one.albums.into_iter().map(|(_, title, n)| (title, n)).collect();
+            let held: Vec<(String, usize)> = one.albums.into_iter().map(|(_, album, n)| (album, n)).collect();
             Artist { name, tracks: one.tracks, albums: held.len(), folders: one.folders, held }
         })
         .collect()
@@ -108,7 +108,7 @@ pub fn index(dir: &Path) -> Vec<Artist> {
                 first = !recording.iter().flatten().any(|r| counted.contains(r));
                 counted.extend(recording.into_iter().flatten());
             }
-            if let Ok((artist, mut album)) = tag::artist_album(&path) {
+            if let Ok((artist, _, mut album)) = tag::brief(&path) {
                 if named_album.as_deref() == Some(normalise(&album).as_str()) {
                     album.clear();
                 }
@@ -117,6 +117,23 @@ pub fn index(dir: &Path) -> Vec<Artist> {
         }
     }
     group(read.iter().map(|(artist, album, folder, first)| (artist.as_str(), album.as_str(), folder.as_path(), *first)))
+}
+
+/// The titles the library holds of one artist's album, read from their folders when a download needs them.
+// Not kept in the index: every title of every track for the session, to serve one key on one page.
+pub fn owned_titles(index: &[Artist], artist: &str, album: &str) -> Vec<String> {
+    let (who, want) = (key(artist), crate::discover::album_key(album));
+    let Some(found) = index.iter().find(|a| key(&a.name) == who) else {
+        return Vec::new();
+    };
+    found
+        .folders
+        .iter()
+        .flat_map(|folder| worker::audio_files(folder))
+        .filter_map(|file| tag::brief(&file).ok())
+        .filter(|(a, _, al)| key(&lead_artist(a)) == who && crate::discover::album_key(al) == want)
+        .map(|(_, title, _)| title)
+        .collect()
 }
 
 /// The artists screen's rows: starred first, then by track count.
@@ -466,4 +483,25 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+
+    // Read off disk at download time, and only the artist's own tracks on that album.
+    #[test]
+    fn owned_titles_are_the_artists_tracks_on_that_album() {
+        let dir = root("owned");
+        let folder = dir.join("Mix");
+        std::fs::create_dir_all(&folder).unwrap();
+        let tracks = [("01.opus", "Can feat. Damo", "Vitamin C", "Ege Bamyasi"), ("02.opus", "Can", "Spoon", "Spoon"), ("03.opus", "Neu!", "Isi", "Ege Bamyasi")];
+        for (file, artist, title, album) in tracks {
+            if crate::worker::tests::tiny_opus(&folder.join(file)).is_none() {
+                eprintln!("no ffmpeg, skipping");
+                std::fs::remove_dir_all(&dir).unwrap();
+                return;
+            }
+            let fields = tag::Fields { artist: artist.into(), title: title.into(), album: album.into(), year: None };
+            tag::set_fields(&folder.join(file), &fields).unwrap();
+        }
+        let index = vec![Artist { name: "Can".into(), tracks: 2, albums: 2, folders: vec![folder], held: Vec::new() }];
+        assert_eq!(owned_titles(&index, "Can", "Ege Bamyasi (Remastered)"), ["Vitamin C"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

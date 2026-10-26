@@ -1924,6 +1924,10 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         hints.push(("   enter keeps".to_string(), Style::new().fg(p.accent)));
         hints.push(("   esc clears".to_string(), Style::new().fg(p.muted)));
     } else if app.view == View::Artist {
+        // Offered only when Enter would fetch now: locked or busy, the key is not advertised.
+        if app.can_get() {
+            hints.push(("   enter get".to_string(), Style::new().fg(p.accent)));
+        }
         // Only when it would change something: nothing hidden, or nothing loaded yet, is a dead key.
         if app.page.all_kinds {
             hints.push(("   a albums and EPs".to_string(), Style::new().fg(p.accent)));
@@ -2120,6 +2124,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
         ]);
     } else if app.view == View::Artist {
         rows.extend([
+            ("get", "enter", "find a missing release on YouTube Music and download it"),
             ("show", "a", "albums and EPs, or every release"),
             ("open", "o", "the library, narrowed to their folders"),
             ("view", "l", "yt-dlp output"),

@@ -156,3 +156,19 @@ macOS and cliamp v2.3.0.
 - cliamp `playlist import` accepts `../Folder/file` entries and lists both
   tracks (checked with real files). It does not check that an entry exists:
   an import of two missing files reported two tracks.
+
+## Finding a missing album on YouTube Music
+
+Measured on 2026-10-26 with yt-dlp 2026.08.19, against ten albums from a real
+library: Alestorm, Chvrches twice, Coldplay twice, DPR IAN, Johnny Cash, NF
+twice and Stray Kids. A search of `music.youtube.com/search?q=<artist>
+<album>#albums` lists `MPREb_` browse ids with no title, and resolving one
+redirects to its `OLAK5uy_` playlist with the title (`Album - Sundowning`) and
+the track count. The first candidate was the right record in ten of ten. Each
+lookup took 4 to 20 seconds, the slowest being the first two of the session.
+
+The same search also lists instrumental and deluxe editions of one record as
+separate albums, which is why the title has to match on `album_key` rather than
+taking the first hit, and why "instrumental" keeps a part from being read as
+an edition. A plain YouTube search was not tried: it returns videos, and an
+album needs the playlist.

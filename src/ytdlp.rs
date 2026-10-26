@@ -116,6 +116,79 @@ fn usable_chapters(printed: &str) -> Vec<Chapter> {
         .collect()
 }
 
+/// A YouTube Music album found for a release: the playlist to sync, and what the confirm shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AlbumHit {
+    pub url: String,
+    pub title: String,
+    pub tracks: usize,
+    /// The channel of its first track, which for an Art Track album is the artist.
+    pub by: String,
+}
+
+// Each call is one page fetch, measured at 4 to 20 seconds for a whole lookup (docs/history.md). Short
+// enough that four of them on a dead connection are two minutes, not four.
+const ALBUM_LOOKUP: std::time::Duration = std::time::Duration::from_secs(30);
+const ALBUM_CANDIDATES: &str = "3";
+
+pub fn find_album(artist: &str, title: &str, cancel: &std::sync::atomic::AtomicBool) -> Result<Option<AlbumHit>, String> {
+    find_album_with("yt-dlp", artist, title, cancel)
+}
+
+/// Searches YouTube Music's albums for the release: the first by the same artist whose title is the same
+/// record. `Err` is a search that failed, with yt-dlp's own words; `Ok(None)` is one that found nothing.
+// The search lists browse ids with no title, so each candidate costs a resolve. The first was right in ten
+// of ten measured; the rest are for a title another act also used.
+pub(crate) fn find_album_with(bin: &str, artist: &str, title: &str, cancel: &std::sync::atomic::AtomicBool) -> Result<Option<AlbumHit>, String> {
+    let query = crate::lookup::encode(&format!("{artist} {title}"));
+    let search = format!("https://{}/search?q={query}#albums", crate::worker::MUSIC_HOST);
+    let found = flat(bin, &["--playlist-end", ALBUM_CANDIDATES, "--print", "%(id)s", &search])?;
+    for id in found.lines().filter(|id| id.starts_with("MPREb_")) {
+        if cancel.load(Ordering::SeqCst) {
+            return Ok(None);
+        }
+        let browse = format!("https://{}/browse/{id}", crate::worker::MUSIC_HOST);
+        let line = flat(bin, &["--playlist-end", "1", "--print", "%(playlist_id)s\t%(playlist_title)s\t%(playlist_count)s\t%(channel)s", &browse])?;
+        if let Some(hit) = line.lines().next().and_then(|l| album_line(l, artist, title)) {
+            return Ok(Some(hit));
+        }
+    }
+    Ok(None)
+}
+
+fn flat(bin: &str, args: &[&str]) -> Result<String, String> {
+    let mut cmd = Command::new(bin);
+    cmd.arg("--flat-playlist").args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let out = crate::lookup::run_bounded(&mut cmd, ALBUM_LOOKUP).ok_or("yt-dlp did not answer in time")?;
+    if !out.status.success() {
+        let said = String::from_utf8_lossy(&out.stderr);
+        return Err(said.lines().rfind(|l| !l.trim().is_empty()).unwrap_or("yt-dlp failed").trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+// `OLAK5uy_…<TAB>Album - Title<TAB>12<TAB>Channel`. The URL keeps the Music host, so `settle` refuses it while
+// locked. A channel that names nobody (`NA`) is not held against it: the title still has to match.
+fn album_line(line: &str, artist: &str, want: &str) -> Option<AlbumHit> {
+    let mut parts = line.split('\t');
+    let (id, shown, count) = (parts.next()?, parts.next()?, parts.next()?);
+    let by = parts.next().unwrap_or("NA").trim();
+    if !id.starts_with("OLAK5uy_") {
+        return None;
+    }
+    let (theirs, ours) = (crate::artists::key(by), crate::artists::key(artist));
+    if by != "NA" && !by.is_empty() && !theirs.contains(&ours) && !ours.contains(&theirs) {
+        return None;
+    }
+    let title = ["Album - ", "EP - ", "Single - "].iter().find_map(|p| shown.strip_prefix(p)).unwrap_or(shown);
+    (crate::discover::album_key(title) == crate::discover::album_key(want)).then(|| AlbumHit {
+        url: format!("https://{}/playlist?list={id}", crate::worker::MUSIC_HOST),
+        title: title.to_string(),
+        tracks: count.trim().parse().unwrap_or(0),
+        by: by.to_string(),
+    })
+}
+
 /// Resolves ids, titles and destination paths from the playlist listing alone.
 /// One request instead of one per video, which is a second rather than half a
 /// minute; the paths match what the real download computes.
@@ -807,5 +880,54 @@ mod tests {
         let two = "printf 'a\\tNA\\tA\\t9\\tNA\\t%s\\t/x/A/01 - A.opus\\nb\\tNA\\tB\\t9\\tNA\\t%s\\t/x/B/01 - B.opus\\n' \"$CH\" \"$CH\"";
         assert!(scan(two).chapters.is_empty(), "two videos were read as one album");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_album_line_matches_the_release_and_keeps_the_music_host() {
+        let hit = album_line("OLAK5uy_abc\tAlbum - Sundowning (Deluxe)\t12\tSleep Token", "Sleep Token", "Sundowning").unwrap();
+        assert_eq!(hit.url, "https://music.youtube.com/playlist?list=OLAK5uy_abc");
+        assert_eq!((hit.title.as_str(), hit.tracks, hit.by.as_str()), ("Sundowning (Deluxe)", 12, "Sleep Token"));
+        assert_eq!(album_line("OLAK5uy_abc\tAlbum - Sundowning (Instrumental)\t12\tSleep Token", "Sleep Token", "Sundowning"), None);
+        assert_eq!(album_line("PLnotanalbum\tSundowning\t12\tSleep Token", "Sleep Token", "Sundowning"), None);
+    }
+
+    // "Greatest Hits" is everybody's album; only the artist's own will do.
+    #[test]
+    fn an_album_by_another_artist_is_not_the_one_asked_for() {
+        assert_eq!(album_line("OLAK5uy_q\tAlbum - Greatest Hits\t17\tQueen", "Foo Fighters", "Greatest Hits"), None);
+        assert!(album_line("OLAK5uy_f\tAlbum - Greatest Hits\t16\tFoo Fighters", "Foo Fighters", "Greatest Hits").is_some());
+        assert!(album_line("OLAK5uy_n\tAlbum - Greatest Hits\t16\tNA", "Foo Fighters", "Greatest Hits").is_some());
+    }
+
+    // The search lists browse ids, each resolved in turn until one is the record asked for.
+    #[test]
+    fn the_album_search_resolves_candidates_until_one_is_the_record() {
+        let dir = std::env::temp_dir().join(format!("earworm-findalbum-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("yt-dlp");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\nfor a in \"$@\"; do last=\"$a\"; done\ncase \"$last\" in\n\
+             *search*) printf 'MPREb_one\\nMPREb_two\\n' ;;\n\
+             *MPREb_one) printf 'OLAK5uy_one\\tAlbum - Sundowning (Instrumental)\\t12\\tSleep Token\\n' ;;\n\
+             *MPREb_two) printf 'OLAK5uy_two\\tAlbum - Sundowning\\t12\\tSleep Token\\n' ;;\n\
+             *MPREb_bad) echo 'ERROR: [youtube:tab] blocked' >&2; exit 1 ;;\n\
+             esac\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let bin = bin.display().to_string();
+        let cancel = std::sync::atomic::AtomicBool::new(false);
+        let hit = find_album_with(&bin, "Sleep Token", "Sundowning", &cancel).unwrap();
+        assert_eq!(hit.map(|h| h.url), Some("https://music.youtube.com/playlist?list=OLAK5uy_two".to_string()));
+        // A failure is not a search that found nothing, and yt-dlp's last line says why.
+        std::fs::write(&bin, "#!/bin/sh\necho 'ERROR: [youtube:tab] blocked' >&2\nexit 1\n").unwrap();
+        assert_eq!(find_album_with(&bin, "Sleep Token", "Sundowning", &cancel), Err("ERROR: [youtube:tab] blocked".into()));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

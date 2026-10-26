@@ -410,6 +410,14 @@ pub struct AlbumRow {
     pub of: Option<usize>,
 }
 
+impl AlbumRow {
+    /// Known to be whole. A held release whose length never came is not: it may be two tracks of twelve, and
+    /// the pick gate leaves what is already here unmarked anyway.
+    pub fn complete(&self) -> bool {
+        self.have > 0 && self.of.is_some_and(|of| self.have >= of)
+    }
+}
+
 /// One artist's page. `cursor` is a position in `rows`, which `all_kinds` narrows as a view.
 #[derive(Clone, Debug, Default)]
 pub struct ArtistPage {
@@ -539,6 +547,8 @@ pub enum Cmd {
     Star(String),
     /// An artist's Deezer releases, marked against the library.
     Discography(String),
+    /// Find a release on YouTube Music and download it as a new playlist. By title, as Deezer names it.
+    GetAlbum { artist: String, title: String },
 }
 
 /* A question the UI asks on its own account. Nothing is blocked on the
@@ -678,6 +688,9 @@ pub enum Msg {
     /// An artist page's releases, or why there are none. `name` is the page it was asked for, so an answer
     /// for a page already left is dropped.
     Discography { name: String, found: Option<(String, u64)>, rows: Result<Vec<AlbumRow>, String> },
+    /// Tracks the next pick gate opens unmarked: what a partial album already has. Sent just before `Pick`,
+    /// so the marks are right from the first frame the gate is open.
+    PickHeld(Vec<usize>),
     /// One release's length, sent after the page as each request lands.
     Counted { name: String, id: u64, of: usize },
     /// A list was just made: open the track picker with it as the target.
@@ -1098,6 +1111,8 @@ pub struct App {
     pub pick: PickView,
     pub artists: ArtistsView,
     pub page: ArtistPage,
+    // The tracks the next pick gate leaves unmarked, from `Msg::PickHeld`; used once.
+    pick_held: Vec<usize>,
     // The search screen's matches, computed once per frame by `draw` so the header, the band and the list read one answer.
     pub found_cache: Vec<crate::picker::Hit>,
     // Tracks marked on the search screen for `P`, by folder and filename like the picker's.
@@ -1259,6 +1274,7 @@ impl App {
             pick: PickView::default(),
             artists: ArtistsView::default(),
             page: ArtistPage::default(),
+            pick_held: Vec::new(),
             found_cache: Vec::new(),
             found_marks: crate::picker::Marks::default(),
             from_found: false,
@@ -1545,6 +1561,7 @@ impl App {
                     self.page.cursor = self.page_rows().first().copied().unwrap_or(0);
                 }
             }
+            Msg::PickHeld(held) => self.pick_held = held,
             Msg::Counted { name, id, of } => {
                 if self.page.name == name {
                     for row in self.page.rows.iter_mut().filter(|r| r.id == id) {
@@ -1628,8 +1645,10 @@ impl App {
                     /* Nothing the pick gate could ask about: already on
                        disk, departed, or a file the playlist never had. */
                     .filter(|t| !matches!(t.status, Status::Have | Status::Gone | Status::Local))
+                    .filter(|t| !self.pick_held.contains(&t.index))
                     .map(|t| t.index)
                     .collect();
+                self.pick_held.clear();
                 self.follow = false;
                 self.picking = Some(reply);
             }
@@ -2039,6 +2058,32 @@ impl App {
     /// Whether an expiring message is up, which the screens with a fixed header word give way to.
     pub fn flashing(&self) -> bool {
         self.flash_until.is_some()
+    }
+
+    pub fn page_selected(&self) -> Option<&AlbumRow> {
+        self.page.rows.get(self.page.cursor).filter(|r| self.page_keeps(r))
+    }
+
+    /// Whether Enter would fetch the release under the cursor: possibly incomplete, and the unlock on.
+    pub fn can_get(&self) -> bool {
+        self.can_page()
+            && self.unlocked.has(crate::cheats::Feature::Music)
+            && self.page_selected().is_some_and(|r| !r.complete())
+    }
+
+    /// Enter on a release. The worker checks the unlock again: this only saves a round trip and says why.
+    pub fn get_album(&mut self) {
+        let Some(row) = self.page_selected() else {
+            return;
+        };
+        let title = row.title.clone();
+        if row.complete() {
+            self.say(format!("{title} is already here  ·  o shows its folder"));
+        } else if !self.unlocked.has(crate::cheats::Feature::Music) {
+            self.say(format!("{}  ·  albums come from YouTube Music", crate::cheats::LOCKED));
+        } else {
+            self.send(Cmd::GetAlbum { artist: self.page.name.clone(), title });
+        }
     }
 
     pub fn page_kinds(&mut self) {

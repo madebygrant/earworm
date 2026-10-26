@@ -898,12 +898,14 @@ fn resync(
 /// What kind of pass this is, as named fields: two loose bools at six call
 /// sites is one transposition away from an unattended walk of the library
 /// reconciling folders nobody is watching.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Pass {
     /// `gate` is separate from `cfg.pick` because `--resync` walks the whole
     /// library unattended: a question per folder is the one thing that would
     /// stop it, and the user asked for the sync, not for each playlist in it.
     gate: bool,
+    /// Titles already in the library, for an album only part of which is: the gate opens with them unmarked.
+    owned: Vec<String>,
     /// The one pass that matches files on disk to videos by name and tag
     /// rather than by id: the sync that gives a URL to a folder earworm did
     /// not download. Every later sync of that folder is an ordinary one,
@@ -915,6 +917,16 @@ impl Pass {
     fn plain(gate: bool) -> Self {
         Pass {
             gate,
+            owned: Vec::new(),
+            attaching: false,
+        }
+    }
+
+    // Forced through the gate when some of it is owned: unmarking those is the point.
+    fn album(gate: bool, owned: Vec<String>) -> Self {
+        Pass {
+            gate: gate || !owned.is_empty(),
+            owned,
             attaching: false,
         }
     }
@@ -930,6 +942,7 @@ impl Pass {
     fn attaching() -> Self {
         Pass {
             gate: true,
+            owned: Vec::new(),
             attaching: true,
         }
     }
@@ -1001,7 +1014,7 @@ fn pipeline(
     let _ = tx.send(Msg::Tracks(tracks.clone()));
 
     // Held on to, because `to_bring` has to honour the same answer.
-    let picked = pass.gate.then(|| ask_which(tx, tracks)).flatten();
+    let picked = pass.gate.then(|| ask_which(tx, tracks, &pass.owned)).flatten();
     // After the gate, so a track nobody picked is not copied either.
     let copied = copy_known(cfg, tx, tracks, &known);
 
@@ -2442,9 +2455,14 @@ fn adopt_refetched(
 /// Returns what the user chose, because the conversion has to honour it too.
 /// `None` is a gate that never got an answer, which is not the same as one
 /// that came back empty.
-fn ask_which(tx: &Sender<Msg>, tracks: &mut [Track]) -> Option<HashSet<usize>> {
+fn ask_which(tx: &Sender<Msg>, tracks: &mut [Track], owned: &[String]) -> Option<HashSet<usize>> {
     let (reply_tx, reply_rx) = mpsc::channel();
     let _ = tx.send(Msg::Stage("choose tracks".into()));
+    // Ahead of `Pick`, so the gate is never open, even for a frame, with what the library holds still marked.
+    let held = owned_indices(tracks, owned);
+    if !held.is_empty() {
+        let _ = tx.send(Msg::PickHeld(held));
+    }
     if tx.send(Msg::Pick(reply_tx)).is_err() {
         return None;
     }
@@ -2469,6 +2487,22 @@ fn ask_which(tx: &Sender<Msg>, tracks: &mut [Track]) -> Option<HashSet<usize>> {
         });
     }
     Some(picked)
+}
+
+/// Tracks waiting to download whose title is one the library already holds, matched as `mark_twins` matches.
+// By title and not id: the copy the library holds came from another playlist, as another video. Not on
+// `album_key`, which would call "Song (Extended Version)" the "Song" already here.
+fn owned_indices(tracks: &[Track], owned: &[String]) -> Vec<usize> {
+    let owned: HashSet<String> = owned.iter().map(|t| title_keys(t).0).filter(|k| !k.is_empty()).collect();
+    tracks
+        .iter()
+        .filter(|t| t.status == Status::Pending)
+        .filter(|t| {
+            let (whole, tail) = title_keys(&t.name);
+            owned.contains(&whole) || (!tail.is_empty() && owned.contains(&tail))
+        })
+        .map(|t| t.index)
+        .collect()
 }
 
 /// The identify-and-write pass. `wanted` limits it to a set of track indices,
@@ -3117,7 +3151,7 @@ fn serve(
         /* Some commands edit what is on screen and some replace it. Only the
            ones that went to the network have an outcome worth a question at
            the end, which is what `synced` carries. */
-        if !matches!(cmd, Cmd::Artists | Cmd::Star(_) | Cmd::Discography(_)) {
+        if !matches!(cmd, Cmd::Artists | Cmd::Star(_) | Cmd::Discography(_) | Cmd::GetAlbum { .. }) {
             known = None;
         }
         let synced = match cmd {
@@ -3132,6 +3166,15 @@ fn serve(
                 let _ = tx.send(Msg::Discography { name: name.clone(), found, rows });
                 discover::count_later(name, pending, &deezer, tx.clone());
                 None
+            }
+            Cmd::GetAlbum { artist, title } => {
+                let index = known.get_or_insert_with(|| artists::index(&cfg.dir));
+                let owned = artists::owned_titles(index, &artist, &title);
+                let find = |artist: &str, title: &str| ytdlp::find_album(artist, title, cancel);
+                let got = get_album(cfg, tx, cancel, tracks, &asker, find, &artist, &title, owned);
+                // The download changed what the library holds, or the album would still read missing.
+                known = None;
+                got
             }
             Cmd::Star(name) => {
                 match artists::toggle(&cfg.dir, &name) {
@@ -3372,6 +3415,12 @@ fn start_url(
         let _ = tx.send(Msg::Flash("cancelled".into()));
         return None;
     };
+    let gate = cfg.pick;
+    Some(start_link(cfg, tx, cancel, tracks, asker, link, Pass::plain(gate)))
+}
+
+// What a new URL and a missing album both do once they have a link.
+fn start_link(cfg: &mut Config, tx: &Sender<Msg>, cancel: &AtomicBool, tracks: &mut Vec<Track>, asker: &Asker, link: Link, pass: Pass) -> Result<String> {
     let _ = tx.send(Msg::Restart);
     tracks.clear();
     /* Load-bearing: a new playlist has no folder of its own yet, and the last
@@ -3382,8 +3431,64 @@ fn start_url(
        the download, Esc keeping whatever the session already had. A failed
        save reports rather than aborting the URL that was just typed. */
     report(tx, set_format(cfg, tx, asker));
-    let gate = cfg.pick;
-    Some(pipeline(cfg, tx, cancel, tracks, Pass::plain(gate)))
+    pipeline(cfg, tx, cancel, tracks, pass)
+}
+
+/// Enter on a release the library lacks some or all of: find it on YouTube Music, ask, then sync it as a new
+/// playlist. `owned` is the titles already here, which the pick gate leaves unmarked.
+#[allow(clippy::too_many_arguments)]
+fn get_album(
+    cfg: &mut Config,
+    tx: &Sender<Msg>,
+    cancel: &AtomicBool,
+    tracks: &mut Vec<Track>,
+    asker: &Asker,
+    find: impl Fn(&str, &str) -> Result<Option<ytdlp::AlbumHit>, String>,
+    artist: &str,
+    title: &str,
+    owned: Vec<String>,
+) -> Option<Result<String>> {
+    let link = album_link(cfg, tx, asker, find, artist, title)?;
+    let pass = Pass::album(cfg.pick, owned);
+    Some(start_link(cfg, tx, cancel, tracks, asker, link, pass))
+}
+
+// Every step that can stop the download, each saying why. The unlock is checked before the search, and the
+// found URL goes through `settle` too, so the gate holds even if this check were lost.
+fn album_link(cfg: &Config, tx: &Sender<Msg>, asker: &Asker, find: impl Fn(&str, &str) -> Result<Option<ytdlp::AlbumHit>, String>, artist: &str, title: &str) -> Option<Link> {
+    if !cfg.unlocked.has(Feature::Music) {
+        let _ = tx.send(Msg::Flash(format!("{LOCKED}  ·  albums come from YouTube Music")));
+        return None;
+    }
+    let _ = tx.send(Msg::Stage(format!("finding {title} on YouTube Music")));
+    let hit = match find(artist, title) {
+        Ok(Some(hit)) => hit,
+        Ok(None) => {
+            let _ = tx.send(Msg::Flash(format!("YouTube Music has no album called {title} by {artist}  ·  n takes a URL")));
+            return None;
+        }
+        Err(why) => {
+            let _ = tx.send(Msg::Log(format!("album search: {why}")));
+            let _ = tx.send(Msg::Flash("the YouTube Music search failed  ·  l shows why".into()));
+            return None;
+        }
+    };
+    // Who YouTube Music says made it, since a title alone is what two acts can share.
+    let by = if hit.by == "NA" || hit.by.is_empty() { "an unnamed channel" } else { &hit.by };
+    let note = format!("{} by {by}  ·  {} tracks  ·  from YouTube Music", hit.title, hit.tracks);
+    let options = vec!["no, leave it".to_string(), format!("yes, download {}", hit.title)];
+    if asker.choose_noted(&format!("Download {title} by {artist}?"), &note, options) != Some(1) {
+        let _ = tx.send(Msg::Flash("nothing downloaded".into()));
+        return None;
+    }
+    match settle(&hit.url, &cfg.unlocked) {
+        // Named for the record, not yt-dlp's `Album - Title`; `import_folder` keeps it off a folder that is another playlist's.
+        Ok(link) => Some(Link { name: Some(hit.title), ..link }),
+        Err(why) => {
+            let _ = tx.send(Msg::Flash(why));
+            None
+        }
+    }
 }
 
 /// Syncs the playlist that is open against the URL its manifest recorded,
@@ -6132,7 +6237,7 @@ pub mod tests {
                 }
             }
         });
-        ask_which(&tx, &mut tracks);
+        ask_which(&tx, &mut tracks, &[]);
         drop(tx);
         answer.join().unwrap();
 
@@ -6154,7 +6259,7 @@ pub mod tests {
         let (tx, rx) = channel();
         drop(rx);
         let mut gone_before = track();
-        ask_which(&tx, &mut gone_before);
+        ask_which(&tx, &mut gone_before, &[]);
         assert_eq!(gone_before[0].status, Status::Pending, "the ask never landed");
 
         let (tx, rx) = channel();
@@ -6167,7 +6272,7 @@ pub mod tests {
             }
         });
         let mut gone_after = track();
-        ask_which(&tx, &mut gone_after);
+        ask_which(&tx, &mut gone_after, &[]);
         hangs_up.join().unwrap();
         assert_eq!(gone_after[0].status, Status::Pending, "the answer never came");
     }
@@ -10056,6 +10161,96 @@ mod chapter_tests {
         assert_eq!(listed.len(), 1, "a chapter was added as a departure");
         assert!(listed.iter().all(|t| t.status != Status::Gone));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    fn hit() -> ytdlp::AlbumHit {
+        ytdlp::AlbumHit { url: "https://music.youtube.com/playlist?list=OLAK5uy_x".into(), title: "Tago Mago".into(), tracks: 7, by: "Can".into() }
+    }
+
+    // Runs `album_link` while this thread answers its one question with `answer`.
+    fn album_asked(cfg: &Config, answer: Reply) -> (Option<Link>, Vec<Msg>) {
+        let (tx, rx) = mpsc::channel();
+        let asker = Asker { tx: tx.clone(), enabled: true };
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| album_link(cfg, &tx, &asker, |_, _| Ok(Some(hit())), "Can", "Tago Mago"));
+            let mut seen = Vec::new();
+            let mut answer = Some(answer);
+            while !worker.is_finished() || seen.is_empty() {
+                match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+                    Ok(Msg::Ask(_, reply)) => {
+                        let _ = reply.send(answer.take().unwrap_or(Reply::Cancel));
+                    }
+                    Ok(other) => seen.push(other),
+                    Err(_) if worker.is_finished() => break,
+                    Err(_) => {}
+                }
+            }
+            seen.extend(rx.try_iter());
+            (worker.join().unwrap(), seen)
+        })
+    }
+
+    fn flashes(seen: &[Msg]) -> Vec<String> {
+        seen.iter().filter_map(|m| if let Msg::Flash(t) = m { Some(t.clone()) } else { None }).collect()
+    }
+
+    // Without the unlock nothing reaches YouTube Music, not even the search.
+    #[test]
+    fn a_locked_album_says_so_and_never_searches() {
+        let cfg = crate::worker::tests::config(true);
+        let (tx, rx) = mpsc::channel();
+        // Disabled, so a broken gate fails on `searched` rather than hanging on a question nobody answers.
+        let asker = Asker { tx: tx.clone(), enabled: false };
+        let searched = std::cell::Cell::new(false);
+        let link = album_link(&cfg, &tx, &asker, |_, _| { searched.set(true); Ok(Some(hit())) }, "Can", "Tago Mago");
+        assert!(link.is_none() && !searched.get());
+        let seen: Vec<Msg> = rx.try_iter().collect();
+        assert!(flashes(&seen).iter().any(|f| f.contains(LOCKED)), "{:?}", flashes(&seen));
+    }
+
+    #[test]
+    fn an_unlocked_album_is_confirmed_before_it_is_settled() {
+        let cfg = crate::worker::tests::config(true);
+        cfg.unlocked.grant(Feature::Music);
+        let (link, _) = album_asked(&cfg, Reply::Choice(1));
+        let link = link.unwrap();
+        assert_eq!(link.url, hit().url);
+        assert_eq!(link.name.as_deref(), Some("Tago Mago"), "the folder took yt-dlp's `Album - ` title");
+        let (link, seen) = album_asked(&cfg, Reply::Choice(0));
+        assert!(link.is_none());
+        assert!(flashes(&seen).iter().any(|f| f.contains("nothing downloaded")), "{:?}", flashes(&seen));
+    }
+
+    // A partial album's gate opens with what the library holds unmarked, matched as twins are.
+    #[test]
+    fn owned_titles_are_found_among_the_tracks_to_download() {
+        let dir = Path::new("/music/Album");
+        let mut tracks: Vec<Track> = ["Mushroom", "Can - Oh Yeah", "Halleluhwah", "Mushroom (Extended Version)"]
+            .iter()
+            .enumerate()
+            .map(|(i, t)| Track::new(i + 1, format!("v{i}"), (*t).to_string(), dir.join(format!("{t}.opus"))))
+            .collect();
+        for t in &mut tracks {
+            t.status = Status::Pending;
+        }
+        let owned = vec!["Mushroom".to_string(), "Oh Yeah".to_string(), "Peking O".to_string()];
+        // An extended version is another recording, so it stays marked.
+        assert_eq!(owned_indices(&tracks, &owned), vec![1, 2]);
+        assert!(Pass::album(false, owned).gate, "a partial album skipped the gate that unmarks its owned tracks");
+        assert!(!Pass::album(false, Vec::new()).gate);
+    }
+
+    // A failed search is not "no such album", and what yt-dlp said goes to the log the flash points at.
+    #[test]
+    fn a_failed_album_search_says_so_and_logs_why() {
+        let cfg = crate::worker::tests::config(true);
+        cfg.unlocked.grant(Feature::Music);
+        let (tx, rx) = mpsc::channel();
+        let asker = Asker { tx: tx.clone(), enabled: false };
+        assert!(album_link(&cfg, &tx, &asker, |_, _| Err("ERROR: blocked".into()), "Can", "Tago Mago").is_none());
+        let seen: Vec<Msg> = rx.try_iter().collect();
+        assert!(flashes(&seen).iter().any(|f| f.contains("search failed")), "{:?}", flashes(&seen));
+        assert!(seen.iter().any(|m| matches!(m, Msg::Log(l) if l.contains("ERROR: blocked"))));
     }
 
     fn tone(at: &Path, seconds: u32) -> bool {

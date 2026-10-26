@@ -849,7 +849,7 @@ fn handle_artists_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     }
 }
 
-// One artist's discography. Nothing here acts on a release yet, so the keys move, narrow and leave.
+// One artist's discography. Enter fetches a release the library lacks, behind the YouTube Music unlock.
 fn handle_page_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     match code {
@@ -869,6 +869,7 @@ fn handle_page_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('G') => app.page_jump(true),
         KeyCode::Char('a') => app.page_kinds(),
         KeyCode::Char('o') if app.can_page() => app.artist_folders(),
+        KeyCode::Enter if app.can_page() => app.get_album(),
         _ => {}
     }
 }
@@ -2732,5 +2733,62 @@ mod tests {
         assert_eq!(app.page.rows[0].of, None);
         app.apply(app::Msg::Counted { name: "Can".into(), id: 42, of: 7 });
         assert_eq!(app.page.rows[0].of, Some(7));
+    }
+
+    fn on_page(rows: Vec<crate::app::AlbumRow>) -> (App, mpsc::Receiver<Cmd>) {
+        let (mut app, cmds) = on_artists(vec![], vec![artist("Can", 3, false)]);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::Discography(_))));
+        app.apply(app::Msg::Discography { name: "Can".into(), found: None, rows: Ok(rows) });
+        app.apply(app::Msg::Idle);
+        (app, cmds)
+    }
+
+    #[test]
+    fn enter_on_a_missing_album_asks_the_worker_only_once_unlocked() {
+        let (mut app, cmds) = on_page(vec![album("Future Days", "album", 0, None)]);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(cmds.try_recv().is_err(), "a locked get reached the worker");
+        assert!(app.stage.contains(crate::cheats::LOCKED), "{}", app.stage);
+        app.unlocked.grant(crate::cheats::Feature::Music);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::GetAlbum { artist, title }) if artist == "Can" && title == "Future Days"));
+    }
+
+    #[test]
+    fn enter_on_a_whole_album_fetches_nothing_and_a_partial_one_does() {
+        let (mut app, cmds) = on_page(vec![album("Tago Mago", "album", 7, Some(7)), album("Ege Bamyasi", "album", 2, Some(7))]);
+        app.unlocked.grant(crate::cheats::Feature::Music);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(cmds.try_recv().is_err(), "a whole album was fetched again");
+        assert!(app.stage.contains("already here"), "{}", app.stage);
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::GetAlbum { title, .. }) if title == "Ege Bamyasi"));
+    }
+
+    // Sent just before `Pick`, so the gate is never open with the owned tracks still marked.
+    #[test]
+    fn the_pick_gate_opens_with_owned_tracks_unmarked() {
+        let (tx, _cmds) = mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.tracks = (1..=3).map(|i| crate::app::Track::new(i, format!("v{i}"), format!("T{i}"), format!("/m/{i}.opus").into())).collect();
+        let (reply, _rx) = mpsc::channel();
+        app.apply(app::Msg::PickHeld(vec![2]));
+        app.apply(app::Msg::Pick(reply));
+        let mut marked: Vec<usize> = app.marked.iter().copied().collect();
+        marked.sort_unstable();
+        assert_eq!(marked, [1, 3]);
+    }
+
+    // A count that failed or has not landed is not proof of a whole album: 2 tracks may be 2 of 12.
+    #[test]
+    fn a_held_release_with_no_count_can_still_be_fetched() {
+        let (mut app, cmds) = on_page(vec![album("Ege Bamyasi", "album", 2, None)]);
+        app.unlocked.grant(crate::cheats::Feature::Music);
+        assert!(app.can_get());
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::GetAlbum { title, .. }) if title == "Ege Bamyasi"));
+        assert!(!app.can_get(), "offered while the worker is busy with the last one");
     }
 }

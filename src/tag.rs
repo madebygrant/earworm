@@ -97,9 +97,9 @@ pub fn read(path: &Path) -> Result<Info> {
     })
 }
 
-/// Artist and album only, without the cover art or the audio properties `read` also parses.
+/// Artist, title and album only, without the cover art or the audio properties `read` also parses.
 // The artist index reads every file in the library, and an embedded cover is most of each read.
-pub fn artist_album(path: &Path) -> Result<(String, String)> {
+pub fn brief(path: &Path) -> Result<(String, String, String)> {
     let file = Probe::open(path)
         .context("cannot open file")?
         .options(lofty::config::ParseOptions::new().read_cover_art(false).read_properties(false))
@@ -107,7 +107,7 @@ pub fn artist_album(path: &Path) -> Result<(String, String)> {
         .context("cannot read audio")?;
     let tag = file.primary_tag().or_else(|| file.first_tag());
     let field = |f: fn(&Tag) -> Option<std::borrow::Cow<'_, str>>| tag.and_then(f).unwrap_or_default().to_string();
-    Ok((field(|t| t.artist()), field(|t| t.album())))
+    Ok((field(|t| t.artist()), field(|t| t.title()), field(|t| t.album())))
 }
 
 pub struct Outcome {

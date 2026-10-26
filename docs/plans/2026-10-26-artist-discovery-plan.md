@@ -108,7 +108,7 @@ Why now: this is the feature asked for. It needs waves 1 and 2.
 Exit: the `owned` tests pass and fail when the suffix stripping is removed;
 the screen renders from canned data in `TestBackend`.
 
-## 4. Getting a missing album
+## 4. Getting a missing album [done 2026-10-26]
 
 Why after 3: it acts on what wave 3 shows, and it's the first wave that
 downloads anything.
