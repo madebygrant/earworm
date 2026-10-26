@@ -60,16 +60,16 @@ touch, and failures](images/keys.png)
 | `/` | filter the folders by name, or by a track inside them |
 | `t` | every matching track across the library, flat |
 | `b` | every artist in the library, starred first ([discovery](discovery.md)) |
-| `o` | order: name, last synced, most missing |
+| `s` | sort: name, last synced, most missing |
 | `a` | show every folder, albums only, or playlists only |
 | `p` | play the folder under the cursor in cliamp (needs a playlist file) |
 | `space` | play/pause cliamp |
 | `S` | sync the playlist under the cursor (asks for a URL if it has none) |
 | `R` | sync every playlist |
 | `n` | sync a new URL |
-| `f` | choose the format new downloads arrive in |
 | `^t` | next colour theme, and remember it |
 | `l` | toggle the yt-dlp output pane |
+| `,` | settings, from any screen with a list |
 | `h` `?` | keys and current settings |
 | `q` `Esc` `ctrl+c` | quit |
 
@@ -94,12 +94,22 @@ touch, and failures](images/keys.png)
 | `enter` | get a missing release or the missing top tracks from YouTube Music (once unlocked), or open a related artist's page |
 | `a` | albums and EPs, or every release |
 | `o` | the library, narrowed to their folders |
-| `Esc` | the page before, else the artists |
+| `Esc` | stop a YouTube Music search, else the page before, else the artists |
+
+## Settings
+
+| Key | Action |
+| --- | --- |
+| `j` `k` `↑` `↓` `g` `G` | move |
+| `enter` `space` | switch it, or move to the next choice |
+| `Esc` `,` | back to the screen you came from |
+
+What each row means is in [configuration](configuration.md#the-settings-screen).
 
 ## The details
 
 `Esc` never ends the session, and does nothing at all while a run or a command
-is going. `q` and `ctrl+c` are the way out. `q` asks before it kills a
+is going, except on an artist page, where it stops a YouTube Music search. `q` and `ctrl+c` are the way out. `q` asks before it kills a
 download, since that's the last thing in the tool one keypress can lose. A
 second `q` answers the question, so `qq` never makes you read the box.
 

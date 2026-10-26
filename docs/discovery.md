@@ -59,6 +59,10 @@ For one you own part of, the tracks you already have start unmarked. Top
 tracks land in `<Artist> - Top Tracks`, and a later fetch adds to it. Any it
 couldn't find are listed in the log pane (`l`).
 
+Each top track is its own search, a few seconds apiece. `Esc` stops the search
+after the one under way, and nothing is downloaded. Folder names have `/` and
+`\` turned into `-`, so top tracks for AC/DC land in `AC-DC - Top Tracks`.
+
 ## New releases
 
 Once you've starred someone, earworm checks for their new releases once each

@@ -47,11 +47,11 @@
   cycled the sort and `e` opened a rename. The box could be opened and never
   filled. The `Found` and `Library` branches both carry `!app.typing_filter`
   now, which is what the track list always had by sitting after it.
-- **`t` is library-only, like `space` and `f`, and the track list names the
-  route instead.** The search is about the library rather than the playlist on
+- **`t` is library-only, like `space`, and the track list names the route
+  instead.** The search is about the library rather than the playlist on
   screen, and `T` on the track list already means "look this one up again":
-  two keys a letter apart meaning different searches is the `O`/`o` problem
-  again. So the help there carries an `Esc t` row rather than a key, and only
+  two keys a letter apart meaning different searches is the problem
+  `docs/rules/keys-and-screens.md` names for one letter with two meanings. So the help there carries an `Esc t` row rather than a key, and only
   when there is a library behind the run for it to reach.
 - **`View::Found` is the library's filter asked of the tracks.** The rows say
   which folders hold a match and the preview says which tracks, one folder at

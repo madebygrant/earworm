@@ -13,8 +13,8 @@ cookies), and Opus at a similar rate usually sounds a little better, so choose
 `opus` for the copy closest to the source.
 
 Typing a URL offers the format before the download starts. The choice is
-written to the config, so the next playlist arrives the same way, and `f` on
-the library changes it later.
+written to the config, so the next playlist arrives the same way, and the
+`format` row on the settings screen (`,`) changes it later.
 
 ## Converting what you already have
 

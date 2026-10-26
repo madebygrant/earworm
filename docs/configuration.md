@@ -72,6 +72,21 @@ acoustid_key = "..."                # or use ACOUSTID_API_KEY
 `-L -F` is the quick one. Download and tag from titles, no network lookups, no
 questions.
 
+## The settings screen
+
+`,` on any list opens every setting with its value and where it came from:
+`default`, `config`, the flag that set it, or the environment. Enter or space
+switches one, or moves a choice like the format or the icons on, and writes it
+to the config like `^t` does for the theme. `intro`, `update_check` and
+`achievements` are read once at start, so they say `at start` and take effect
+next time.
+
+A setting a flag turned off stays off: the flag would win again at the next
+start, so the screen says to start without it instead. `dir`, `extra` and the
+AcoustID key are shown and changed only in the file (the key only as `set` or
+`not set`). Changes wait while a download runs, because the worker that
+downloads holds the settings. Under `--no-config` a change lasts the session.
+
 ## Precedence, and one direction only
 
 Flags beat the file, the file beats the defaults. Every flag is a negation, so

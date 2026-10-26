@@ -22,7 +22,7 @@ use crate::playlists;
 use crate::tag::{self, CoverState};
 use crate::ytdlp;
 
-pub fn run(mut cfg: Config, tx: Sender<Msg>, cancel: Arc<AtomicBool>, cmds: Receiver<Cmd>) {
+pub fn run(mut cfg: Config, tx: Sender<Msg>, cancel: Arc<AtomicBool>, stop: Arc<AtomicBool>, cmds: Receiver<Cmd>) {
     let mut tracks = Vec::new();
     let result = match ask_start(&mut cfg, &tx) {
         Start::Playlist => pipeline(&cfg, &tx, &cancel, &mut tracks, Pass::plain(cfg.pick)),
@@ -35,7 +35,7 @@ pub fn run(mut cfg: Config, tx: Sender<Msg>, cancel: Arc<AtomicBool>, cmds: Rece
                 shelves,
                 show: true,
             });
-            serve(&mut cfg, &tx, &mut tracks, cmds, &cancel);
+            serve(&mut cfg, &tx, &mut tracks, cmds, &cancel, &stop);
             return;
         }
         /* Cancelling the first question cancels the tool: no run started, so
@@ -46,7 +46,7 @@ pub fn run(mut cfg: Config, tx: Sender<Msg>, cancel: Arc<AtomicBool>, cmds: Rece
         }
     };
     if finish(&mut cfg, &tx, &cancel, &mut tracks, result) {
-        serve(&mut cfg, &tx, &mut tracks, cmds, &cancel);
+        serve(&mut cfg, &tx, &mut tracks, cmds, &cancel, &stop);
     }
 }
 
@@ -423,10 +423,15 @@ enum Answer {
    there is one, since it carries the playlist's order and the files a sync
    found missing, neither of which a directory read can tell you. */
 pub fn library(dir: &Path) -> Vec<Shelf> {
+    shelves(dir).into_iter().map(|(shelf, _)| shelf).collect()
+}
+
+/// `library` with each folder's sidecar, for a caller that needs the ids too and would otherwise read it twice.
+pub fn shelves(dir: &Path) -> Vec<(Shelf, manifest::Sidecar)> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut found: Vec<Shelf> = entries
+    let mut found: Vec<(Shelf, manifest::Sidecar)> = entries
         .flatten()
         .map(|e| e.path())
         .filter(|p| p.is_dir())
@@ -459,9 +464,9 @@ pub fn library(dir: &Path) -> Vec<Shelf> {
                resolver the sync and `open_shelf` ask, so the row cannot
                disagree with what a run would decide about the same folder. */
             let kind = manifest::kind_of(&path, &sidecar).map(|(kind, _)| kind);
-            Some(Shelf {
+            let shelf = Shelf {
                 name: path.file_name().unwrap_or_default().to_string_lossy().into(),
-                url: sidecar.url,
+                url: sidecar.url.clone(),
                 kind,
                 tracks: files.len() - missing,
                 missing,
@@ -469,10 +474,11 @@ pub fn library(dir: &Path) -> Vec<Shelf> {
                 files,
                 playlist: player::playlist_of(&path),
                 path,
-            })
+            };
+            Some((shelf, sidecar))
         })
         .collect();
-    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found.sort_by(|a, b| a.0.name.cmp(&b.0.name));
     found
 }
 
@@ -3029,6 +3035,57 @@ fn pin_open_run(cfg: &mut Config, tracks: &[Track], folder: &Path, name: &str) -
     ours
 }
 
+/// The help overlay's line and the settings screen's rows, re-sent after any change.
+pub(crate) fn settings(cfg: &Config) -> Msg {
+    Msg::Settings { text: cfg.describe(), format: cfg.format.clone(), rows: cfg.rows() }
+}
+
+/// A switch from the settings screen. Saved before it is adopted, as the format is, so the session never
+/// runs on a setting the flash says was not remembered.
+fn set_switch(cfg: &mut Config, tx: &Sender<Msg>, key: &'static str, on: bool) -> Result<()> {
+    let said = if on { "on" } else { "off" };
+    let at_start = config::SWITCHES.iter().any(|s| s.key == key && s.when == config::When::NextStart);
+    let later = if at_start { "  ·  from the next start" } else { "" };
+    match cfg.config_file.clone() {
+        Some(path) => {
+            config::save_switch(&path, key, on)?;
+            cfg.set_switch(key, on);
+            cfg.sources.insert(key, config::Source::File);
+            let _ = tx.send(Msg::Log(format!("{key} = {on} written to {}", path.display())));
+            let _ = tx.send(Msg::Flash(format!("{key} {said}, remembered{later}")));
+        }
+        // Read only at startup, so with nothing to remember it there is nothing to change.
+        None if at_start => {
+            let _ = tx.send(Msg::Flash(format!("--no-config, so nothing would remember {key}")));
+            return Ok(());
+        }
+        None => {
+            cfg.set_switch(key, on);
+            let _ = tx.send(Msg::Flash(format!("{key} {said}, this run only")));
+        }
+    }
+    let _ = tx.send(settings(cfg));
+    Ok(())
+}
+
+// The UI already draws the new icons; this remembers them.
+fn set_icons(cfg: &mut Config, tx: &Sender<Msg>, icons: crate::icons::Icons) -> Result<()> {
+    let name = icons.name();
+    match cfg.config_file.clone() {
+        Some(path) => {
+            config::save_icons(&path, icons)?;
+            cfg.sources.insert("icons", config::Source::File);
+            let _ = tx.send(Msg::Flash(format!("icons: {name}, remembered")));
+        }
+        None => {
+            let _ = tx.send(Msg::Flash(format!("icons: {name}, this run only")));
+        }
+    }
+    cfg.icons = icons;
+    let _ = tx.send(settings(cfg));
+    Ok(())
+}
+
 fn set_format(cfg: &mut Config, tx: &Sender<Msg>, asker: &Asker) -> Result<()> {
     let options: Vec<String> = config::FORMATS
         .iter()
@@ -3049,10 +3106,7 @@ fn set_format(cfg: &mut Config, tx: &Sender<Msg>, asker: &Asker) -> Result<()> {
     let settle = |cfg: &mut Config| {
         cfg.format = picked.to_string();
         // Or the help overlay keeps reporting the format the run began with.
-        let _ = tx.send(Msg::Settings {
-            text: cfg.describe(),
-            format: cfg.format.clone(),
-        });
+        let _ = tx.send(settings(cfg));
     };
 
     let Some(path) = cfg.config_file.clone() else {
@@ -3064,6 +3118,7 @@ fn set_format(cfg: &mut Config, tx: &Sender<Msg>, asker: &Asker) -> Result<()> {
        the new format while reporting that nothing had been remembered, so
        the next download disagreed with both the message and the file. */
     config::save_format(&path, picked)?;
+    cfg.sources.insert("format", config::Source::File);
     settle(cfg);
     let _ = tx.send(Msg::Log(format!("format {picked} written to {}", path.display())));
     let _ = tx.send(Msg::Flash(format!("format: {picked}, remembered")));
@@ -3108,10 +3163,7 @@ fn offer_convert(cfg: &mut Config, tx: &Sender<Msg>, asker: &Asker, path: &Path,
         return;
     }
     cfg.convert = true;
-    let _ = tx.send(Msg::Settings {
-            text: cfg.describe(),
-            format: cfg.format.clone(),
-        });
+    let _ = tx.send(settings(cfg));
     let _ = tx.send(Msg::Flash(
         "convert: on  ·  the next sync brings each playlist across".into(),
     ));
@@ -3123,6 +3175,7 @@ fn serve(
     tracks: &mut Vec<Track>,
     cmds: Receiver<Cmd>,
     cancel: &AtomicBool,
+    stop: &AtomicBool,
 ) {
     let asker = Asker {
         tx: tx.clone(),
@@ -3136,7 +3189,7 @@ fn serve(
     /* Lives for the session rather than per command, since that is what `u`
        means: the last tag write, whichever command made it. */
     let mut held: Option<Undo> = None;
-    // The artist index, built on the first `b` and dropped by any command `keeps_index` does not name.
+    // The artist index, built on the first `b` and dropped as `index_use` says.
     let mut known: Option<Vec<artists::Artist>> = None;
     let mut deezer = discover::Cache::default();
     // After the library is on screen, which is what reaching here means, and off this thread.
@@ -3154,9 +3207,12 @@ fn serve(
         /* Some commands edit what is on screen and some replace it. Only the
            ones that went to the network have an outcome worth a question at
            the end, which is what `synced` carries. */
-        if !keeps_index(&cmd) {
+        let index_use = index_use(&cmd);
+        if index_use == IndexUse::Drop {
             known = None;
         }
+        // Esc on the page sets `stop`; quitting sets `cancel`.
+        let halted = || stop.load(Ordering::SeqCst) || cancel.load(Ordering::SeqCst);
         let synced = match cmd {
             Cmd::Artists => {
                 let index = known.get_or_insert_with(|| artists::index(&cfg.dir));
@@ -3173,11 +3229,8 @@ fn serve(
             Cmd::GetAlbum { artist, title } => {
                 let index = known.get_or_insert_with(|| artists::index(&cfg.dir));
                 let owned = artists::owned_titles(index, &artist, &title);
-                let find = |artist: &str, title: &str| ytdlp::find_album(artist, title, cancel);
-                let got = get_album(cfg, tx, cancel, tracks, &asker, find, &artist, &title, owned);
-                // The download changed what the library holds, or the album would still read missing.
-                known = None;
-                got
+                let find = |artist: &str, title: &str| ytdlp::find_album(artist, title, stop);
+                get_album(cfg, tx, cancel, tracks, &asker, find, halted, &artist, &title, owned)
             }
             Cmd::Top(name) => {
                 let index = known.get_or_insert_with(|| artists::index(&cfg.dir));
@@ -3193,9 +3246,7 @@ fn serve(
             }
             Cmd::GetTop { artist, titles } => {
                 let find = |artist: &str, title: &str| ytdlp::find_song(artist, title);
-                let got = get_top(cfg, tx, cancel, tracks, &asker, find, &artist, &titles);
-                known = None;
-                got
+                get_top(cfg, tx, cancel, tracks, &asker, find, halted, &artist, &titles)
             }
             Cmd::Star(name) => {
                 match artists::toggle(&cfg.dir, &name) {
@@ -3255,6 +3306,14 @@ fn serve(
             }
             Cmd::Format => {
                 report(tx, set_format(cfg, tx, &asker));
+                None
+            }
+            Cmd::Switch(key, on) => {
+                report(tx, set_switch(cfg, tx, key, on));
+                None
+            }
+            Cmd::Icons(icons) => {
+                report(tx, set_icons(cfg, tx, icons));
                 None
             }
             Cmd::Rename(folder) => {
@@ -3344,6 +3403,9 @@ fn serve(
                 None
             }
         };
+        if index_use == IndexUse::DropAfter {
+            known = None;
+        }
 
         if let Some(result) = synced {
             // Counts and sync times have moved, so the library screen is stale.
@@ -3440,11 +3502,22 @@ fn start_url(
     Some(start_link(cfg, tx, cancel, tracks, asker, link, Pass::plain(gate)))
 }
 
-/// Whether a command leaves the cached artist index true. Only the artist screens' own reads do: syncs, edits
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IndexUse {
+    Keep,
+    Drop,
+    /// Read before a download and dropped after it, or the album just fetched still reads missing.
+    DropAfter,
+}
+
+/// What a command does to the cached artist index. Only the artist screens' own reads keep it: syncs, edits
 /// and deletes all change tags, and a list of the ones that do is a list a new command would be left out of.
-// `GetAlbum` and `GetTop` read it before they download and drop it after, in their own arms.
-fn keeps_index(cmd: &Cmd) -> bool {
-    matches!(cmd, Cmd::Artists | Cmd::Star(_) | Cmd::Discography(_) | Cmd::Top(_) | Cmd::Related(_) | Cmd::GetAlbum { .. } | Cmd::GetTop { .. })
+fn index_use(cmd: &Cmd) -> IndexUse {
+    match cmd {
+        Cmd::Artists | Cmd::Star(_) | Cmd::Discography(_) | Cmd::Top(_) | Cmd::Related(_) => IndexUse::Keep,
+        Cmd::GetAlbum { .. } | Cmd::GetTop { .. } => IndexUse::DropAfter,
+        _ => IndexUse::Drop,
+    }
 }
 
 // What a new URL and a missing album both do once they have a link.
@@ -3472,11 +3545,12 @@ fn get_album(
     tracks: &mut Vec<Track>,
     asker: &Asker,
     find: impl Fn(&str, &str) -> Result<Option<ytdlp::AlbumHit>, String>,
+    halted: impl Fn() -> bool,
     artist: &str,
     title: &str,
     owned: Vec<String>,
 ) -> Option<Result<String>> {
-    let link = album_link(cfg, tx, asker, find, artist, title)?;
+    let link = album_link(cfg, tx, asker, find, halted, artist, title)?;
     let pass = Pass::album(cfg.pick, owned);
     Some(start_link(cfg, tx, cancel, tracks, asker, link, pass))
 }
@@ -3490,23 +3564,24 @@ fn get_top(
     tracks: &mut Vec<Track>,
     asker: &Asker,
     find: impl Fn(&str, &str) -> Result<Option<String>, String>,
+    halted: impl Fn() -> bool,
     artist: &str,
     titles: &[String],
 ) -> Option<Result<String>> {
-    let link = top_link(cfg, tx, cancel, asker, find, artist, titles)?;
+    let link = top_link(cfg, tx, asker, find, halted, artist, titles)?;
     Some(start_link(cfg, tx, cancel, tracks, asker, link, Pass::plain(cfg.pick)))
 }
 
 // The same stops as `album_link`. One search per track, so the header counts them off as it goes.
-fn top_link(cfg: &Config, tx: &Sender<Msg>, cancel: &AtomicBool, asker: &Asker, find: impl Fn(&str, &str) -> Result<Option<String>, String>, artist: &str, titles: &[String]) -> Option<Link> {
+fn top_link(cfg: &Config, tx: &Sender<Msg>, asker: &Asker, find: impl Fn(&str, &str) -> Result<Option<String>, String>, halted: impl Fn() -> bool, artist: &str, titles: &[String]) -> Option<Link> {
     if !cfg.unlocked.has(Feature::Music) {
         let _ = tx.send(Msg::Flash(format!("{LOCKED}  ·  tracks come from YouTube Music")));
         return None;
     }
     let mut ids = Vec::new();
     for (n, title) in titles.iter().enumerate() {
-        if cancel.load(Ordering::SeqCst) {
-            return None;
+        if halted() {
+            return stopped(tx);
         }
         let _ = tx.send(Msg::Stage(format!("finding {} of {} on YouTube Music", n + 1, titles.len())));
         match find(artist, title) {
@@ -3523,11 +3598,16 @@ fn top_link(cfg: &Config, tx: &Sender<Msg>, cancel: &AtomicBool, asker: &Asker, 
             }
         }
     }
+    // Stopped during the last search, which the loop's own check never sees.
+    if halted() {
+        return stopped(tx);
+    }
     if ids.is_empty() {
         let _ = tx.send(Msg::Flash(format!("YouTube Music has none of {artist}'s missing top tracks")));
         return None;
     }
-    let name = format!("{artist} - Top Tracks");
+    // Cleaned as an imported name is: AC/DC would nest a folder in `AC`.
+    let name = import::folder_name(&format!("{artist} - Top Tracks")).unwrap_or_else(|| "Top Tracks".into());
     // What an earlier fetch put there goes in the queue too: a sync against only the new ones would call
     // every track already in the folder departed, and offer it to `D`.
     let earlier = manifest::load(&cfg.dir.join(&name)).url.and_then(|url| import::queue_ids(&url)).unwrap_or_default();
@@ -3550,15 +3630,25 @@ fn top_link(cfg: &Config, tx: &Sender<Msg>, cancel: &AtomicBool, asker: &Asker, 
     }
 }
 
+fn stopped(tx: &Sender<Msg>) -> Option<Link> {
+    let _ = tx.send(Msg::Flash("search stopped  ·  nothing downloaded".into()));
+    None
+}
+
 // Every step that can stop the download, each saying why. The unlock is checked before the search, and the
 // found URL goes through `settle` too, so the gate holds even if this check were lost.
-fn album_link(cfg: &Config, tx: &Sender<Msg>, asker: &Asker, find: impl Fn(&str, &str) -> Result<Option<ytdlp::AlbumHit>, String>, artist: &str, title: &str) -> Option<Link> {
+fn album_link(cfg: &Config, tx: &Sender<Msg>, asker: &Asker, find: impl Fn(&str, &str) -> Result<Option<ytdlp::AlbumHit>, String>, halted: impl Fn() -> bool, artist: &str, title: &str) -> Option<Link> {
     if !cfg.unlocked.has(Feature::Music) {
         let _ = tx.send(Msg::Flash(format!("{LOCKED}  ·  albums come from YouTube Music")));
         return None;
     }
     let _ = tx.send(Msg::Stage(format!("finding {title} on YouTube Music")));
-    let hit = match find(artist, title) {
+    let found = find(artist, title);
+    // A stopped search reads as no album, which it is not.
+    if halted() {
+        return stopped(tx);
+    }
+    let hit = match found {
         Ok(Some(hit)) => hit,
         Ok(None) => {
             let _ = tx.send(Msg::Flash(format!("YouTube Music has no album called {title} by {artist}  ·  n takes a URL")));
@@ -3570,6 +3660,12 @@ fn album_link(cfg: &Config, tx: &Sender<Msg>, asker: &Asker, find: impl Fn(&str,
             return None;
         }
     };
+    // Named for the record, not yt-dlp's `Album - Title`, and cleaned as an imported name is: a `/` in the
+    // title would nest folders and a leading `..` would write outside `--dir`.
+    let Some(name) = import::folder_name(&hit.title).or_else(|| import::folder_name(title)) else {
+        let _ = tx.send(Msg::Flash(format!("{title} makes no folder name  ·  n takes a URL")));
+        return None;
+    };
     // Who YouTube Music says made it, since a title alone is what two acts can share.
     let by = if hit.by == "NA" || hit.by.is_empty() { "an unnamed channel" } else { &hit.by };
     let note = format!("{} by {by}  ·  {} tracks  ·  from YouTube Music", hit.title, hit.tracks);
@@ -3579,8 +3675,8 @@ fn album_link(cfg: &Config, tx: &Sender<Msg>, asker: &Asker, find: impl Fn(&str,
         return None;
     }
     match settle(&hit.url, &cfg.unlocked) {
-        // Named for the record, not yt-dlp's `Album - Title`; `import_folder` keeps it off a folder that is another playlist's.
-        Ok(link) => Some(Link { name: Some(hit.title), ..link }),
+        // `import_folder` keeps it off a folder that is another playlist's.
+        Ok(link) => Some(Link { name: Some(name), ..link }),
         Err(why) => {
             let _ = tx.send(Msg::Flash(why));
             None
@@ -8527,6 +8623,7 @@ pub mod tests {
             extra: Vec::new(),
             acoustid_key: None,
             unlocked: Default::default(),
+            sources: Default::default(),
         }
     }
 
@@ -10271,7 +10368,7 @@ mod chapter_tests {
         let (tx, rx) = mpsc::channel();
         let asker = Asker { tx: tx.clone(), enabled: true };
         std::thread::scope(|scope| {
-            let worker = scope.spawn(|| album_link(cfg, &tx, &asker, |_, _| Ok(Some(hit())), "Can", "Tago Mago"));
+            let worker = scope.spawn(|| album_link(cfg, &tx, &asker, |_, _| Ok(Some(hit())), || false, "Can", "Tago Mago"));
             let mut seen = Vec::new();
             let mut answer = Some(answer);
             while !worker.is_finished() || seen.is_empty() {
@@ -10301,7 +10398,7 @@ mod chapter_tests {
         // Disabled, so a broken gate fails on `searched` rather than hanging on a question nobody answers.
         let asker = Asker { tx: tx.clone(), enabled: false };
         let searched = std::cell::Cell::new(false);
-        let link = album_link(&cfg, &tx, &asker, |_, _| { searched.set(true); Ok(Some(hit())) }, "Can", "Tago Mago");
+        let link = album_link(&cfg, &tx, &asker, |_, _| { searched.set(true); Ok(Some(hit())) }, || false, "Can", "Tago Mago");
         assert!(link.is_none() && !searched.get());
         let seen: Vec<Msg> = rx.try_iter().collect();
         assert!(flashes(&seen).iter().any(|f| f.contains(LOCKED)), "{:?}", flashes(&seen));
@@ -10346,7 +10443,7 @@ mod chapter_tests {
         cfg.unlocked.grant(Feature::Music);
         let (tx, rx) = mpsc::channel();
         let asker = Asker { tx: tx.clone(), enabled: false };
-        assert!(album_link(&cfg, &tx, &asker, |_, _| Err("ERROR: blocked".into()), "Can", "Tago Mago").is_none());
+        assert!(album_link(&cfg, &tx, &asker, |_, _| Err("ERROR: blocked".into()), || false, "Can", "Tago Mago").is_none());
         let seen: Vec<Msg> = rx.try_iter().collect();
         assert!(flashes(&seen).iter().any(|f| f.contains("search failed")), "{:?}", flashes(&seen));
         assert!(seen.iter().any(|m| matches!(m, Msg::Log(l) if l.contains("ERROR: blocked"))));
@@ -10358,9 +10455,8 @@ mod chapter_tests {
         let (tx, rx) = mpsc::channel();
         let asker = Asker { tx: tx.clone(), enabled: false };
         let searched = std::cell::Cell::new(false);
-        let cancel = AtomicBool::new(false);
         let titles = vec!["Spoon".to_string()];
-        let link = top_link(&cfg, &tx, &cancel, &asker, |_, _| { searched.set(true); Ok(Some("v".into())) }, "Can", &titles);
+        let link = top_link(&cfg, &tx, &asker, |_, _| { searched.set(true); Ok(Some("v".into())) }, || false, "Can", &titles);
         assert!(link.is_none() && !searched.get());
         let seen: Vec<Msg> = rx.try_iter().collect();
         assert!(flashes(&seen).iter().any(|f| f.contains(LOCKED)));
@@ -10373,12 +10469,11 @@ mod chapter_tests {
         cfg.unlocked.grant(Feature::Music);
         let (tx, rx) = mpsc::channel();
         let asker = Asker { tx: tx.clone(), enabled: true };
-        let cancel = AtomicBool::new(false);
         let titles = vec!["Spoon".to_string(), "Lost".to_string(), "Vitamin C".to_string(), "Spoon (Live at Soest)".to_string()];
         // The last is one song found twice, which Deezer does when a song is on two albums.
         let find = |_: &str, t: &str| Ok((t != "Lost").then(|| if t.starts_with("Spoon") { "id-5".into() } else { format!("id-{}", t.len()) }));
         let link = std::thread::scope(|scope| {
-            let worker = scope.spawn(|| top_link(&cfg, &tx, &cancel, &asker, find, "Can", &titles));
+            let worker = scope.spawn(|| top_link(&cfg, &tx, &asker, find, || false, "Can", &titles));
             loop {
                 match rx.recv_timeout(std::time::Duration::from_millis(500)) {
                     Ok(Msg::Ask(_, reply)) => {
@@ -10397,15 +10492,112 @@ mod chapter_tests {
         assert_eq!(link.name.as_deref(), Some("Can - Top Tracks"));
     }
 
+    // Saved, then adopted, then re-sent, so the screen shows what the file holds. A config that cannot take
+    // the line leaves the session as it was.
+    #[test]
+    fn a_switch_is_saved_before_the_session_takes_it() {
+        let dir = std::env::temp_dir().join(format!("earworm-switch-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = crate::worker::tests::config(true);
+        cfg.config_file = Some(dir.join("config.toml"));
+        let (tx, rx) = mpsc::channel();
+        set_switch(&mut cfg, &tx, "cover", false).unwrap();
+        assert!(!cfg.cover);
+        assert!(std::fs::read_to_string(dir.join("config.toml")).unwrap().contains("cover = false"));
+        let seen: Vec<Msg> = rx.try_iter().collect();
+        let sent = seen.iter().find_map(|m| if let Msg::Settings { rows, .. } = m { Some(rows.clone()) } else { None }).unwrap();
+        let cover = sent.iter().find(|r| r.key == "cover").unwrap();
+        assert_eq!(cover.value, config::Value::Switch(false), "the screen kept the old value");
+        assert_eq!(cover.source, config::Source::File, "the screen still says the default set it");
+        // A directory where the file should be: the save fails and the session keeps its value.
+        cfg.config_file = Some(dir.clone());
+        assert!(set_switch(&mut cfg, &tx, "cover", true).is_err());
+        assert!(!cfg.cover, "adopted a setting that was never saved");
+        // Read only at startup, so with --no-config there is nothing to change.
+        cfg.config_file = None;
+        let intro = cfg.intro;
+        set_switch(&mut cfg, &tx, "intro", !intro).unwrap();
+        assert_eq!(cfg.intro, intro);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     // Anything that writes tags has to drop the index, or the artist screens describe a library that has gone.
     #[test]
     fn only_the_artist_screens_own_reads_keep_the_artist_index() {
         for cmd in [Cmd::Artists, Cmd::Star("Can".into()), Cmd::Discography("Can".into()), Cmd::Top("Can".into()), Cmd::Related("Can".into())] {
-            assert!(keeps_index(&cmd));
+            assert_eq!(index_use(&cmd), IndexUse::Keep);
         }
         for cmd in [Cmd::Edit(1), Cmd::Undo, Cmd::Swap(vec![1]), Cmd::Artist(vec![1]), Cmd::SyncOne, Cmd::ResyncAll, Cmd::Retry, Cmd::Purge, Cmd::Url] {
-            assert!(!keeps_index(&cmd));
+            assert_eq!(index_use(&cmd), IndexUse::Drop);
         }
+        // Read for the owned titles, then dropped, or a downloaded album still reads missing.
+        for cmd in [Cmd::GetAlbum { artist: "Can".into(), title: "Tago Mago".into() }, Cmd::GetTop { artist: "Can".into(), titles: Vec::new() }] {
+            assert_eq!(index_use(&cmd), IndexUse::DropAfter);
+        }
+    }
+
+    // A slash in a name from YouTube or the tags would nest folders, and a leading `..` would leave `--dir`.
+    #[test]
+    fn found_names_become_one_folder_inside_the_library() {
+        let cfg = crate::worker::tests::config(true);
+        cfg.unlocked.grant(Feature::Music);
+        let (tx, rx) = mpsc::channel();
+        let asker = Asker { tx: tx.clone(), enabled: true };
+        let titles = vec!["T.N.T.".to_string()];
+        let answer = |rx: &mpsc::Receiver<Msg>, done: &dyn Fn() -> bool| loop {
+            match rx.recv_timeout(std::time::Duration::from_millis(200)) {
+                Ok(Msg::Ask(_, reply)) => {
+                    let _ = reply.send(Reply::Choice(1));
+                }
+                Ok(_) => {}
+                Err(_) if done() => break,
+                Err(_) => {}
+            }
+        };
+        let top = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| top_link(&cfg, &tx, &asker, |_, _| Ok(Some("tntAAAAAAAA".into())), || false, "AC/DC", &titles));
+            answer(&rx, &|| worker.is_finished());
+            worker.join().unwrap()
+        });
+        assert_eq!(top.unwrap().name.as_deref(), Some("AC-DC - Top Tracks"));
+        let sneaky = ytdlp::AlbumHit { title: "../../Back/In Black".into(), ..hit() };
+        let album = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| album_link(&cfg, &tx, &asker, |_, _| Ok(Some(sneaky.clone())), || false, "AC/DC", "Back in Black"));
+            answer(&rx, &|| worker.is_finished());
+            worker.join().unwrap()
+        });
+        assert_eq!(album.unwrap().name.as_deref(), Some("-..-Back-In Black"));
+    }
+
+    // Esc on the page stops the search between tracks, and what was found so far is not downloaded.
+    #[test]
+    fn a_stopped_search_downloads_nothing_and_says_so() {
+        let cfg = crate::worker::tests::config(true);
+        cfg.unlocked.grant(Feature::Music);
+        let (tx, rx) = mpsc::channel();
+        // Disabled, so a stop that fell through to the confirm fails on the link rather than hanging.
+        let asker = Asker { tx: tx.clone(), enabled: false };
+        let stop = AtomicBool::new(false);
+        let searched = std::cell::Cell::new(0);
+        let titles = vec!["Spoon".to_string(), "Vitamin C".to_string(), "Mushroom".to_string()];
+        let find = |_: &str, _: &str| {
+            searched.set(searched.get() + 1);
+            stop.store(true, Ordering::SeqCst);
+            Ok(Some("spoonAAAAAA".to_string()))
+        };
+        let halted = || stop.load(Ordering::SeqCst);
+        assert!(top_link(&cfg, &tx, &asker, find, halted, "Can", &titles).is_none());
+        assert_eq!(searched.get(), 1, "searched on after the stop");
+        stop.store(false, Ordering::SeqCst);
+        let find = |_: &str, _: &str| {
+            stop.store(true, Ordering::SeqCst);
+            Ok(None)
+        };
+        assert!(album_link(&cfg, &tx, &asker, find, halted, "Can", "Tago Mago").is_none());
+        let said = flashes(&rx.try_iter().collect::<Vec<_>>());
+        assert_eq!(said.iter().filter(|f| f.contains("search stopped")).count(), 2, "{said:?}");
+        assert!(!said.iter().any(|f| f.contains("has no album")), "a stopped search read as no album: {said:?}");
     }
 
     // A second fetch of top tracks keeps the first one's in the queue, or a sync would call them departed.
@@ -10421,12 +10613,11 @@ mod chapter_tests {
         cfg.unlocked.grant(Feature::Music);
         let (tx, rx) = mpsc::channel();
         let asker = Asker { tx: tx.clone(), enabled: true };
-        let cancel = AtomicBool::new(false);
         let titles = vec!["Both".to_string(), "New".to_string()];
         // Real-length ids: `queue_ids` reads only what a YouTube id can be.
         let find = |_: &str, t: &str| Ok(Some(if t == "Both" { "bothBBBBBBB".to_string() } else { "newCCCCCCCC".to_string() }));
         let link = std::thread::scope(|scope| {
-            let worker = scope.spawn(|| top_link(&cfg, &tx, &cancel, &asker, find, "Can", &titles));
+            let worker = scope.spawn(|| top_link(&cfg, &tx, &asker, find, || false, "Can", &titles));
             loop {
                 match rx.recv_timeout(std::time::Duration::from_millis(500)) {
                     Ok(Msg::Ask(_, reply)) => {

@@ -148,7 +148,7 @@ fn video_id(id: &str) -> bool {
 
 // The folder is named after this, and yt-dlp's own title for a queue is "Untitled List".
 // A slash would move it and a leading dot would hide it, as `rename_shelf` refuses.
-fn folder_name(raw: &str) -> Option<String> {
+pub(crate) fn folder_name(raw: &str) -> Option<String> {
     let name = raw.replace(['/', '\\'], "-");
     let mut name = name.trim().trim_start_matches('.').trim();
     if name.len() > MAX_NAME {

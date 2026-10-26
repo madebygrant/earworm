@@ -194,7 +194,9 @@ fn same_artist(by: &str, artist: &str) -> bool {
 }
 
 fn flat(bin: &str, args: &[&str]) -> Result<String, String> {
-    let mut all = vec!["--flat-playlist"];
+    // stderr is read only once the child exits, so a burst of warnings filling the pipe would stall it until
+    // the timeout. Errors still print.
+    let mut all = vec!["--flat-playlist", "--no-warnings"];
     all.extend_from_slice(args);
     read(bin, &all)
 }

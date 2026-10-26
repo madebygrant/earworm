@@ -78,7 +78,7 @@ narrow to them.
   the cursor if none are marked. Esc keeps the list empty, and asks first if
   you have marks to lose.
 
-`a` on a custom playlist's own screen reopens the picker for it. Its tracks
+`P` on a custom playlist's own screen reopens the picker for it. Its tracks
 start marked as `•`. Unmark one (`−`) and Enter takes it off the list, never
 off disk, and a new mark (`✓`) adds it.
 
@@ -86,7 +86,7 @@ To fill one later, press `P` on a track in the search results (`t`), or on a tra
 list for the marked tracks, or the one under the cursor. A chooser lists your
 lists and a new one. A track already in the list is not added twice.
 
-Enter on a custom playlist opens it. `a` there reopens the picker for that list. `J` and `K` move a track, `x` takes it
+Enter on a custom playlist opens it. `P` there reopens the picker for that list. `J` and `K` move a track, `x` takes it
 off the list and never off disk, `p` plays it in cliamp, and Enter goes to the
 track's own folder, which is where you edit its tags. A track that is no longer
 on disk keeps its row with a `!`.
@@ -284,7 +284,8 @@ of one you've told it to forget.
 before it does. cliamp's copy goes too.
 
 `O` hands the folder to the platform's file manager, `open` on macOS and
-`xdg-open` elsewhere. It's `O` because `o` cycles the sort.
+`xdg-open` elsewhere. `o` opens inside earworm on the artist screens, and `s`
+cycles the sort.
 
 ## Finding a track
 

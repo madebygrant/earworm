@@ -31,19 +31,21 @@
   (`a_song_copied_into_two_playlists_is_counted_once`,
   `a_playlists_own_name_in_the_album_tag_is_not_an_album`,
   `editions_of_one_record_are_one_album`).
-- **The index is read off the tags with no cover and no properties.**
+- **The index is read off the tags with no cover and no properties, once.**
   `tag::brief` skips both, which is most of a read. Measured on a 298-track
-  library at about 250ms cold. It holds counts, not titles: the titles a page
-  or a download needs are read from that artist's folders when asked
+  library at about 250ms cold. It keeps each track's title and album, copies
+  included, because reading them again from the artist's folders on every Tab
+  re-read whole mixed playlists for one song in each; a few hundred bytes a
+  track is cheaper. Folders and their sidecars come from one walk,
+  `worker::shelves`, not `library` and a second `manifest::load`
   (`owned_titles_are_the_artists_tracks_on_that_album`).
-- **`serve` keeps the index for the session and drops it on any command
-  `keeps_index` does not name.** Syncs, edits, deletes and renames all change
-  tags, and a list of the commands that do is a list a new command would be
-  left out of, so the list is of the ones that keep it
-  (`only_the_artist_screens_own_reads_keep_the_artist_index`). `GetAlbum` and
-  `GetTop` keep it while they run and drop it in their own arms after, or a
-  downloaded album still reads missing; that drop needs a real `serve` and was
-  checked by a stub run, not a test.
+- **`serve` keeps the index for the session, and `index_use` says when it
+  goes.** Syncs, edits, deletes and renames all change tags, and a list of the
+  commands that do is a list a new command would be left out of, so anything
+  not named is `Drop`. `GetAlbum` and `GetTop` are `DropAfter`: they read it
+  for the owned titles and drop it once the download is done, or a downloaded
+  album still reads missing. `serve` only acts on the answer, before and after
+  its match (`only_the_artist_screens_own_reads_keep_the_artist_index`).
 - **Favourites live in `.artists` under `--dir`, never in the config.** The
   config is written only by `^t` and the format keys
   (`docs/rules/themes-and-colour.md`). A `#` line is a header from a later
@@ -120,6 +122,21 @@
 - **Nothing downloads without a confirm naming what was found.** Title,
   channel and track count, because a live album or a fan upload can match
   (`an_unlocked_album_is_confirmed_before_it_is_settled`).
+- **A found name is cleaned like an imported one.** The album title comes
+  from YouTube and the top-tracks name from the tags, and `folder_field` only
+  escapes `%`, so "AC/DC - Top Tracks" nested a folder in `AC` and a title
+  starting `../` wrote outside `--dir`. Both go through `import::folder_name`
+  (`found_names_become_one_folder_inside_the_library`).
+- **Esc on the page stops a search, through `App.stop`, not `cancel`.**
+  `cancel` is the quit, and the pipeline reads it as one. The UI clears `stop`
+  as it sends the command, so an Esc cannot land between a worker-side clear
+  and the search. The check runs between yt-dlp calls, and once more after the
+  last, or a stop during it fell through to "no such album" or to the confirm
+  (`a_stopped_search_downloads_nothing_and_says_so`,
+  `esc_during_a_search_stops_it_and_then_leaves`).
+- **The search calls pass `--no-warnings`.** `run_bounded` reads the pipes only
+  once the child exits, so stderr filling its buffer would stall yt-dlp until
+  the 30-second limit and read as "did not answer". Not tested.
 - **A new album's folder is the clean title, and never another playlist's.**
   The `Link` name comes from the resolved title, not yt-dlp's `Album - Title`,
   and `import_folder` moves it to `Title (2)` rather than take over a folder

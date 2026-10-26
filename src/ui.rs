@@ -557,7 +557,7 @@ fn draw_filter_bar(frame: &mut Frame, app: &App, area: Rect) {
         ),
         View::Tracks => (app.shown(), app.tracks.len()),
         // No filter here: the list is the playlist's own order. The artists screen has a band of its own.
-        View::Playlist | View::Pick | View::Artists | View::Artist => (0, 0),
+        View::Playlist | View::Pick | View::Artists | View::Artist | View::Settings => (0, 0),
     };
     let caret = if app.typing_filter { "\u{2588}" } else { "" };
     let word = match (app.view, app.only, app.review) {
@@ -667,6 +667,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         View::Pick if !app.busy => "pick tracks".to_string(),
         View::Artists if !app.busy => "artists".to_string(),
         View::Artist => app.page.name.clone(),
+        View::Settings => "settings".to_string(),
         _ => app.stage.clone(),
     };
     spans.push(Span::styled(stage, Style::new().fg(p.text)));
@@ -798,6 +799,7 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
         View::Pick => draw_picker(frame, app, area),
         View::Artists => draw_artists(frame, app, area),
         View::Artist => draw_artist_page(frame, app, area),
+        View::Settings => draw_settings(frame, app, area),
     }
 }
 
@@ -1157,6 +1159,63 @@ fn draw_artists(frame: &mut Frame, app: &mut App, area: Rect) {
     app.artists.scroll = app::scroll_to(app.artists.scroll, at, items.len(), area.height as usize);
     let mut state = ListState::default().with_offset(app.artists.scroll);
     state.select(Some(at));
+    frame.render_stateful_widget(List::new(items), area, &mut state);
+}
+
+// Each setting, its value, and where the value came from, since a flag or the file is what changing it means.
+fn draw_settings(frame: &mut Frame, app: &mut App, area: Rect) {
+    use crate::config::{Source, Value};
+    let p = app.theme;
+    app.viewport = area.height as usize;
+    let cursor = app.settings_cursor;
+    let key_width = app.setting_rows.iter().map(|r| cols(r.key)).max().unwrap_or(0);
+    let value_of = |value: &Value| match value {
+        Value::Switch(on) => if *on { "on" } else { "off" }.to_string(),
+        Value::Format(name) => name.clone(),
+        Value::Icons(icons) => icons.name().to_string(),
+        Value::Theme if app.theme_overridden => format!("{} + [colors]", app.theme_name),
+        Value::Theme => app.theme_name.clone(),
+        Value::Fixed(text) => text.clone(),
+    };
+    let value_width = (area.width as usize).saturating_sub(key_width + 30).clamp(8, 28);
+    let source_of = |row: &crate::config::Row| match row.source {
+        // `^t` saved it from the UI, which the worker's record of where it came from cannot know.
+        Source::Default | Source::File if matches!(row.value, Value::Theme) && app.theme_saved => "config".to_string(),
+        Source::Default => "default".to_string(),
+        Source::File => "config".to_string(),
+        Source::Env => "environment".to_string(),
+        Source::Flag if row.key == "extra" => "after --".to_string(),
+        Source::Flag => match crate::config::SWITCHES.iter().find(|s| s.key == row.key) {
+            Some(switch) => format!("--{}", switch.flag.replace('_', "-")),
+            None => format!("--{}", row.key),
+        },
+    };
+    let source_width = app.setting_rows.iter().map(|r| cols(&source_of(r))).max().unwrap_or(0) + 2;
+    let items: Vec<ListItem> = app
+        .setting_rows
+        .iter()
+        .enumerate()
+        .map(|(at, row)| {
+            let value = truncate(&value_of(&row.value), value_width);
+            let pad = value_width.saturating_sub(cols(&value));
+            let source = source_of(row);
+            let later = if row.when == crate::config::When::NextStart { "  ·  at start" } else { "" };
+            let value_style = match row.value {
+                Value::Switch(false) => Style::new().fg(p.muted),
+                Value::Fixed(_) => Style::new().fg(p.muted),
+                _ => Style::new().fg(p.accent),
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(if at == cursor { "▌" } else { " " }, Style::new().fg(p.cursor)),
+                Span::styled(format!(" {:key_width$}  ", row.key), row_style(at == cursor, p)),
+                Span::styled(format!("{value}{:pad$}  ", ""), value_style),
+                dim(format!("{source:<source_width$}{}{later}", row.what), p),
+            ]))
+        })
+        .collect();
+    app.settings_scroll = app::scroll_to(app.settings_scroll, cursor, items.len(), area.height as usize);
+    let mut state = ListState::default().with_offset(app.settings_scroll);
+    state.select(Some(cursor));
     frame.render_stateful_widget(List::new(items), area, &mut state);
 }
 
@@ -1934,7 +1993,7 @@ fn draw_logs(frame: &mut Frame, app: &App, area: Rect) {
 }
 
 // Dropped from the library's bar in this order when it is short.
-const LIBRARY_OPTIONAL: [&str; 3] = ["   b artists", "   t find a track", "   S sync"];
+const LIBRARY_OPTIONAL: [&str; 4] = ["   , settings", "   b artists", "   t find a track", "   S sync"];
 
 // The whole library's health in one line, and how many files are missing, which is what colours it.
 fn library_text(app: &App) -> Option<(String, usize)> {
@@ -2032,6 +2091,8 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     } else if app.view == View::Artists && app.artists.typing {
         hints.push(("   enter keeps".to_string(), Style::new().fg(p.accent)));
         hints.push(("   esc clears".to_string(), Style::new().fg(p.muted)));
+    } else if app.view == View::Artist && app.searching {
+        hints.push(("   esc stop the search".to_string(), Style::new().fg(p.accent)));
     } else if app.view == View::Artist && app.page.section == app::Section::Top {
         // Offered only when it would fetch: locked, busy or nothing missing, it is not advertised.
         let missing = app.page.top.as_ref().and_then(|r| r.as_ref().ok()).map_or(0, |r| r.iter().filter(|t| !t.have).count());
@@ -2070,7 +2131,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         hints.push(("   esc library".to_string(), Style::new().fg(p.muted)));
     } else if app.view == View::Playlist {
         hints.push(("   enter go to source".to_string(), Style::new().fg(p.accent)));
-        hints.push(("   a add tracks".to_string(), Style::new().fg(p.muted)));
+        hints.push(("   P add tracks".to_string(), Style::new().fg(p.muted)));
         hints.push(("   J K move".to_string(), Style::new().fg(p.muted)));
         hints.push(("   x remove".to_string(), Style::new().fg(p.muted)));
         hints.push(("   esc library".to_string(), Style::new().fg(p.muted)));
@@ -2082,6 +2143,10 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         hints.push(("   t find a track".to_string(), Style::new().fg(p.muted)));
         hints.push(("   S sync".to_string(), Style::new().fg(p.muted)));
         hints.push(("   b artists".to_string(), Style::new().fg(p.muted)));
+        hints.push(("   , settings".to_string(), Style::new().fg(p.muted)));
+    } else if app.view == View::Settings {
+        hints.push(("   enter change".to_string(), Style::new().fg(p.accent)));
+        hints.push(("   esc back".to_string(), Style::new().fg(p.muted)));
     } else if !app.tracks.is_empty() && app.picking.is_none() {
         if app.can_command() {
             extra.push(("   e edit".to_string(), Style::new().fg(p.accent)));
@@ -2135,8 +2200,8 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         Some((text, _)) if app.view == View::Library => cols(&text) + 2,
         _ => TALLY_FLOOR,
     };
-    /* `n` starts a sync and is the key nothing else offers, so it stays. The artists, the search and the
-       resync are what a short bar loses, in that order: all three are under `h`. */
+    /* `n` starts a sync and is the key nothing else offers, so it stays. Settings, the artists, the search
+       and the resync are what a short bar loses, in that order: all four are under `h`. */
     if app.view == View::Library {
         for optional in LIBRARY_OPTIONAL {
             let total: usize = hints.iter().map(|(t, _)| cols(t)).sum();
@@ -2227,10 +2292,17 @@ fn draw_help(frame: &mut Frame, app: &App) {
         ("", "^d ^u  PgDn PgUp", "by a screenful"),
         ("", "g G", "first, last"),
     ];
-    if app.view == View::Playlist {
+    if app.view == View::Settings {
+        rows.extend([
+            ("change", "enter  space", "switch it, or pick the next choice"),
+            ("view", "l", "yt-dlp output"),
+            ("back", "Esc  ,", "the screen before"),
+            ("quit", "q  ^c", ""),
+        ]);
+    } else if app.view == View::Playlist {
         rows.extend([
             ("open", "enter", "go to this track's own folder"),
-            ("add", "a", "pick more tracks from the library"),
+            ("add", "P", "pick more tracks from the library"),
             ("edit", "J K", "move this track down, up"),
             ("", "x", "take it off this list, never off disk"),
         ]);
@@ -2257,6 +2329,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("open", "o", "the library, narrowed to their folders"),
             ("view", "l", "yt-dlp output"),
             ("back", "Esc", "the page before, or the artists"),
+            ("stop", "Esc", "a YouTube Music search under way"),
             ("quit", "q  ^c", ""),
         ]);
     } else if app.view == View::Pick {
@@ -2292,7 +2365,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("find", "/", "filter by name or track"),
             ("", "t", "every matching track, across the library"),
             ("", "b", "every artist, and the ones you starred"),
-            ("", "o", "order: name, last synced, most missing"),
+            ("", "s", "sort: name, last synced, most missing"),
             ("", "a", "kind: every folder, albums, playlists, custom"),
         ]);
         /* `space` is about cliamp and `p` is about the row under the cursor,
@@ -2308,7 +2381,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             ("sync", "S", "sync this playlist"),
             ("", "R", "sync every playlist"),
             ("", "n", "sync a new URL"),
-            ("set", "f", "audio format for new downloads"),
+            ("set", ",", "settings: format, theme, lookups and the rest"),
             ("view", "l", "yt-dlp output"),
             ("quit", "q  Esc  ^c", ""),
         ]);
@@ -5908,6 +5981,40 @@ mod tests {
         app.intro_done = true;
         app.view = View::Artists;
         app
+    }
+
+    // Each row says what it is, what it is set to and where that came from. The theme is the palette's own
+    // name, never a copy the worker sent, since `^t` changes it without the worker knowing.
+    #[test]
+    fn a_setting_row_shows_its_value_and_where_it_came_from() {
+        use crate::config::{Row, Source, Value, When};
+        let mut app = artists_app();
+        let row = |key, value, source, when| Row { key, value, source, what: "what it does", when };
+        let rows = vec![
+            row("theme", Value::Theme, Source::Default, When::Now),
+            row("cover", Value::Switch(false), Source::File, When::NextRun),
+            row("pick", Value::Switch(false), Source::Flag, When::NextRun),
+            row("intro", Value::Switch(true), Source::Default, When::NextStart),
+            row("update_check", Value::Switch(false), Source::Flag, When::NextStart),
+        ];
+        app.apply(Msg::Settings { text: String::new(), format: "m4a".into(), rows });
+        app.open_settings();
+        app.cycle_theme();
+        app.settings_step(true, 1);
+        let screen = screen_of(&mut app, 100, 10);
+        // The rows, not the header, which names the theme `^t` just flashed.
+        let line = |key: &str| screen.lines().find(|l| l.contains(&format!(" {key} ")) && l.contains("what it does")).unwrap_or_default().to_string();
+        assert!(line("theme").contains(&app.theme_name) && app.theme_name != "warm", "{screen}");
+        assert!(line("cover").contains("off") && line("cover").contains("config") && line("cover").starts_with('▌'), "{screen}");
+        assert!(line("pick").contains("--no-pick"), "{screen}");
+        assert!(line("intro").contains("at start"), "{screen}");
+        // The longest flag still leaves a gap before the description.
+        assert!(line("update_check").contains("--no-update-check  what it does"), "{screen}");
+        assert!(line("theme").contains("default"), "{screen}");
+        // Once `^t` has saved it, which the worker's sources do not know.
+        app.theme_saved = true;
+        let screen = screen_of(&mut app, 100, 10);
+        assert!(screen.lines().any(|l| l.contains(" theme ") && l.contains("config")), "{screen}");
     }
 
     #[test]

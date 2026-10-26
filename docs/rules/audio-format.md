@@ -279,10 +279,12 @@
   suite green while every track in a flac folder looked absent. `scan_with`
   takes the binary so a test can read back the arguments the scan actually
   ran with, the same way `player`'s `*_with` functions do.
-- **`f` is library-only, like `space`.** It follows the active track on the
-  track list, and the setting is about the next playlist rather than the one on
-  screen. `--no-config` leaves `Config.config_file` as `None`, and the flash
-  then says the choice lasts one session.
+- **The format is a row on the settings screen, not a key.** `f` was the
+  format on the library and follow on the track list. `--no-config` leaves
+  `Config.config_file` as `None`, and the flash then says the choice lasts one
+  session.
 - **`Msg::Settings` exists because `App.settings` is built once at startup.**
   Change a setting from inside the tool without re-sending it and the help
-  overlay keeps reporting the format the run began with.
+  overlay keeps reporting the format the run began with. It carries the
+  settings screen's rows too, built by `worker::settings`, so every change
+  re-sends both.

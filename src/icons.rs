@@ -28,6 +28,15 @@ impl Icons {
         }
     }
 
+    /// The settings screen's walk, in `NAMES` order.
+    pub fn next(self) -> Icons {
+        match self {
+            Icons::Text => Icons::Symbols,
+            Icons::Symbols => Icons::Nerd,
+            Icons::Nerd => Icons::Text,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Icons::Text => "text",

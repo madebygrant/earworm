@@ -83,8 +83,9 @@
 - **The `.m3u8` is renamed with the folder and never rewritten.** It is named
   after its folder, `last_playlist` finds it that way, and its entries are
   relative, so the move itself leaves them valid.
-- **`O` reveals, `o` orders.** The sort came first and a key that means two
-  things on one screen is worse than a new one.
+- **`O` reveals, `s` sorts.** `o` sorted the library and opened an artist's
+  folders on the artist screens; it is now open everywhere, `O` outside
+  earworm and `o` inside it.
 - **`player::reveal` takes the binary, like the cliamp calls do.** A test that
   ran the real opener would put a window on the screen of whoever is running
   the suite. `opener()` is the platform choice, kept apart so it is testable

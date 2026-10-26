@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 
 use crate::app::ArtistRow;
 use crate::lookup::{lead_artist, normalise};
-use crate::manifest::{self, Kind};
+use crate::manifest::Kind;
 use crate::{tag, worker};
 
 // Under `--dir` beside `.playlists`, not in the config: the config is written only by `^t` and the format keys.
@@ -26,6 +26,8 @@ pub struct Artist {
     pub folders: Vec<PathBuf>,
     /// Each album as first spelt, with how many of its tracks are here. What the discography is matched to.
     pub held: Vec<(String, usize)>,
+    /// (title, album) of every track, copies included, for the page's matching and the pick gate.
+    pub titles: Vec<(String, String)>,
 }
 
 /// What two spellings of one artist share, so "Björk" and "bjork" are one row and one star.
@@ -35,10 +37,10 @@ pub fn key(name: &str) -> String {
     if key.is_empty() { name.trim().to_lowercase() } else { key }
 }
 
-/// Groups (artist, album, folder, counted) by lead artist, most tracks first, under the commonest spelling.
+/// Groups (artist, title, album, folder, counted) by lead artist, most tracks first, under the commonest spelling.
 // "A feat. B" counts towards A only: a guest verse is not one of B's albums. A track not counted is a copy
 // of one already seen, which still says the folder holds the artist.
-pub fn group<'a>(tracks: impl IntoIterator<Item = (&'a str, &'a str, &'a Path, bool)>) -> Vec<Artist> {
+pub fn group<'a>(tracks: impl IntoIterator<Item = (&'a str, &'a str, &'a str, &'a Path, bool)>) -> Vec<Artist> {
     struct Seen {
         key: String,
         spellings: Vec<(String, usize)>,
@@ -46,23 +48,25 @@ pub fn group<'a>(tracks: impl IntoIterator<Item = (&'a str, &'a str, &'a Path, b
         // Keyed on `normalise`, so two spellings of one album are one album.
         albums: Vec<(String, String, usize)>,
         folders: Vec<PathBuf>,
+        titles: Vec<(String, String)>,
     }
     let mut seen: Vec<Seen> = Vec::new();
     let mut at: HashMap<String, usize> = HashMap::new();
-    for (artist, album, folder, counted) in tracks {
+    for (artist, title, album, folder, counted) in tracks {
         let lead = lead_artist(artist);
         if lead.is_empty() {
             continue;
         }
         let k = key(&lead);
         let i = *at.entry(k.clone()).or_insert_with(|| {
-            seen.push(Seen { key: k, spellings: Vec::new(), tracks: 0, albums: Vec::new(), folders: Vec::new() });
+            seen.push(Seen { key: k, spellings: Vec::new(), tracks: 0, albums: Vec::new(), folders: Vec::new(), titles: Vec::new() });
             seen.len() - 1
         });
         let one = &mut seen[i];
         if !one.folders.iter().any(|f| f == folder) {
             one.folders.push(folder.to_path_buf());
         }
+        one.titles.push((title.to_string(), album.to_string()));
         if !counted {
             continue;
         }
@@ -86,7 +90,7 @@ pub fn group<'a>(tracks: impl IntoIterator<Item = (&'a str, &'a str, &'a Path, b
             // `rev` so a tie goes to the spelling seen first: `max_by_key` keeps the last of equals.
             let name = one.spellings.iter().rev().max_by_key(|(_, n)| *n).map(|(s, _)| s.clone()).unwrap_or_default();
             let held: Vec<(String, usize)> = one.albums.into_iter().map(|(_, album, n)| (album, n)).collect();
-            Artist { name, tracks: one.tracks, albums: held.len(), folders: one.folders, held }
+            Artist { name, tracks: one.tracks, albums: held.len(), folders: one.folders, held, titles: one.titles }
         })
         .collect()
 }
@@ -96,8 +100,7 @@ pub fn group<'a>(tracks: impl IntoIterator<Item = (&'a str, &'a str, &'a Path, b
 pub fn index(dir: &Path) -> Vec<Artist> {
     let mut read = Vec::new();
     let mut counted: HashSet<String> = HashSet::new();
-    for shelf in worker::library(dir) {
-        let sidecar = manifest::load(&shelf.path);
+    for (shelf, sidecar) in worker::shelves(dir) {
         let ids: HashMap<&Path, &str> = sidecar.entries.iter().map(|(id, f)| (f.as_path(), id.as_str())).collect();
         let isrcs: HashMap<&str, &str> = sidecar.isrcs.iter().map(|(id, i)| (id.as_str(), i.as_str())).collect();
         // With `album` on, a track the lookup found no album for is tagged with the playlist's name.
@@ -114,32 +117,20 @@ pub fn index(dir: &Path) -> Vec<Artist> {
                 first = !recording.iter().flatten().any(|r| counted.contains(r));
                 counted.extend(recording.into_iter().flatten());
             }
-            if let Ok((artist, _, mut album)) = tag::brief(&path) {
+            if let Ok((artist, title, mut album)) = tag::brief(&path) {
                 if named_album.as_deref() == Some(normalise(&album).as_str()) {
                     album.clear();
                 }
-                read.push((artist, album, shelf.path.clone(), first));
+                read.push((artist, title, album, shelf.path.clone(), first));
             }
         }
     }
-    group(read.iter().map(|(artist, album, folder, first)| (artist.as_str(), album.as_str(), folder.as_path(), *first)))
+    group(read.iter().map(|(artist, title, album, folder, first)| (artist.as_str(), title.as_str(), album.as_str(), folder.as_path(), *first)))
 }
 
-// The title and album of every track by one artist in their folders, read when a page or download needs them.
-// Not kept in the index: every title of every track for the session, to serve a few keys on one page.
 fn tracks_of(index: &[Artist], artist: &str) -> Vec<(String, String)> {
     let who = key(artist);
-    let Some(found) = index.iter().find(|a| key(&a.name) == who) else {
-        return Vec::new();
-    };
-    found
-        .folders
-        .iter()
-        .flat_map(|folder| worker::audio_files(folder))
-        .filter_map(|file| tag::brief(&file).ok())
-        .filter(|(a, ..)| key(&lead_artist(a)) == who)
-        .map(|(_, title, album)| (title, album))
-        .collect()
+    index.iter().find(|a| key(&a.name) == who).map(|a| a.titles.clone()).unwrap_or_default()
 }
 
 /// Every title the library holds by one artist.
@@ -328,7 +319,7 @@ mod tests {
 
     // Every track in one folder, for the tests about grouping rather than about where tracks are.
     fn grouped<'a>(pairs: impl IntoIterator<Item = (&'a str, &'a str)>) -> Vec<Artist> {
-        group(pairs.into_iter().map(|(artist, album)| (artist, album, Path::new("F"), true)))
+        group(pairs.into_iter().map(|(artist, album)| (artist, "", album, Path::new("F"), true)))
     }
 
     fn counts(found: &[Artist]) -> Vec<(&str, usize, usize)> {
@@ -490,7 +481,7 @@ mod tests {
             tag::set_fields(&file, &fields).unwrap();
             entries.push((id.to_string(), file));
         }
-        manifest::write(&folder, "https://www.youtube.com/playlist?list=PL", entries.into_iter()).unwrap();
+        crate::manifest::write(&folder, "https://www.youtube.com/playlist?list=PL", entries.into_iter()).unwrap();
         Some(())
     }
 
@@ -535,7 +526,7 @@ mod tests {
     }
 
 
-    // Read off disk at download time, and only the artist's own tracks on that album.
+    // Only the artist's own tracks on that album, and a guest credit is still the lead's.
     #[test]
     fn owned_titles_are_the_artists_tracks_on_that_album() {
         let dir = root("owned");
@@ -551,7 +542,7 @@ mod tests {
             let fields = tag::Fields { artist: artist.into(), title: title.into(), album: album.into(), year: None };
             tag::set_fields(&folder.join(file), &fields).unwrap();
         }
-        let index = vec![Artist { name: "Can".into(), tracks: 2, albums: 2, folders: vec![folder], held: Vec::new() }];
+        let index = index(&dir);
         assert_eq!(owned_titles(&index, "Can", "Ege Bamyasi (Remastered)"), ["Vitamin C"]);
         std::fs::remove_dir_all(&dir).unwrap();
     }

@@ -18,7 +18,7 @@ in docs/rules/themes-and-colour.md.
   (what Esc on a prompt does), `picking` (the reply channel for the pick gate),
   the `marked` set behind `targets()`, and the `filter` behind `rows()`
 - `config.rs` — `Cli`, the TOML `FileConfig`, and `Config::build`, which merges
-  them
+  them; `SWITCHES` and `Config::rows`, what the settings screen lists
 - `worker.rs` — `ask_start` (library, resync or the URL prompt, which loops
   until the URL validates) then `pipeline` then `serve`, which serves both the
   post-run commands and the library screen. `tag_tracks` is the
@@ -69,7 +69,7 @@ which is read when somebody doubts a rule rather than at the start of a session.
 | Loudness tags: ReplayGain/R128, LRCLIB lookups, the breaker | `docs/rules/loudness-and-lyrics.md` | touching `write_loudness`, lyrics or `Breaker` |
 | Playing through cliamp: importing playlists, `player.rs`, the `▶` marker's inputs | `docs/rules/cliamp.md` | touching `player.rs`, `p` or `space` |
 | Audio format: formats and conversion, `convert`, config writes, `D` purge safety, `lookup::stop` | `docs/rules/audio-format.md` | touching `FORMATS`, `convert`, `transcode`, `save_key`/`save_format` or `Config::build` |
-| What a key is allowed to do: Esc, `q`, `App.say`, the status bar and help rules | `docs/rules/keys-and-screens.md` | adding or changing a key, Esc behaviour or a status-bar hint |
+| What a key is allowed to do: Esc, `q`, `App.say`, the status bar and help rules, one meaning per letter, the settings screen | `docs/rules/keys-and-screens.md` | adding or changing a key, Esc behaviour, a status-bar hint, or a setting on the `,` screen |
 | Cheat codes and achievements: `cheats.rs`, `achievements.rs`, the popup and its state file | `docs/rules/cheats-and-achievements.md` | touching either file or the `^z ^x` console |
 | Questions, forms and quitting: `App.confirm`, `App.fields`, `Confirm` and quit questions, the header and estimate | `docs/rules/questions-and-forms.md` | touching prompts, forms, `Confirm` or the quit flow |
 | Dependencies, `--check` and the update check: `DEPS`, `--check`, the GitHub probe | `docs/rules/dependencies-and-updates.md` | touching `deps.rs`, `update.rs` or `--check` |
@@ -125,6 +125,7 @@ ratatui installs its panic hook process-globally via `std::panic::set_hook`.
 
 ## Conventions
 
-Comments explain why, not what. Multi-line comments use `/* */`. Doc comments
+Comments explain why, not what. New comments are `//` lines, three at most;
+existing `/* */` blocks stay until the code under them changes. Doc comments
 `///` go on the declaration and carry the reasoning for anything non-obvious
 below.

@@ -362,6 +362,8 @@ pub enum View {
     Artists,
     // One artist's Deezer discography against what the library holds. Enter on the artists screen.
     Artist,
+    // Every setting with where it came from. `,` from any screen with a list.
+    Settings,
 }
 
 /// One track of a custom playlist as the screen shows it.
@@ -560,6 +562,9 @@ pub enum Cmd {
     Toggle,
     /// Choose the audio format new downloads arrive in, and remember it.
     Format,
+    /// Turn one of `config::SWITCHES` on or off, and remember it.
+    Switch(&'static str, bool),
+    Icons(crate::icons::Icons),
     /// Put the last tag write back. One level: the point is the edit you
     /// have just seen land on the row, not a history to walk.
     Undo,
@@ -790,6 +795,7 @@ pub enum Msg {
         /// counts files against it and parsing it back out of the prose
         /// would be a second place the two could disagree.
         format: String,
+        rows: Vec<crate::config::Row>,
     },
     /// What `u` would put back, or `None` when there is nothing to undo. The
     /// worker holds the old values, so the UI cannot work this out for
@@ -1183,6 +1189,18 @@ pub struct App {
     pub new_releases: Vec<(String, u64, String)>,
     // Artists whose page was read this session, by `artists::key`, which a late check must not mark new again.
     pages_read: HashSet<String>,
+    /// What the settings screen lists, from the worker's config. Built at startup and re-sent with every change.
+    pub setting_rows: Vec<crate::config::Row>,
+    pub settings_cursor: usize,
+    pub settings_scroll: usize,
+    /// `^t` wrote the theme to the config this session, which the worker's sources cannot know.
+    pub theme_saved: bool,
+    // The screen `,` was pressed on, which Esc goes back to.
+    pub settings_back: View,
+    /// A YouTube Music search from the artist page is running, so Esc stops it rather than leaving.
+    pub searching: bool,
+    /// Shared with the worker, which checks it between searches. `cancel` is the quit, and stays that.
+    pub stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     // The search screen's matches, computed once per frame by `draw` so the header, the band and the list read one answer.
     pub found_cache: Vec<crate::picker::Hit>,
     // Tracks marked on the search screen for `P`, by folder and filename like the picker's.
@@ -1348,6 +1366,13 @@ impl App {
             page_back: Vec::new(),
             new_releases: Vec::new(),
             pages_read: HashSet::new(),
+            searching: false,
+            setting_rows: Vec::new(),
+            settings_cursor: 0,
+            settings_scroll: 0,
+            theme_saved: false,
+            settings_back: View::Library,
+            stop: Default::default(),
             found_cache: Vec::new(),
             found_marks: crate::picker::Marks::default(),
             from_found: false,
@@ -1771,9 +1796,14 @@ impl App {
                 self.flash_until = None;
                 self.done = Some(result);
             }
-            Msg::Settings { text, format } => {
+            Msg::Settings { text, format, rows } => {
                 self.settings = text;
                 self.format = format;
+                // Taken from what the worker saved, so a failed save leaves the icons as the file has them.
+                if let Some(icons) = rows.iter().find_map(|r| if let crate::config::Value::Icons(i) = r.value { Some(i) } else { None }) {
+                    self.icons = icons;
+                }
+                self.setting_rows = rows;
             }
             Msg::Undoable(what) => self.undoable = what,
             /* Not a jump on its own: the cursor lands on the first of them and
@@ -1806,8 +1836,12 @@ impl App {
                     self.cursor = self.cursor.min(self.tracks.len() - 1);
                 }
             }
-            Msg::Idle => self.busy = false,
+            Msg::Idle => {
+                self.busy = false;
+                self.searching = false;
+            }
             Msg::Restart => {
+                self.searching = false;
                 // Statuses are this run's alone: judge them before they are cleared.
                 self.achieve();
                 self.done = None;
@@ -2050,6 +2084,67 @@ impl App {
 
     /* Not gated on the library having rows: `n` is the way out of an empty
        one, and `Cmd::Open` is guarded by there being a row to open. */
+    pub fn open_settings(&mut self) {
+        if self.view != View::Settings {
+            self.settings_back = self.view;
+            self.view = View::Settings;
+        }
+    }
+
+    pub fn leave_settings(&mut self) {
+        self.view = self.settings_back;
+    }
+
+    pub fn settings_step(&mut self, down: bool, by: usize) {
+        let last = self.setting_rows.len().saturating_sub(1);
+        self.settings_cursor = if down { self.settings_cursor.saturating_add(by).min(last) } else { self.settings_cursor.saturating_sub(by) };
+    }
+
+    /// The bell is read from the rows rather than a copy, so turning it off on the settings screen is heard.
+    pub fn notify(&self) -> bool {
+        self.setting_rows.iter().any(|r| r.key == "notify" && r.value == crate::config::Value::Switch(true))
+    }
+
+    /// Enter on the settings screen.
+    // The worker owns the config and writes it, so every change but the theme and icons waits for it to be idle.
+    pub fn change_setting(&mut self) {
+        use crate::config::{Source, Value};
+        let Some(row) = self.setting_rows.get(self.settings_cursor).cloned() else {
+            return;
+        };
+        if let Value::Theme = row.value {
+            self.cycle_theme();
+            return;
+        }
+        if let Value::Fixed(_) = row.value {
+            let from = match row.source {
+                Source::Flag if row.key == "extra" => "the arguments after -- on the command line".to_string(),
+                Source::Flag => format!("--{} on the command line", row.key.replace('_', "-")),
+                Source::Env => "ACOUSTID_API_KEY in the environment".to_string(),
+                _ => "the config file".to_string(),
+            };
+            self.say(format!("{} is set in {from}", row.key));
+            return;
+        }
+        if row.source == Source::Flag {
+            let flag = crate::config::SWITCHES.iter().find(|s| s.key == row.key).map_or(row.key, |s| s.flag);
+            self.say(format!("--{} was given  ·  start without it to change {}", flag.replace('_', "-"), row.key));
+            return;
+        }
+        // The first run is not started by `send`, so `busy` alone misses it.
+        let running = self.done.is_none() && !self.tracks.is_empty();
+        if self.busy || running || self.prompt.is_some() {
+            self.say("settings change once the run is over");
+            return;
+        }
+        match row.value {
+            Value::Switch(on) => self.send(Cmd::Switch(row.key, !on)),
+            Value::Format(_) => self.send(Cmd::Format),
+            Value::Icons(icons) => self.send(Cmd::Icons(icons.next())),
+            Value::Theme | Value::Fixed(_) => {}
+        }
+    }
+
     pub fn can_browse(&self) -> bool {
         self.view == View::Library && self.prompt.is_none() && !self.busy
     }
@@ -2225,8 +2320,21 @@ impl App {
         } else if !self.unlocked.has(crate::cheats::Feature::Music) {
             self.say(format!("{}  ·  tracks come from YouTube Music", crate::cheats::LOCKED));
         } else {
-            self.send(Cmd::GetTop { artist: self.page.name.clone(), titles });
+            self.search(Cmd::GetTop { artist: self.page.name.clone(), titles });
         }
+    }
+
+    // Cleared here rather than by the worker, so an Esc can never land between the clear and the search.
+    fn search(&mut self, cmd: Cmd) {
+        self.stop.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.searching = true;
+        self.send(cmd);
+    }
+
+    /// Esc on the page while it searches. The yt-dlp call under way finishes first, a few seconds at most.
+    pub fn stop_search(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.say("stopping the search");
     }
 
     // Albums and EPs unless `all_kinds`: a band's singles and compilations outnumber its records.
@@ -2280,7 +2388,7 @@ impl App {
         } else if !self.unlocked.has(crate::cheats::Feature::Music) {
             self.say(format!("{}  ·  albums come from YouTube Music", crate::cheats::LOCKED));
         } else {
-            self.send(Cmd::GetAlbum { artist: self.page.name.clone(), title });
+            self.search(Cmd::GetAlbum { artist: self.page.name.clone(), title });
         }
     }
 
@@ -2514,7 +2622,10 @@ impl App {
             return;
         };
         match crate::config::save_theme(&file, &name) {
-            Ok(()) => self.say(format!("theme {name}{kept}")),
+            Ok(()) => {
+                self.theme_saved = true;
+                self.say(format!("theme {name}{kept}"));
+            }
             /* Not a failure of the key: the theme applied and only the
                remembering did not, which is a different thing to tell
                somebody and a different thing to do about it. */

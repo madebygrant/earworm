@@ -55,8 +55,9 @@ fn main() -> Result<()> {
     }
     let settings = cfg.describe();
     let format = cfg.format.clone();
-    // Read off before the worker takes the config: both belong to the UI.
-    let (intro, notify) = (cfg.intro, cfg.notify);
+    let setting_rows = cfg.rows();
+    // Read off before the worker takes the config. The bell is read from `setting_rows`, which the screen changes.
+    let intro = cfg.intro;
     /* So does the whole of the theme. The palette is only ever read by a
        draw, and `^t` is the one setting the UI writes back by itself, which
        is why the path it writes to comes across here too. */
@@ -83,7 +84,9 @@ fn main() -> Result<()> {
     let (cmd_tx, cmd_rx) = mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
     let worker_cancel = Arc::clone(&cancel);
-    std::thread::spawn(move || worker::run(cfg, tx, worker_cancel, cmd_rx));
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_stop = Arc::clone(&stop);
+    std::thread::spawn(move || worker::run(cfg, tx, worker_cancel, worker_stop, cmd_rx));
 
     /* Before ratatui takes the terminal, because the query writes an escape
        to stdout and reads the answer back off stdin, and crossterm's event
@@ -100,6 +103,8 @@ fn main() -> Result<()> {
 
     let mut terminal = ratatui::init();
     let mut app = App::new(cmd_tx, settings);
+    app.stop = stop;
+    app.setting_rows = setting_rows;
     app.picker = picker;
     // The worker owns the config by now, so this is read across before it goes.
     app.format = format;
@@ -122,7 +127,7 @@ fn main() -> Result<()> {
        thing that ends it does. A separate flag would be a second answer to
        the same question. */
     app.intro_done = !intro;
-    let result = run(&mut terminal, &mut app, rx, update_rx, notify, &theme_warnings);
+    let result = run(&mut terminal, &mut app, rx, update_rx, &theme_warnings);
 
     cancel.store(true, Ordering::SeqCst);
     ytdlp::stop();
@@ -364,7 +369,6 @@ fn run(
     app: &mut App,
     rx: mpsc::Receiver<app::Msg>,
     update_rx: Option<mpsc::Receiver<String>>,
-    notify: bool,
     theme_warnings: &[String],
 ) -> Result<()> {
     let mut title = String::new();
@@ -455,7 +459,7 @@ fn run(
             rang = false;
         } else if !rang {
             rang = true;
-            if notify && worth_a_bell(app) {
+            if app.notify() && worth_a_bell(app) {
                 /* A bell and not OSC 9: an escape sequence a terminal does
                    not know prints its own text into the middle of the
                    screen, and a notification is not worth a torn frame. */
@@ -577,6 +581,16 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
        screen is the one that is unusable without it: `/` there edits the
        query the list is built from rather than narrowing a list. */
     // Its query box is always focused, so no `typing_filter` to check and no screen key shadows a letter.
+    if app.view == View::Settings {
+        handle_settings_key(app, code, mods);
+        return;
+    }
+    // On every screen with a list, and never where it would be a typed comma: a query box or the picker.
+    let typing = app.typing_filter || (app.view == View::Artists && app.artists.typing);
+    if code == KeyCode::Char(',') && !typing && app.view != View::Pick {
+        app.open_settings();
+        return;
+    }
     if app.view == View::Pick {
         handle_pick_list_key(app, code, mods);
         return;
@@ -849,6 +863,25 @@ fn handle_artists_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     }
 }
 
+fn handle_settings_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    match code {
+        KeyCode::Char('c') if ctrl => app.quit = true,
+        KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
+        KeyCode::Char('q') => app.quit = true,
+        KeyCode::Esc | KeyCode::Char(',') => app.leave_settings(),
+        KeyCode::Char('l') => app.show_logs = !app.show_logs,
+        KeyCode::Char('j') | KeyCode::Down => app.settings_step(true, 1),
+        KeyCode::Char('k') | KeyCode::Up => app.settings_step(false, 1),
+        KeyCode::PageDown => app.settings_step(true, app.viewport.max(1)),
+        KeyCode::PageUp => app.settings_step(false, app.viewport.max(1)),
+        KeyCode::Char('g') => app.settings_cursor = 0,
+        KeyCode::Char('G') => app.settings_step(true, usize::MAX),
+        KeyCode::Enter | KeyCode::Char(' ') => app.change_setting(),
+        _ => {}
+    }
+}
+
 // One artist's discography. Enter fetches a release the library lacks, behind the YouTube Music unlock.
 fn handle_page_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
@@ -856,6 +889,8 @@ fn handle_page_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('c') if ctrl => app.quit = true,
         KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
         KeyCode::Char('q') => app.quit = true,
+        // A search of ten top tracks is a minute of yt-dlp, and nothing else stops it short of quitting.
+        KeyCode::Esc if app.searching => app.stop_search(),
         // Back through related artists' pages, then to the artists screen, whose cursor never moved.
         KeyCode::Esc => app.leave_page(),
         KeyCode::Char('l') => app.show_logs = !app.show_logs,
@@ -903,7 +938,8 @@ fn handle_playlist_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 app.send(Cmd::RemoveEntry { name, id });
             }
         }
-        KeyCode::Char('a') if app.can_playlist() => app.reopen_picker(),
+        // `P` as on the track list and the search: into a custom playlist. `a` is a kind filter elsewhere.
+        KeyCode::Char('P') if app.can_playlist() => app.reopen_picker(),
         KeyCode::Char('p') if app.can_playlist() && app.can_play() => app.send(Cmd::PlayPlaylist(name)),
         KeyCode::Enter if app.can_playlist() => {
             let source = app.custom_selected().map(|r| (r.path.clone(), r.file.clone()));
@@ -1059,7 +1095,7 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('b') if app.can_browse() => app.open_artists(),
         /* Name is what the worker hands over; the other two answer the
            question this screen is for, which is what needs syncing. */
-        KeyCode::Char('o') => {
+        KeyCode::Char('s') => {
             app.sort = app.sort.next();
             let label = app.sort.label();
             app.say(format!("sorted by {label}"));
@@ -1101,13 +1137,8 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
                 }
             }
         },
-        /* Library-only, like space: `f` follows the active track on the track
-           list, and the setting is about the next playlist rather than the
-           one on screen. */
-        KeyCode::Char('f') if app.can_browse() => app.send(Cmd::Format),
-        /* `O` and not `o`, which already cycles the order. Everything
-           downstream of earworm happens in a file manager or a player, and
-           the alternative is retyping a path the screen is showing. */
+        // `O` opens outside earworm, as `o` opens inside it on the artist screens. Everything downstream of
+        // earworm happens in a file manager or a player, and the alternative is retyping a path on screen.
         /* `e` edits a track on the other screen, so it edits the playlist
            here: this list's rows are folders, and the name is all there is
            on one to change. */
@@ -1702,9 +1733,9 @@ mod tests {
             Ok(Cmd::Reveal(path)) if path == std::path::Path::new("/music/Focus")
         ));
 
-        // The lower-case key is the sort, and must not also open a window.
-        handle_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE);
-        assert!(cmds.try_recv().is_err(), "o sent a command as well as sorting");
+        // `s` is the sort, and must not also open a window.
+        handle_key(&mut app, KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(cmds.try_recv().is_err(), "s sent a command as well as sorting");
         assert_eq!(app.sort, crate::app::Sort::Synced);
     }
 
@@ -1780,7 +1811,7 @@ mod tests {
     fn the_playlist_screen_takes_its_own_keys_and_none_of_the_track_commands() {
         let (mut app, cmds) = open_list();
         assert_eq!(app.view, View::Playlist);
-        for key in ['e', 's', 'r', 'c', 'T', 'S', 'A', 'u', 'm', 'P'] {
+        for key in ['e', 's', 'r', 'c', 'T', 'S', 'A', 'u', 'm', 'a'] {
             handle_key(&mut app, KeyCode::Char(key), KeyModifiers::NONE);
             assert!(cmds.try_recv().is_err(), "{key} reached a track command from a custom playlist");
         }
@@ -1793,9 +1824,9 @@ mod tests {
     }
 
     #[test]
-    fn a_on_a_list_reopens_the_picker_and_esc_comes_back_to_the_list() {
+    fn p_on_a_list_reopens_the_picker_and_esc_comes_back_to_the_list() {
         let (mut app, cmds) = open_list();
-        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('P'), KeyModifiers::NONE);
         assert_eq!(app.view, View::Pick);
         assert_eq!(app.pick.name, "Mix");
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
@@ -1810,7 +1841,7 @@ mod tests {
         let mut shelves = app.library.clone();
         shelves.push(folder);
         app.apply(app::Msg::Library { shelves, show: false });
-        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('P'), KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(matches!(cmds.try_recv(), Ok(Cmd::EditPlaylist { name, .. }) if name == "Mix"));
@@ -1834,7 +1865,7 @@ mod tests {
     #[test]
     fn tracks_the_list_holds_start_marked_and_unmarking_one_takes_it_off() {
         let (mut app, cmds) = open_list_with_folder();
-        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('P'), KeyModifiers::NONE);
         assert_eq!(app.pick.held.len(), 2);
         assert_eq!(app.pick.marks.len(), 2, "the list's own tracks start marked");
         // Enter with no change sends nothing.
@@ -1969,10 +2000,10 @@ mod tests {
     #[test]
     fn leaving_an_open_list_unchanged_does_not_ask_but_a_removal_does() {
         let (mut app, _cmds) = open_list_with_folder();
-        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('P'), KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(app.view, View::Playlist, "its own tracks start marked, which is no change");
-        handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('P'), KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(app.confirm, Some(app::Confirm::Discard));
@@ -2350,18 +2381,19 @@ mod tests {
         handle_key(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
         assert!(app.typing_filter);
 
-        for c in "neo".chars() {
+        for c in "nes,".chars() {
             handle_key(&mut app, KeyCode::Char(c), KeyModifiers::NONE);
         }
-        assert_eq!(app.filter, "neo", "the letters went to the library keys");
-        // `o` is the sort key and `e` is rename, and neither may have fired.
+        assert_eq!(app.filter, "nes,", "the letters went to the library keys");
+        assert_eq!(app.view, View::Library, "a typed comma opened the settings");
+        // `s` is the sort key and `e` is rename, and neither may have fired.
         assert_eq!(app.sort, crate::app::Sort::Name);
         assert!(cmds.try_recv().is_err(), "typing sent a command");
 
         // Enter keeps the query and hands the keys back to the screen.
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(!app.typing_filter);
-        handle_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('s'), KeyModifiers::NONE);
         assert_eq!(app.sort, crate::app::Sort::Synced, "the keys did not come back");
     }
 
@@ -2849,6 +2881,121 @@ mod tests {
         app.unlocked.grant(crate::cheats::Feature::Music);
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(matches!(cmds.try_recv(), Ok(Cmd::GetTop { titles, .. }) if titles == ["Spoon", "Vitamin C"]));
+    }
+
+    // The first Esc stops a search and stays on the page; once the worker is idle, Esc leaves as it always did.
+    #[test]
+    fn esc_during_a_search_stops_it_and_then_leaves() {
+        use std::sync::atomic::Ordering;
+        let (mut app, _cmds) = on_page(vec![]);
+        app.apply(app::Msg::Discography { name: "Can".into(), found: None, rows: Ok(vec![album("Tago Mago", "album", 0, Some(7))]) });
+        app.apply(app::Msg::Idle);
+        app.unlocked.grant(crate::cheats::Feature::Music);
+        app.stop.store(true, Ordering::SeqCst);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(app.searching && !app.stop.load(Ordering::SeqCst), "a stop left from before ended this search at once");
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(app.stop.load(Ordering::SeqCst));
+        assert_eq!(app.view, View::Artist, "Esc left the page instead of stopping the search");
+        app.apply(app::Msg::Idle);
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.view, View::Artists);
+    }
+
+    fn with_settings(app: &mut App) {
+        let rows = vec![
+            crate::config::Row { key: "cover", value: crate::config::Value::Switch(true), source: crate::config::Source::Default, what: "", when: crate::config::When::NextRun },
+            crate::config::Row { key: "pick", value: crate::config::Value::Switch(false), source: crate::config::Source::Flag, what: "", when: crate::config::When::NextRun },
+            crate::config::Row { key: "dir", value: crate::config::Value::Fixed("/music".into()), source: crate::config::Source::File, what: "", when: crate::config::When::NextStart },
+        ];
+        app.apply(app::Msg::Settings { text: String::new(), format: "m4a".into(), rows });
+    }
+
+    // `,` opens the settings from a list and Esc goes back to that list, not to the library.
+    #[test]
+    fn settings_open_from_any_list_and_esc_returns_to_it() {
+        let (mut app, _cmds) = on_artists(vec![], vec![artist("Can", 3, true)]);
+        handle_key(&mut app, KeyCode::Char(','), KeyModifiers::NONE);
+        assert_eq!(app.view, View::Settings);
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.view, View::Artists);
+        // Typed into the artists query, it is a comma.
+        handle_key(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char(','), KeyModifiers::NONE);
+        assert_eq!((app.view, app.artists.query.as_str()), (View::Artists, ","));
+    }
+
+    // Enter flips a switch through the worker. One a flag set, or a fixed one, says why and sends nothing.
+    #[test]
+    fn enter_changes_a_setting_unless_a_flag_or_the_file_holds_it() {
+        let (mut app, cmds) = on_artists(vec![], vec![]);
+        with_settings(&mut app);
+        assert!(!app.notify(), "no notify row is no bell");
+        handle_key(&mut app, KeyCode::Char(','), KeyModifiers::NONE);
+        let _ = cmds.try_iter().count();
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::Switch("cover", false))));
+        app.apply(app::Msg::Idle);
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(cmds.try_recv().is_err(), "changed a setting the command line turned off");
+        assert!(app.stage.contains("--no-pick"), "{}", app.stage);
+        // A fresh screen, since a flash on screen queues the next one.
+        let (mut fixed, sent) = on_artists(vec![], vec![]);
+        with_settings(&mut fixed);
+        handle_key(&mut fixed, KeyCode::Char(','), KeyModifiers::NONE);
+        handle_key(&mut fixed, KeyCode::Char('G'), KeyModifiers::NONE);
+        let _ = sent.try_iter().count();
+        handle_key(&mut fixed, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(sent.try_recv().is_err());
+        assert!(fixed.stage.contains("config file"), "{}", fixed.stage);
+        // The worker owns the config, so nothing is sent while it is busy.
+        app.busy = true;
+        app.settings_cursor = 0;
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(cmds.try_recv().is_err(), "sent a change into a running worker");
+        // Nor during the first run, which no `send` started, so `busy` is clear through it.
+        app.busy = false;
+        app.done = None;
+        app.tracks = vec![app::Track::new(1, "v".into(), "Spoon".into(), "/m/Spoon.opus".into())];
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(cmds.try_recv().is_err(), "sent a change into the first run");
+    }
+
+    // `G` from a middle row overflowed adding `usize::MAX`, which a cursor at the top never shows.
+    #[test]
+    fn the_settings_cursor_reaches_both_ends_from_anywhere() {
+        let (mut app, _cmds) = on_artists(vec![], vec![]);
+        with_settings(&mut app);
+        handle_key(&mut app, KeyCode::Char(','), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('G'), KeyModifiers::NONE);
+        assert_eq!(app.settings_cursor, 2);
+        handle_key(&mut app, KeyCode::Char('g'), KeyModifiers::NONE);
+        assert_eq!(app.settings_cursor, 0);
+    }
+
+    // Icons change when the worker says they were saved, so a failed save leaves screen and file agreeing.
+    // The bell is read off the same rows.
+    #[test]
+    fn icons_and_the_bell_follow_the_rows_the_worker_sends() {
+        use crate::config::{Row, Source, Value, When};
+        let (mut app, cmds) = on_artists(vec![], vec![]);
+        let rows = |icons, bell| vec![
+            Row { key: "icons", value: Value::Icons(icons), source: Source::Default, what: "", when: When::Now },
+            Row { key: "notify", value: Value::Switch(bell), source: Source::Default, what: "", when: When::Now },
+        ];
+        app.apply(app::Msg::Settings { text: String::new(), format: "m4a".into(), rows: rows(crate::icons::Icons::Text, true) });
+        assert!(app.notify());
+        assert_eq!(app.icons, crate::icons::Icons::Text);
+        handle_key(&mut app, KeyCode::Char(','), KeyModifiers::NONE);
+        let _ = cmds.try_iter().count();
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::Icons(crate::icons::Icons::Symbols))));
+        assert_eq!(app.icons, crate::icons::Icons::Text, "drew icons the worker had not saved");
+        app.apply(app::Msg::Settings { text: String::new(), format: "m4a".into(), rows: rows(crate::icons::Icons::Symbols, false) });
+        assert_eq!(app.icons, crate::icons::Icons::Symbols);
+        assert!(!app.notify());
     }
 
     // Dropped while the last list was still coming, Tab read as a dead key.

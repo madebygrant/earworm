@@ -182,7 +182,7 @@ pub struct FileTheme {
 }
 
 impl FileConfig {
-    /// `required` when the path came from --config: naming a file earworm
+        /// `required` when the path came from --config: naming a file earworm
     /// then ignores is worse than no config at all, so only the default
     /// location is allowed to be absent.
     pub fn load(path: &std::path::Path, required: bool) -> Result<Self> {
@@ -222,6 +222,109 @@ pub const FORMATS: [(&str, &str, &[&str]); 6] = [
 ];
 
 pub const DEFAULT_FORMAT: &str = "m4a";
+
+/// When a changed setting takes effect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum When {
+    /// The next download or sync, which reads the config the worker holds.
+    NextRun,
+    Now,
+    /// Read once before the first frame.
+    NextStart,
+}
+
+/// Where a setting's value came from, so the settings screen can say why it is what it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Source {
+    Default,
+    File,
+    Flag,
+    Env,
+}
+
+/// An on/off setting: its config key, the flag that turns it off, and what it does.
+pub struct Switch {
+    pub key: &'static str,
+    pub flag: &'static str,
+    pub what: &'static str,
+    pub when: When,
+}
+
+// The settings screen's switches, in its order. `FileConfig::switch` and `Config::switch` read each by key.
+pub const SWITCHES: [Switch; 16] = [
+    Switch { key: "convert", flag: "no_convert", what: "tracks on disk follow the format when their playlist syncs", when: When::NextRun },
+    Switch { key: "pick", flag: "no_pick", what: "stop to choose tracks before a download", when: When::NextRun },
+    Switch { key: "lookup", flag: "no_lookup", what: "identify tracks with AcoustID and Deezer", when: When::NextRun },
+    Switch { key: "apple", flag: "no_apple", what: "try Apple Music when Deezer finds nothing", when: When::NextRun },
+    Switch { key: "parse", flag: "no_parse", what: "read artist and title out of the video title", when: When::NextRun },
+    Switch { key: "fix", flag: "no_fix", what: "ask about tracks nothing could confirm", when: When::NextRun },
+    Switch { key: "rename", flag: "no_rename", what: "rename files from the corrected tags", when: When::NextRun },
+    Switch { key: "album", flag: "no_album", what: "fill an empty album tag with the playlist name", when: When::NextRun },
+    Switch { key: "cover", flag: "no_cover", what: "fetch and embed cover art", when: When::NextRun },
+    Switch { key: "m3u8", flag: "no_m3u8", what: "write an .m3u8 beside the tracks", when: When::NextRun },
+    Switch { key: "loudness", flag: "no_loudness", what: "write ReplayGain and R128 loudness tags", when: When::NextRun },
+    Switch { key: "lyrics", flag: "no_lyrics", what: "fetch lyrics from LRCLIB", when: When::NextRun },
+    Switch { key: "notify", flag: "no_notify", what: "ring the bell when a long run finishes", when: When::Now },
+    Switch { key: "intro", flag: "no_intro", what: "the opening animation", when: When::NextStart },
+    Switch { key: "update_check", flag: "no_update_check", what: "ask GitHub once a day for a newer release", when: When::NextStart },
+    Switch { key: "achievements", flag: "no_achievements", what: "announce and remember achievements", when: When::NextStart },
+];
+
+// One list of the switch fields for the three lookups by key. `SWITCHES` carries the rest of each, and a test
+// checks the two name the same keys.
+macro_rules! switches {
+    ($($key:ident),* $(,)?) => {
+        impl FileConfig {
+            /// A switch's value in the file, by its key in `SWITCHES`.
+            pub fn switch(&self, key: &str) -> Option<bool> {
+                match key {
+                    $(stringify!($key) => self.$key,)*
+                    _ => None,
+                }
+            }
+        }
+
+        impl Config {
+            /// A switch's value this session, by its key in `SWITCHES`.
+            pub fn switch(&self, key: &str) -> Option<bool> {
+                match key {
+                    $(stringify!($key) => Some(self.$key),)*
+                    _ => None,
+                }
+            }
+
+            pub fn set_switch(&mut self, key: &str, on: bool) {
+                match key {
+                    $(stringify!($key) => self.$key = on,)*
+                    _ => {}
+                }
+            }
+        }
+    };
+}
+
+switches!(convert, loudness, lyrics, parse, m3u8, cover, lookup, apple, fix, rename, album, pick, intro, notify, update_check, achievements);
+
+/// What the settings screen lists and what Enter does to it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Value {
+    Switch(bool),
+    Format(String),
+    Icons(crate::icons::Icons),
+    // Read off the UI's palette when drawn, never copied: `^t` changes it without the worker knowing.
+    Theme,
+    /// Changed only in the file or on the command line.
+    Fixed(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Row {
+    pub key: &'static str,
+    pub value: Value,
+    pub source: Source,
+    pub what: &'static str,
+    pub when: When,
+}
 
 /// The palette earworm has always drawn in, and the first stop on the `^t`
 /// walk. A name rather than `Palette::default()` because the theme is now
@@ -423,7 +526,19 @@ pub fn save_theme(path: &std::path::Path, theme: &str) -> Result<()> {
 }
 
 pub fn save_convert(path: &std::path::Path, on: bool) -> Result<()> {
-    save_key(path, "convert", if on { "true" } else { "false" })
+    save_switch(path, "convert", on)
+}
+
+/// One of `SWITCHES`, by key. Anything else is refused rather than written as a key the next start rejects.
+pub fn save_switch(path: &std::path::Path, key: &str, on: bool) -> Result<()> {
+    if !SWITCHES.iter().any(|s| s.key == key) {
+        anyhow::bail!("{key} is not a setting");
+    }
+    save_key(path, key, if on { "true" } else { "false" })
+}
+
+pub fn save_icons(path: &std::path::Path, icons: crate::icons::Icons) -> Result<()> {
+    save_key(path, "icons", &format!("\"{}\"", icons.name()))
 }
 
 /// Writes one key back in place, leaving comments and every other line as
@@ -666,6 +781,8 @@ pub struct Config {
     pub theme_overridden: bool,
     /// What the `^z ^x` console has unlocked this session, shared with the UI.
     pub unlocked: std::sync::Arc<crate::cheats::Unlocked>,
+    /// Where each setting the screen lists came from, by key.
+    pub sources: BTreeMap<&'static str, Source>,
 }
 
 impl Config {
@@ -697,6 +814,32 @@ impl Config {
         let opt_in = |id: &str, from_file: Option<bool>| {
             if given(id) { false } else { from_file.unwrap_or(false) }
         };
+
+        // Before the values are taken apart below.
+        let mut sources = BTreeMap::new();
+        for switch in &SWITCHES {
+            let source = if given(switch.flag) {
+                Source::Flag
+            } else if file.switch(switch.key).is_some() {
+                Source::File
+            } else {
+                Source::Default
+            };
+            sources.insert(switch.key, source);
+        }
+        let either = |flag: bool, in_file: bool| match (flag, in_file) {
+            (true, _) => Source::Flag,
+            (_, true) => Source::File,
+            _ => Source::Default,
+        };
+        sources.insert("format", either(cli.format.is_some(), file.format.is_some()));
+        sources.insert("icons", either(false, file.icons.is_some()));
+        sources.insert("theme", either(cli.theme.is_some(), file.theme.is_some()));
+        sources.insert("dir", either(given("dir"), file.dir.is_some()));
+        sources.insert("extra", either(!cli.extra.is_empty(), file.extra.is_some()));
+        let env_key = std::env::var("ACOUSTID_API_KEY").is_ok_and(|k| !k.is_empty());
+        let file_key = file.acoustid_key.as_ref().is_some_and(|k| !k.is_empty());
+        sources.insert("acoustid_key", if env_key { Source::Env } else { either(false, file_key) });
 
         let dir = if given("dir") {
             cli.dir
@@ -770,6 +913,7 @@ impl Config {
             theme_warnings,
             theme_overridden,
             unlocked: Default::default(),
+            sources,
             // The environment wins, so a key can be swapped for one run.
             acoustid_key: std::env::var("ACOUSTID_API_KEY")
                 .ok()
@@ -777,6 +921,27 @@ impl Config {
                 .or(file.acoustid_key)
                 .filter(|k| !k.is_empty()),
         })
+    }
+
+    /// Every setting, as the settings screen lists it.
+    pub fn rows(&self) -> Vec<Row> {
+        let source = |key: &str| self.sources.get(key).copied().unwrap_or(Source::Default);
+        let row = |key: &'static str, value: Value, what: &'static str, when: When| Row { key, value, source: source(key), what, when };
+        let mut rows = vec![
+            row("format", Value::Format(self.format.clone()), "the format new downloads arrive in", When::NextRun),
+            row("theme", Value::Theme, "the colours, which ^t also walks", When::Now),
+            row("icons", Value::Icons(self.icons), "how the library marks albums and playlists", When::Now),
+        ];
+        rows.extend(SWITCHES.iter().map(|s| row(s.key, Value::Switch(self.switch(s.key).unwrap_or_default()), s.what, s.when)));
+        // The key itself is never shown: this screen can be on somebody else's screen share.
+        let key = if self.acoustid_key.is_some() { "set" } else { "not set" };
+        let extra = if self.extra.is_empty() { "none".to_string() } else { self.extra.join(" ") };
+        rows.extend([
+            row("dir", Value::Fixed(self.dir.display().to_string()), "where playlists are downloaded", When::NextStart),
+            row("acoustid_key", Value::Fixed(key.into()), "the AcoustID key for identifying tracks", When::NextStart),
+            row("extra", Value::Fixed(extra), "arguments passed to yt-dlp", When::NextStart),
+        ]);
+        rows
     }
 
     /// Shown in the help overlay, so a run's settings are visible without
@@ -894,6 +1059,46 @@ mod tests {
         let text = std::fs::read_to_string(&file.path).unwrap();
         assert_eq!(text.matches("convert").count(), 1, "{text:?}");
         assert!(!build_at(&file.path).convert);
+    }
+
+    // The table, the file, the session and the flags all name a switch by one key. A key one of them lacks is
+    // a setting the screen shows and cannot change, or saves and cannot read back.
+    #[test]
+    fn every_switch_is_read_set_saved_and_flagged_by_its_key() {
+        let mut file = temp("switches");
+        let all: String = SWITCHES.iter().map(|s| format!("{} = false\n", s.key)).collect();
+        write!(file.handle, "{all}").unwrap();
+        let path = std::path::Path::new(&file.path);
+        let parsed = FileConfig::load(path, true).unwrap();
+        let mut cfg = build_at(&file.path);
+        let flags: Vec<String> = Cli::command().get_arguments().map(|a| a.get_id().to_string()).collect();
+        for switch in &SWITCHES {
+            assert_eq!(parsed.switch(switch.key), Some(false), "{}", switch.key);
+            assert_eq!(cfg.switch(switch.key), Some(false), "{}", switch.key);
+            cfg.set_switch(switch.key, true);
+            assert_eq!(cfg.switch(switch.key), Some(true), "{}", switch.key);
+            assert!(flags.contains(&switch.flag.to_string()), "no flag {}", switch.flag);
+            save_switch(path, switch.key, true).unwrap();
+            assert_eq!(build_at(&file.path).switch(switch.key), Some(true), "{} did not survive a restart", switch.key);
+        }
+        assert!(save_switch(path, "colors", true).is_err(), "wrote a key that is not a switch");
+    }
+
+    #[test]
+    fn a_setting_says_whether_the_file_a_flag_or_the_default_set_it() {
+        let cfg = build("cover = false\nformat = \"flac\"\nacoustid_key = \"sekrit42\"\n", &["--no-pick"]);
+        assert_eq!(cfg.sources["cover"], Source::File);
+        assert_eq!(cfg.sources["pick"], Source::Flag);
+        assert_eq!(cfg.sources["lookup"], Source::Default);
+        assert_eq!(cfg.sources["format"], Source::File);
+        assert_eq!(cfg.sources["theme"], Source::Default);
+        assert_eq!(build("theme = \"cool\"\n", &[]).sources["theme"], Source::File);
+        let rows = cfg.rows();
+        let pick = rows.iter().find(|r| r.key == "pick").unwrap();
+        assert_eq!((&pick.value, pick.source), (&Value::Switch(false), Source::Flag));
+        let key = rows.iter().find(|r| r.key == "acoustid_key").unwrap();
+        assert_eq!(key.value, Value::Fixed("set".into()));
+        assert!(!format!("{rows:?}").contains("sekrit42"), "the settings screen would show the key");
     }
 
     /// Every format has to name an encoder, or converting to it fails at the
