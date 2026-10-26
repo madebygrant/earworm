@@ -1181,6 +1181,8 @@ pub struct App {
     pub page_back: Vec<String>,
     /// What the startup check found from starred artists, as (artist, release id, title), until their page is read.
     pub new_releases: Vec<(String, u64, String)>,
+    // Artists whose page was read this session, by `artists::key`, which a late check must not mark new again.
+    pages_read: HashSet<String>,
     // The search screen's matches, computed once per frame by `draw` so the header, the band and the list read one answer.
     pub found_cache: Vec<crate::picker::Hit>,
     // Tracks marked on the search screen for `P`, by folder and filename like the picker's.
@@ -1345,6 +1347,7 @@ impl App {
             pick_held: Vec::new(),
             page_back: Vec::new(),
             new_releases: Vec::new(),
+            pages_read: HashSet::new(),
             found_cache: Vec::new(),
             found_marks: crate::picker::Marks::default(),
             from_found: false,
@@ -1633,6 +1636,7 @@ impl App {
                                 row.new = fresh.contains(&row.id);
                             }
                             self.new_releases.retain(|(a, ..)| crate::artists::key(a) != key);
+                            self.pages_read.insert(key);
                             self.page.rows = rows;
                         }
                         Err(why) => self.page.error = Some(why),
@@ -1645,15 +1649,20 @@ impl App {
                 if self.page.name == name {
                     self.page.top = Some(rows);
                     self.page.top_at = 0;
+                    self.page.top_asked = false;
                 }
             }
             Msg::Related { name, rows } => {
                 if self.page.name == name {
                     self.page.related = Some(rows);
                     self.page.related_at = 0;
+                    self.page.related_asked = false;
                 }
             }
-            Msg::NewReleases(found) => self.new_releases = found,
+            // A page read while the check was still going recorded those releases seen; its stale copy must not bring them back.
+            Msg::NewReleases(found) => {
+                self.new_releases = found.into_iter().filter(|(a, ..)| !self.pages_read.contains(&crate::artists::key(a))).collect();
+            }
             Msg::Counted { name, id, of } => {
                 if self.page.name == name {
                     for row in self.page.rows.iter_mut().filter(|r| r.id == id) {
@@ -2150,11 +2159,12 @@ impl App {
         self.page.section = self.page.section.next();
         let name = self.page.name.clone();
         match self.page.section {
-            Section::Top if self.page.top.is_none() && !self.page.top_asked => {
+            // Not yet here, or failed: "tab again tries again" is what the failure says.
+            Section::Top if !matches!(self.page.top, Some(Ok(_))) && !self.page.top_asked => {
                 self.page.top_asked = true;
                 self.send(Cmd::Top(name));
             }
-            Section::Related if self.page.related.is_none() && !self.page.related_asked => {
+            Section::Related if !matches!(self.page.related, Some(Ok(_))) && !self.page.related_asked => {
                 self.page.related_asked = true;
                 self.send(Cmd::Related(name));
             }

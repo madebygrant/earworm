@@ -166,7 +166,7 @@ Any of them can slip.
 Exit: each part has its own `TestBackend` test, and new releases has a unit
 test over canned dates.
 
-## 6. Documentation
+## 6. Documentation [done 2026-10-26]
 
 Why last: the docs describe how the earlier waves end up behaving.
 

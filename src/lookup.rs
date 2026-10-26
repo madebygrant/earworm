@@ -553,7 +553,8 @@ pub fn plausible(m: &Match, artist: &str, title: &str) -> bool {
 
 const SYMBOL_SEPARATORS: [char; 3] = [',', '&', '/'];
 const WORD_SEPARATORS: [&str; 3] = ["feat", "ft", "with"];
-const FEATURING: [&str; 2] = ["feat", "ft"];
+// "featuring" first: `separator_of` takes the first word that fits, and "feat" would stop inside it.
+const FEATURING: [&str; 3] = ["featuring", "feat", "ft"];
 
 /// Word separators need boundaries on both sides, or "Wilco" and "Software"
 /// would be split down the middle.
@@ -626,11 +627,22 @@ fn split_artists(name: &str) -> Vec<String> {
 /// The credit before any "feat." or "ft.", which is the artist whose record it is.
 // Not `split_artists`: `&`, `,`, `/` and "with" are inside band names (AC/DC, Simon & Garfunkel, Nurse
 // With Wound), and cutting there names an artist who does not exist.
+// Only with a name on both sides: "Little Feat" ends in the word and is a band, not a credit.
 pub fn lead_artist(name: &str) -> String {
     let chars: Vec<char> = name.chars().collect();
-    let end = (0..chars.len()).find(|&i| separator_of(&chars, i, &FEATURING).is_some()).unwrap_or(chars.len());
+    let credits = |i: usize| {
+        separator_of(&chars, i, &FEATURING).is_some_and(|len| i > 0 && chars[i + len..].iter().any(|c| c.is_alphanumeric()))
+    };
+    let end = (0..chars.len()).find(|&i| credits(i)).unwrap_or(chars.len());
     let lead: String = chars[..end].iter().collect();
     lead.trim_end_matches(|c: char| c.is_whitespace() || c == '(' || c == '[').trim().to_string()
+}
+
+/// Whether `artist` is one of the names `by` credits, exactly on `normalise`: "Can & Damo Suzuki" credits Can,
+/// where "Candlemass" does not.
+pub(crate) fn credits(by: &str, artist: &str) -> bool {
+    let want = normalise(artist);
+    !want.is_empty() && (normalise(by) == want || split_artists(by).iter().any(|part| normalise(part) == want))
 }
 
 /// True when a match drops a distinct collaborator the tags already had. One
@@ -1153,5 +1165,21 @@ mod tests {
             assert_eq!(lyrics_via(&breaker, "A", "B", "", 213, missing), Lookup::Missing);
         }
         assert!(!breaker.paused(Instant::now()));
+    }
+
+    #[test]
+    fn a_band_ending_in_feat_is_kept_and_featuring_is_a_credit() {
+        assert_eq!(lead_artist("Little Feat"), "Little Feat");
+        assert_eq!(lead_artist("Massive Attack featuring Tracey Thorn"), "Massive Attack");
+        assert_eq!(lead_artist("Massive Attack feat Tracey Thorn"), "Massive Attack");
+        assert_eq!(lead_artist("Massive Attack (ft. Tracey Thorn)"), "Massive Attack");
+    }
+
+    #[test]
+    fn a_credit_is_a_whole_name_and_never_a_name_inside_another() {
+        assert!(credits("Can & Damo Suzuki", "Can"));
+        assert!(credits("Coldplay", "coldplay"));
+        assert!(!credits("Candlemass", "Can"));
+        assert!(!credits("Can", "Scandal"));
     }
 }

@@ -1121,7 +1121,7 @@ fn draw_artists(frame: &mut Frame, app: &mut App, area: Rect) {
         } else if app.artists.rows.is_empty() {
             " no track in the library has an artist tag   esc goes back".to_string()
         } else {
-            format!(" no artist matches /{}   esc clears", app.filter)
+            format!(" no artist matches /{}   esc clears", app.artists.query)
         };
         frame.render_widget(Paragraph::new(Line::from(dim(said, p))), area);
         return;
@@ -6070,5 +6070,17 @@ mod tests {
         let screen = screen_of(&mut app, 90, 10);
         let line = |name: &str| screen.lines().find(|l| l.contains(name)).unwrap_or_default().to_string();
         assert!(line("Can").contains("+ 2 new") && !line("Neu!").contains("new"), "{screen}");
+    }
+
+    // The artists screen has its own query, so that is what the empty pane names.
+    #[test]
+    fn an_artist_query_that_matches_nothing_is_named_in_the_pane() {
+        let mut app = artists_app();
+        let row = crate::app::ArtistRow { name: "Can".into(), tracks: 1, albums: 1, starred: false, folders: Vec::new() };
+        app.apply(Msg::Artists { rows: vec![row], focus: None });
+        app.filter = "rock".into();
+        app.artist_query(|q| q.push_str("zzz"));
+        let screen = screen_of(&mut app, 80, 10);
+        assert!(screen.contains("no artist matches /zzz"), "{screen}");
     }
 }

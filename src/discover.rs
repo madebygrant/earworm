@@ -57,8 +57,8 @@ pub fn artist_by_id(id: u64) -> Option<Found> {
 // Search returns every act with a similar name, and three bands are called Can. Only an exact name counts
 // (on `normalise`), and the most followed of those is the one a library is most likely to hold.
 fn pick(hits: &[Value], name: &str) -> Option<Found> {
-    let want = normalise(name);
-    hits.iter().filter_map(found).filter(|f| normalise(&f.name) == want).max_by_key(|f| f.fans)
+    let want = artists::key(name);
+    hits.iter().filter_map(found).filter(|f| artists::key(&f.name) == want).max_by_key(|f| f.fans)
 }
 
 fn found(hit: &Value) -> Option<Found> {
@@ -189,7 +189,9 @@ fn stripped(title: &str, words: &[&str]) -> String {
             break;
         }
     }
-    normalise(&text)
+    // A title of punctuation alone ("()") keeps one, as an artist's name does in `artists::key`.
+    let key = normalise(&text);
+    if key.is_empty() { text.trim().to_lowercase() } else { key }
 }
 
 // Where a final `(...)` or `[...]` starts, if the title ends with one.
@@ -587,7 +589,7 @@ mod tests {
         assert_eq!(rows.unwrap().len(), 2);
         assert!(artists::seen(&dir).is_empty(), "an artist nobody starred was recorded");
         artists::toggle(&dir, "Can").unwrap();
-        page(&dir, &[], "Can", &mut cache);
+        let _ = page(&dir, &[], "Can", &mut cache);
         assert_eq!(artists::seen(&dir)[&artists::key("Can")], std::collections::HashSet::from([1]));
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -603,5 +605,14 @@ mod tests {
         assert_eq!(rows[0].name, "Nirvana");
         assert_eq!(resolve(&dir, "Nirvana", &artists::key("Nirvana"), &mut cache).map(|f| f.id), Some(77));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // Sigur Rós's "()" normalised to nothing, so it was never held and matched every untagged album.
+    #[test]
+    fn an_album_titled_in_punctuation_keeps_a_key_of_its_own() {
+        assert_eq!(album_key("()"), "()");
+        assert_ne!(album_key("()"), album_key(""));
+        let data = json!({ "data": [release(1, "()", "album", "2002-10-28")] });
+        assert_eq!(marks(&owned(&parse_releases(&data), &held(&[("()", 8)]))), [("()", 8)]);
     }
 }

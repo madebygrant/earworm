@@ -71,7 +71,8 @@ pub fn group<'a>(tracks: impl IntoIterator<Item = (&'a str, &'a str, &'a Path, b
             Some((_, n)) => *n += 1,
             None => one.spellings.push((lead, 1)),
         }
-        let album_key = normalise(album);
+        // One record under any edition: "Tago Mago (Remastered)" is not a second album.
+        let album_key = if album.trim().is_empty() { String::new() } else { crate::discover::album_key(album) };
         if !album_key.is_empty() {
             match one.albums.iter_mut().find(|(k, ..)| *k == album_key) {
                 Some((.., n)) => *n += 1,
@@ -149,7 +150,12 @@ pub fn titles_of(index: &[Artist], artist: &str) -> Vec<String> {
 /// The titles the library holds of one artist's album, matched as the discography matches it.
 pub fn owned_titles(index: &[Artist], artist: &str, album: &str) -> Vec<String> {
     let want = crate::discover::album_key(album);
-    tracks_of(index, artist).into_iter().filter(|(_, al)| crate::discover::album_key(al) == want).map(|(title, _)| title).collect()
+    // A track with no album tag is on no album, whatever the album asked for is called.
+    tracks_of(index, artist)
+        .into_iter()
+        .filter(|(_, al)| !al.trim().is_empty() && crate::discover::album_key(al) == want)
+        .map(|(title, _)| title)
+        .collect()
 }
 
 /// The release ids already known for each starred artist, by `key`. An artist with no line has never been
@@ -561,5 +567,11 @@ mod tests {
         assert_eq!(all[&key("Björk")], HashSet::from([1, 2, 3]));
         assert!(all[&key("Can")].is_empty(), "an artist looked at with nothing out still has a line");
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn editions_of_one_record_are_one_album() {
+        let found = grouped([("Can", "Tago Mago"), ("Can", "Tago Mago (Remastered)"), ("Can", "Ege Bamyasi")]);
+        assert_eq!(counts(&found), [("Can", 3, 2)]);
     }
 }

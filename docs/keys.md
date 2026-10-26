@@ -34,6 +34,7 @@ touch, and failures](images/keys.png)
 | `T` | search again for the track under the cursor (after the run) |
 | `s` | swap artist and title on the marked tracks |
 | `A` | set one artist across the marked tracks |
+| `*` | star or unstar the artist of the track under the cursor |
 | `tab` `^s` | next field, swap artist and title (in the edit form) |
 | `r` | retry every failed track (after the run) |
 | `S` | sync the open playlist, asking for a URL if it has none |
@@ -58,6 +59,7 @@ touch, and failures](images/keys.png)
 | `O` | open this folder in the file manager |
 | `/` | filter the folders by name, or by a track inside them |
 | `t` | every matching track across the library, flat |
+| `b` | every artist in the library, starred first ([discovery](discovery.md)) |
 | `o` | order: name, last synced, most missing |
 | `a` | show every folder, albums only, or playlists only |
 | `p` | play the folder under the cursor in cliamp (needs a playlist file) |
@@ -70,6 +72,29 @@ touch, and failures](images/keys.png)
 | `l` | toggle the yt-dlp output pane |
 | `h` `?` | keys and current settings |
 | `q` `Esc` `ctrl+c` | quit |
+
+## Artists
+
+| Key | Action |
+| --- | --- |
+| `j` `k` `↑` `↓` `g` `G` | move |
+| `^d` `^u` `PgDn` `PgUp` | move by a screenful |
+| `enter` | this artist's page |
+| `o` | the library, narrowed to the folders holding their tracks |
+| `*` | star or unstar this artist |
+| `/` | filter by name, ignoring accents and case |
+| `Esc` | clear the filter, else back to the library |
+
+## Artist page
+
+| Key | Action |
+| --- | --- |
+| `tab` | releases, top tracks, related artists |
+| `j` `k` `↑` `↓` `g` `G` | move |
+| `enter` | get a missing release or the missing top tracks from YouTube Music (once unlocked), or open a related artist's page |
+| `a` | albums and EPs, or every release |
+| `o` | the library, narrowed to their folders |
+| `Esc` | the page before, else the artists |
 
 ## The details
 

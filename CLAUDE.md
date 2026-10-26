@@ -40,6 +40,10 @@ in docs/rules/themes-and-colour.md.
 - `theme.rs` — `Palette` and the four themes it ships, the WCAG measurements
   that keep them legible, `background()` (the diagonal gradient painted behind
   every frame) and the 256-colour quantiser
+- `artists.rs` — the artist index read off the tags, `key` (one artist under
+  any spelling), and the `.artists` and `.artists-seen` stores
+- `discover.rs` — Deezer's artists, releases, top tracks and related artists,
+  `album_key`/`song_key`, the owned/partial match and the new-release check
 
 
 ## Rules
@@ -71,6 +75,7 @@ which is read when somebody doubts a rule rather than at the start of a session.
 | Dependencies, `--check` and the update check: `DEPS`, `--check`, the GitHub probe | `docs/rules/dependencies-and-updates.md` | touching `deps.rs`, `update.rs` or `--check` |
 | Themes and colour depth: `Palette`, `[themes.*]`, `[colors]`, `^t`, truecolor vs 256, `NO_COLOR` | `docs/rules/themes-and-colour.md` | touching `theme.rs`, `recolour`, theme config or any colour in `ui.rs` |
 | Lists, narrowing and search: scrolling, flashes, the filter, review, the library order, `t` search, undo | `docs/rules/lists-and-search.md` | touching `rows()`, `shelf_rows()`, `found_hits`, the filter box or undo |
+| Artists and discovery: the artist index, stars, the artist page, getting albums and top tracks, new releases | `docs/rules/discovery.md` | touching `artists.rs`, `discover.rs`, `find_album`/`find_song`, `View::Artists`/`View::Artist` or `by_artist` |
 | Verbs, text, subprocesses and drawing: status verbs, the bell, column widths, `run_bounded`, the intro, the gradient | `docs/rules/ui-details.md` | touching text widths, subprocess calls, the intro or `draw_*` layout |
 
 A rule that mentions "the albums section" or a similar section name means the

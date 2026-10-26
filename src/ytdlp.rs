@@ -188,11 +188,9 @@ fn song_ids(found: &str, want: &str) -> Vec<String> {
         .collect()
 }
 
-// One contains the other on `artists::key`, so "Coldplay" is the channel "Coldplay" and a credit like
-// "Can & Damo Suzuki" still counts as Can's.
+// A whole credited name, not containment: "Candlemass" is not Can's channel.
 fn same_artist(by: &str, artist: &str) -> bool {
-    let (theirs, ours) = (crate::artists::key(by), crate::artists::key(artist));
-    !theirs.is_empty() && (theirs.contains(&ours) || ours.contains(&theirs))
+    crate::lookup::credits(by, artist)
 }
 
 fn flat(bin: &str, args: &[&str]) -> Result<String, String> {

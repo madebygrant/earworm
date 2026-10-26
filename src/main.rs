@@ -2880,4 +2880,30 @@ mod tests {
         assert_eq!(app.new_releases.len(), 1, "Can's stayed counted after its page was read");
         assert_eq!(app.new_releases[0].0, "Neu!");
     }
+
+    // The failure says "tab again tries again", so it has to.
+    #[test]
+    fn tab_asks_again_for_a_list_that_failed() {
+        let (mut app, cmds) = on_page(vec![]);
+        handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        app.apply(app::Msg::Top { name: "Can".into(), rows: Err("Deezer did not send the top tracks".into()) });
+        app.apply(app::Msg::Idle);
+        let _ = cmds.try_iter().count();
+        for _ in 0..3 {
+            handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        }
+        let asked: Vec<Cmd> = cmds.try_iter().collect();
+        assert!(asked.iter().any(|c| matches!(c, Cmd::Top(_))), "a failed list was never asked for again");
+    }
+
+    // A page read before a slow check finishes recorded those releases seen; the check must not undo it.
+    #[test]
+    fn a_late_check_does_not_bring_back_a_page_already_read() {
+        let (mut app, _cmds) = on_artists(vec![], vec![artist("Can", 3, true)]);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        app.apply(app::Msg::Discography { name: "Can".into(), found: None, rows: Ok(vec![]) });
+        app.apply(app::Msg::NewReleases(vec![("Can".into(), 42, "Live 1975".into()), ("Neu!".into(), 7, "Neu! 4".into())]));
+        let left: Vec<&str> = app.new_releases.iter().map(|(a, ..)| a.as_str()).collect();
+        assert_eq!(left, ["Neu!"]);
+    }
 }

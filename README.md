@@ -69,6 +69,11 @@ download from a music library:
 - **A song on two playlists downloads once.** A video another folder already
   holds is copied across instead of fetched again, and the pick screen marks a
   likely duplicate with `≈`.
+- **Artists, and what you're missing of them.** `b` lists every artist your
+  tags name. Star the ones you follow, open an artist to see their
+  discography marked owned, partial or missing, their top tracks and who's
+  related, and hear about their new releases each time earworm starts. With YouTube
+  Music unlocked, Enter fetches what's missing. [Details](docs/discovery.md).
 - **Retries and undos.** `r` re-downloads whatever failed. `u` puts back the
   last tag edit.
 
@@ -95,6 +100,7 @@ turns out to be 361 tracks of seminar recordings.
 | [docs/loudness.md](docs/loudness.md) | ReplayGain and R128 tags, so tracks play at one volume |
 | [docs/lyrics.md](docs/lyrics.md) | embedded lyrics from LRCLIB, and what is sent to it |
 | [docs/library.md](docs/library.md) | the library screen, search, `--resync` |
+| [docs/discovery.md](docs/discovery.md) | artists, stars, discographies, new releases |
 | [docs/playback.md](docs/playback.md) | playing through cliamp |
 | [docs/themes.md](docs/themes.md) | the four palettes, `^t`, and defining your own |
 | [docs/keys.md](docs/keys.md) | every key, both screens, the status words |

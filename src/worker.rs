@@ -167,19 +167,21 @@ impl Link {
 
     // Sets the folder either way: a plain link must not write into the last run's.
     fn adopt(self, cfg: &mut Config, tx: &Sender<Msg>) {
+        cfg.folder = self.name.map(|name| import_folder(&cfg.dir, name, &self.url, &self.ids, tx));
         cfg.url = self.url;
-        cfg.folder = self.name.map(|name| import_folder(&cfg.dir, name, &self.ids, tx));
     }
 }
 
 // Any other same-named folder would be taken over: its `#url` and `.m3u8` rewritten and every
-// track it held offered to `D`. An import sharing a track with this one is an edited copy of it.
-fn import_folder(dir: &Path, name: String, ids: &[String], tx: &Sender<Msg>) -> String {
+// track it held offered to `D`. One with this URL is this playlist, and an import sharing a track with
+// this one is an edited copy of it.
+fn import_folder(dir: &Path, name: String, url: &str, ids: &[String], tx: &Sender<Msg>) -> String {
     let ours = |name: &str| {
         let folder = dir.join(name);
+        let held = manifest::load(&folder).url;
         !folder.exists()
-            || manifest::load(&folder)
-                .url
+            || held.as_deref() == Some(url)
+            || held
                 .and_then(|url| import::queue_ids(&url))
                 .is_some_and(|held| held.iter().any(|id| ids.contains(id)))
     };
@@ -3134,8 +3136,7 @@ fn serve(
     /* Lives for the session rather than per command, since that is what `u`
        means: the last tag write, whichever command made it. */
     let mut held: Option<Undo> = None;
-    // The artist index, built on the first `b` and dropped by any other command: syncs, edits and deletes
-    // all change tags, and listing the ones that do is a list a new command would be left out of.
+    // The artist index, built on the first `b` and dropped by any command `keeps_index` does not name.
     let mut known: Option<Vec<artists::Artist>> = None;
     let mut deezer = discover::Cache::default();
     // After the library is on screen, which is what reaching here means, and off this thread.
@@ -3153,7 +3154,7 @@ fn serve(
         /* Some commands edit what is on screen and some replace it. Only the
            ones that went to the network have an outcome worth a question at
            the end, which is what `synced` carries. */
-        if !matches!(cmd, Cmd::Artists | Cmd::Star(_) | Cmd::Discography(_) | Cmd::GetAlbum { .. } | Cmd::Top(_) | Cmd::Related(_) | Cmd::GetTop { .. }) {
+        if !keeps_index(&cmd) {
             known = None;
         }
         let synced = match cmd {
@@ -3439,6 +3440,13 @@ fn start_url(
     Some(start_link(cfg, tx, cancel, tracks, asker, link, Pass::plain(gate)))
 }
 
+/// Whether a command leaves the cached artist index true. Only the artist screens' own reads do: syncs, edits
+/// and deletes all change tags, and a list of the ones that do is a list a new command would be left out of.
+// `GetAlbum` and `GetTop` read it before they download and drop it after, in their own arms.
+fn keeps_index(cmd: &Cmd) -> bool {
+    matches!(cmd, Cmd::Artists | Cmd::Star(_) | Cmd::Discography(_) | Cmd::Top(_) | Cmd::Related(_) | Cmd::GetAlbum { .. } | Cmd::GetTop { .. })
+}
+
 // What a new URL and a missing album both do once they have a link.
 fn start_link(cfg: &mut Config, tx: &Sender<Msg>, cancel: &AtomicBool, tracks: &mut Vec<Track>, asker: &Asker, link: Link, pass: Pass) -> Result<String> {
     let _ = tx.send(Msg::Restart);
@@ -3520,8 +3528,14 @@ fn top_link(cfg: &Config, tx: &Sender<Msg>, cancel: &AtomicBool, asker: &Asker, 
         return None;
     }
     let name = format!("{artist} - Top Tracks");
-    let note = format!("found {} of the {} missing  ·  into {name}  ·  l lists any it could not find", ids.len(), titles.len());
-    let options = vec!["no, leave them".to_string(), format!("yes, download {}", ids.len())];
+    // What an earlier fetch put there goes in the queue too: a sync against only the new ones would call
+    // every track already in the folder departed, and offer it to `D`.
+    let earlier = manifest::load(&cfg.dir.join(&name)).url.and_then(|url| import::queue_ids(&url)).unwrap_or_default();
+    let found = ids.len();
+    let earlier: Vec<String> = earlier.into_iter().filter(|id| !ids.contains(id)).collect();
+    let ids: Vec<String> = earlier.into_iter().chain(ids).collect();
+    let note = format!("found {found} of the {} missing  ·  into {name}  ·  l lists any it could not find", titles.len());
+    let options = vec!["no, leave them".to_string(), format!("yes, download {found}")];
     if asker.choose_noted(&format!("Download {artist}'s top tracks?"), &note, options) != Some(1) {
         let _ = tx.send(Msg::Flash("nothing downloaded".into()));
         return None;
@@ -5111,10 +5125,12 @@ pub mod tests {
         let ids = |list: &[&str]| list.iter().map(|id| id.to_string()).collect::<Vec<_>>();
         let edited = ids(&["dQw4w9WgXcQ", "UEZ-apKKDKQ"]);
         let unrelated = ids(&["dQw4w9WgXcQ"]);
-        assert_eq!(import_folder(&dir, "Mix".into(), &edited, &tx), "Mix (3)");
-        assert_eq!(import_folder(&dir, "Queue".into(), &edited, &tx), "Queue", "an edited copy syncs its folder");
-        assert_eq!(import_folder(&dir, "Queue".into(), &unrelated, &tx), "Queue (2)", "another file took it over");
-        assert_eq!(import_folder(&dir, "New".into(), &unrelated, &tx), "New");
+        assert_eq!(import_folder(&dir, "Mix".into(), "", &edited, &tx), "Mix (3)");
+        assert_eq!(import_folder(&dir, "Queue".into(), "", &edited, &tx), "Queue", "an edited copy syncs its folder");
+        assert_eq!(import_folder(&dir, "Queue".into(), "", &unrelated, &tx), "Queue (2)", "another file took it over");
+        assert_eq!(import_folder(&dir, "New".into(), "", &unrelated, &tx), "New");
+        // The same playlist fetched again, as an album from the artist page is, syncs its own folder.
+        assert_eq!(import_folder(&dir, "Mix".into(), "https://www.youtube.com/playlist?list=PL1", &[], &tx), "Mix");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -10379,6 +10395,53 @@ mod chapter_tests {
         assert_eq!(link.ids, ["id-5", "id-9"]);
         assert_eq!(link.url, import::queue_url(&link.ids));
         assert_eq!(link.name.as_deref(), Some("Can - Top Tracks"));
+    }
+
+    // Anything that writes tags has to drop the index, or the artist screens describe a library that has gone.
+    #[test]
+    fn only_the_artist_screens_own_reads_keep_the_artist_index() {
+        for cmd in [Cmd::Artists, Cmd::Star("Can".into()), Cmd::Discography("Can".into()), Cmd::Top("Can".into()), Cmd::Related("Can".into())] {
+            assert!(keeps_index(&cmd));
+        }
+        for cmd in [Cmd::Edit(1), Cmd::Undo, Cmd::Swap(vec![1]), Cmd::Artist(vec![1]), Cmd::SyncOne, Cmd::ResyncAll, Cmd::Retry, Cmd::Purge, Cmd::Url] {
+            assert!(!keeps_index(&cmd));
+        }
+    }
+
+    // A second fetch of top tracks keeps the first one's in the queue, or a sync would call them departed.
+    #[test]
+    fn a_second_top_tracks_fetch_keeps_the_first_ones_in_its_queue() {
+        let dir = std::env::temp_dir().join(format!("earworm-topagain-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let folder = dir.join("Can - Top Tracks");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(manifest::path(&folder), format!("#url\t{}\n", import::queue_url(&["oldAAAAAAAA".into(), "bothBBBBBBB".into()]))).unwrap();
+        let mut cfg = crate::worker::tests::config(true);
+        cfg.dir = dir.clone();
+        cfg.unlocked.grant(Feature::Music);
+        let (tx, rx) = mpsc::channel();
+        let asker = Asker { tx: tx.clone(), enabled: true };
+        let cancel = AtomicBool::new(false);
+        let titles = vec!["Both".to_string(), "New".to_string()];
+        // Real-length ids: `queue_ids` reads only what a YouTube id can be.
+        let find = |_: &str, t: &str| Ok(Some(if t == "Both" { "bothBBBBBBB".to_string() } else { "newCCCCCCCC".to_string() }));
+        let link = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| top_link(&cfg, &tx, &cancel, &asker, find, "Can", &titles));
+            loop {
+                match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+                    Ok(Msg::Ask(_, reply)) => {
+                        let _ = reply.send(Reply::Choice(1));
+                    }
+                    Ok(_) => {}
+                    Err(_) if worker.is_finished() => break,
+                    Err(_) => {}
+                }
+            }
+            worker.join().unwrap()
+        })
+        .unwrap();
+        assert_eq!(link.ids, ["oldAAAAAAAA", "bothBBBBBBB", "newCCCCCCCC"]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn tone(at: &Path, seconds: u32) -> bool {
