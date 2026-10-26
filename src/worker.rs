@@ -3216,6 +3216,17 @@ fn serve(
         let synced = match cmd {
             Cmd::Artists => {
                 let index = known.get_or_insert_with(|| artists::index(&cfg.dir));
+                // Written back, so a star on a list from an older build moves once and stays moved.
+                match artists::settle_stars(&cfg.dir, index) {
+                    Ok(moved) => {
+                        for (from, to) in moved {
+                            let _ = tx.send(Msg::Log(format!("star moved from {from} to {to}, where its tracks are counted")));
+                        }
+                    }
+                    Err(err) => {
+                        let _ = tx.send(Msg::Log(format!("stars: {err}")));
+                    }
+                }
                 let _ = tx.send(Msg::Artists { rows: artists::rows(&cfg.dir, index), focus: None });
                 None
             }
@@ -3249,11 +3260,12 @@ fn serve(
                 get_top(cfg, tx, cancel, tracks, &asker, find, halted, &artist, &titles)
             }
             Cmd::Star(name) => {
+                let name = star_target(&cfg.dir, &mut known, name);
                 match artists::toggle(&cfg.dir, &name) {
                     Ok(on) => {
                         let said = if on { "starred" } else { "unstarred" };
                         let _ = tx.send(Msg::Flash(format!("{said} {name}")));
-                        // A star from the track list costs no library walk; the screen asks again on `b`.
+                        // Whenever the index exists, which a list star has just built; otherwise `b` asks again.
                         if let Some(index) = &known {
                             let _ = tx.send(Msg::Artists { rows: artists::rows(&cfg.dir, index), focus: Some(name) });
                         }
@@ -3500,6 +3512,16 @@ fn start_url(
     };
     let gate = cfg.pick;
     Some(start_link(cfg, tx, cancel, tracks, asker, link, Pass::plain(gate)))
+}
+
+/// `*` on a track sends its whole credit, and a list of names is starred under the artist the index counts it
+/// towards. Only a list costs the library walk.
+fn star_target(dir: &Path, known: &mut Option<Vec<artists::Artist>>, name: String) -> String {
+    if artists::is_list(&name) {
+        artists::credited(known.get_or_insert_with(|| artists::index(dir)), &name)
+    } else {
+        name
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -10524,6 +10546,20 @@ mod chapter_tests {
         set_switch(&mut cfg, &tx, "intro", !intro).unwrap();
         assert_eq!(cfg.intro, intro);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // A list credit stars the artist its tracks are counted under; a plain name never walks the library.
+    #[test]
+    fn a_star_on_a_list_credit_goes_to_its_artist() {
+        let index = artists::group([
+            ("Alestorm, Christopher Bowes", "", "A", Path::new("F"), true),
+            ("Alestorm, Traditional", "", "B", Path::new("F"), true),
+        ]);
+        let mut known = Some(index);
+        assert_eq!(star_target(Path::new("/nowhere"), &mut known, "Alestorm, Christopher Bowes".into()), "Alestorm");
+        let mut unbuilt = None;
+        assert_eq!(star_target(Path::new("/nowhere"), &mut unbuilt, "Can".into()), "Can");
+        assert!(unbuilt.is_none(), "a plain name walked the library");
     }
 
     // Anything that writes tags has to drop the index, or the artist screens describe a library that has gone.

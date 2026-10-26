@@ -1147,7 +1147,11 @@ fn draw_artists(frame: &mut Frame, app: &mut App, area: Rect) {
                 Span::styled(if *at == cursor { "▌" } else { " " }, Style::new().fg(p.cursor)),
                 Span::styled(if row.starred { " ★" } else { "  " }, Style::new().fg(p.accent)),
                 Span::styled(format!(" {name}"), row_style(*at == cursor, p)),
-                dim(format!("{:pad$}  {:>4} {tracks:<6}  {:>3} {albums}", "", row.tracks, row.albums), p),
+                // Tracks with no album tag, or only the playlist's name in it, are on no album: nothing to count.
+                dim(match row.albums {
+                    0 => format!("{:pad$}  {:>4} {tracks}", "", row.tracks),
+                    n => format!("{:pad$}  {:>4} {tracks:<6}  {n:>3} {albums}", "", row.tracks),
+                }, p),
             ];
             if fresh > 0 {
                 line.push(Span::styled(format!("  + {fresh} new"), Style::new().fg(p.accent)));
@@ -6033,11 +6037,12 @@ mod tests {
     fn an_artist_row_shows_its_star_its_counts_and_the_cursor() {
         let mut app = artists_app();
         let row = |name: &str, tracks, albums, starred| crate::app::ArtistRow { name: name.into(), tracks, albums, starred, folders: Vec::new() };
-        app.apply(Msg::Artists { rows: vec![row("Can", 12, 3, true), row("Neu!", 1, 1, false)], focus: None });
+        app.apply(Msg::Artists { rows: vec![row("Can", 12, 3, true), row("Neu!", 1, 1, false), row("Seohwa Lee", 1, 0, false)], focus: None });
         app.artist_move(true, 1);
         let screen = screen_of(&mut app, 80, 10);
         let line = |name: &str| screen.lines().find(|l| l.contains(name)).unwrap_or_default().to_string();
-        assert!(screen.lines().next().unwrap().contains("2 artists  ·  1 starred"), "{screen}");
+        assert!(screen.lines().next().unwrap().contains("3 artists  ·  1 starred"), "{screen}");
+        assert!(line("Seohwa Lee").contains("1 track") && !line("Seohwa Lee").contains("album"), "{screen}");
         assert!(line("Can").contains('★') && line("Can").contains("12 tracks") && line("Can").contains("3 albums"), "{screen}");
         assert!(!line("Neu!").contains('★') && line("Neu!").contains("1 track ") && line("Neu!").contains("1 album"), "{screen}");
         assert!(line("Neu!").starts_with('▌') && !line("Can").starts_with('▌'), "{screen}");

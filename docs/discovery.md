@@ -6,8 +6,13 @@ count. `/` filters the list, and ignores accents and case, so `bjork` finds
 Björk.
 
 An artist is the lead credit on a track. "Massive Attack feat. Elizabeth
-Fraser" counts towards Massive Attack. Band names with `&`, `/` or "with" in
-them stay whole. A song you have on several playlists counts once.
+Fraser" counts towards Massive Attack. A list like "Alestorm, Christopher
+Bowes" counts towards Alestorm once your library shows Alestorm on its own:
+credited alone, or leading lists that go on to different names. A band name
+with `&`, `,`, `/` or "with" in it stays whole, and "Earth, Wind & Fire, The
+Emotions" counts towards Earth, Wind & Fire. A star on a whole list from an
+earlier version moves to its artist the next time you open `b`. A song you have on several playlists counts once, and
+"Various Artists" isn't listed.
 
 ## Starring
 

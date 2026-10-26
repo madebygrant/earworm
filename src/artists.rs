@@ -28,6 +28,8 @@ pub struct Artist {
     pub held: Vec<(String, usize)>,
     /// (title, album) of every track, copies included, for the page's matching and the pick gate.
     pub titles: Vec<(String, String)>,
+    /// The `key` of every lead credit grouped here, so `credited` puts a star where the grouping put the track.
+    pub credits: HashSet<String>,
 }
 
 /// What two spellings of one artist share, so "Björk" and "bjork" are one row and one star.
@@ -41,6 +43,8 @@ pub fn key(name: &str) -> String {
 // "A feat. B" counts towards A only: a guest verse is not one of B's albums. A track not counted is a copy
 // of one already seen, which still says the folder holds the artist.
 pub fn group<'a>(tracks: impl IntoIterator<Item = (&'a str, &'a str, &'a str, &'a Path, bool)>) -> Vec<Artist> {
+    let tracks: Vec<_> = tracks.into_iter().map(|(artist, title, album, folder, counted)| (lead_artist(artist), title, album, folder, counted)).collect();
+    let known = Known::from(tracks.iter().map(|(lead, ..)| lead.as_str()));
     struct Seen {
         key: String,
         spellings: Vec<(String, usize)>,
@@ -49,17 +53,19 @@ pub fn group<'a>(tracks: impl IntoIterator<Item = (&'a str, &'a str, &'a str, &'
         albums: Vec<(String, String, usize)>,
         folders: Vec<PathBuf>,
         titles: Vec<(String, String)>,
+        credits: HashSet<String>,
     }
     let mut seen: Vec<Seen> = Vec::new();
     let mut at: HashMap<String, usize> = HashMap::new();
-    for (artist, title, album, folder, counted) in tracks {
-        let lead = lead_artist(artist);
-        if lead.is_empty() {
+    for (credit, title, album, folder, counted) in tracks {
+        let lead = known.cut(&credit).to_string();
+        // A compilation's credit, not an act: a page for it would be every artist at once.
+        if lead.is_empty() || key(&lead) == "variousartists" {
             continue;
         }
         let k = key(&lead);
         let i = *at.entry(k.clone()).or_insert_with(|| {
-            seen.push(Seen { key: k, spellings: Vec::new(), tracks: 0, albums: Vec::new(), folders: Vec::new(), titles: Vec::new() });
+            seen.push(Seen { key: k, spellings: Vec::new(), tracks: 0, albums: Vec::new(), folders: Vec::new(), titles: Vec::new(), credits: HashSet::new() });
             seen.len() - 1
         });
         let one = &mut seen[i];
@@ -67,6 +73,7 @@ pub fn group<'a>(tracks: impl IntoIterator<Item = (&'a str, &'a str, &'a str, &'
             one.folders.push(folder.to_path_buf());
         }
         one.titles.push((title.to_string(), album.to_string()));
+        one.credits.insert(key(&credit));
         if !counted {
             continue;
         }
@@ -90,9 +97,106 @@ pub fn group<'a>(tracks: impl IntoIterator<Item = (&'a str, &'a str, &'a str, &'
             // `rev` so a tie goes to the spelling seen first: `max_by_key` keeps the last of equals.
             let name = one.spellings.iter().rev().max_by_key(|(_, n)| *n).map(|(s, _)| s.clone()).unwrap_or_default();
             let held: Vec<(String, usize)> = one.albums.into_iter().map(|(_, album, n)| (album, n)).collect();
-            Artist { name, tracks: one.tracks, albums: held.len(), folders: one.folders, held, titles: one.titles }
+            Artist { name, tracks: one.tracks, albums: held.len(), folders: one.folders, held, titles: one.titles, credits: one.credits }
         })
         .collect()
+}
+
+// Where each name of a list ends: before every ", " or " & ", the separators YouTube Music lists artists with.
+fn cuts(lead: &str) -> Vec<(usize, usize)> {
+    let mut at: Vec<(usize, usize)> = [", ", " & "].iter().flat_map(|sep| lead.match_indices(sep).map(|(i, m)| (i, m.len()))).collect();
+    at.sort_unstable();
+    at
+}
+
+// Which first names of a credit list are an artist of their own. A comma or `&` is also inside band names
+// ("Earth, Wind & Fire", "Car, the garden"), so a name is known only when the library shows it standing alone:
+// credited with nobody else, credited whole and also leading a list, or leading lists that go on to different
+// names. "Earth" is always followed by "Wind", which is what keeps it from standing for the band.
+// Compared lower-cased and nothing else: `key` drops punctuation, and "Crosby, Stills, Nash" would then be
+// "Crosby, Stills & Nash" and cut the second lineup down to the first.
+fn exact(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
+struct Known {
+    names: HashSet<String>,
+}
+
+impl Known {
+    fn from<'a>(leads: impl Iterator<Item = &'a str>) -> Known {
+        let mut singles = HashSet::new();
+        let mut wholes = HashSet::new();
+        let mut next: HashMap<String, HashSet<String>> = HashMap::new();
+        for lead in leads {
+            wholes.insert(exact(lead));
+            let at = cuts(lead);
+            if at.is_empty() {
+                singles.insert(exact(lead));
+            }
+            for (n, &(i, len)) in at.iter().enumerate() {
+                let end = at.get(n + 1).map_or(lead.len(), |&(j, _)| j);
+                next.entry(exact(&lead[..i])).or_default().insert(exact(&lead[i + len..end]));
+            }
+        }
+        let names = next
+            .iter()
+            .filter(|(prefix, after)| after.len() > 1 || wholes.contains(*prefix))
+            .map(|(prefix, _)| prefix.clone())
+            .chain(singles)
+            .collect();
+        Known { names }
+    }
+
+    // The shortest known name the list starts with, so "Alestorm, Christopher Bowes" is Alestorm's.
+    fn cut<'a>(&self, lead: &'a str) -> &'a str {
+        cuts(lead)
+            .into_iter()
+            .map(|(i, _)| lead[..i].trim())
+            .find(|prefix| !prefix.is_empty() && self.names.contains(&exact(prefix)))
+            .unwrap_or(lead)
+    }
+}
+
+/// Whether a credit names several artists in one list, which `credited` needs the index to settle.
+pub fn is_list(credit: &str) -> bool {
+    !cuts(&lead_artist(credit)).is_empty()
+}
+
+/// The artist a track's credit was grouped under: what `*` on a track stars.
+pub fn credited(index: &[Artist], credit: &str) -> String {
+    let lead = lead_artist(credit);
+    let want = key(&lead);
+    index.iter().find(|a| a.credits.contains(&want)).map_or(lead, |a| a.name.clone())
+}
+
+/// Moves a star on a credit list to the artist the index groups it under, which is where its row now is.
+/// Stars from before lists were cut would otherwise sit on a row with no tracks. Returns the names moved.
+pub fn settle_stars(root: &Path, index: &[Artist]) -> Result<Vec<(String, String)>> {
+    let _held = STORE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut store = load(root);
+    let mut moved = Vec::new();
+    let mut kept: Vec<Favourite> = Vec::new();
+    for f in std::mem::take(&mut store.list) {
+        let to = if is_list(&f.name) { credited(index, &f.name) } else { f.name.clone() };
+        let f = if key(&to) == key(&f.name) {
+            f
+        } else {
+            moved.push((f.name, to.clone()));
+            // The id was Deezer's answer for the whole list, which is not this artist.
+            Favourite { name: to, id: None }
+        };
+        // Already starred under that name, before or after: one star, keeping whichever id there is.
+        match position(&kept, &f.name) {
+            Some(at) => kept[at].id = kept[at].id.or(f.id),
+            None => kept.push(f),
+        }
+    }
+    store.list = kept;
+    if !moved.is_empty() {
+        save(root, &store)?;
+    }
+    Ok(moved)
 }
 
 /// Every artist in the folders `library` lists, from the tags on disk.
@@ -347,6 +451,68 @@ mod tests {
         ]);
         let names: Vec<&str> = found.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, ["AC/DC", "Earth, Wind & Fire", "Nurse With Wound", "Simon & Garfunkel"]);
+    }
+
+    // YouTube Music credits every artist on a track in one list. A list is cut to its first name once that name
+    // stands alone in the library. A band with a comma in its name never does, even beside a guest-credited track.
+    #[test]
+    fn a_credit_list_counts_towards_a_first_name_the_library_knows() {
+        let found = grouped([
+            // Never credited alone, but its lists go on to different names.
+            ("Alestorm, Christopher Bowes", "Curse of the Crystal Coconut"),
+            ("Alestorm, Christopher Bowes, Lasse Lammert", "Curse of the Crystal Coconut"),
+            ("Alestorm, Traditional", "Sunset on the Golden Age"),
+            ("CHVRCHES", "Screen Violence"),
+            ("CHVRCHES & Robert Smith", "Screen Violence"),
+            ("Stray Kids, The Monsters & Strangerz & German", "ATE"),
+            ("Stray Kids", "ATE"),
+            ("Car, the garden", "Apartment"),
+            // The band, and the band with a guest: "Earth" is always followed by "Wind", so it is no artist.
+            ("Earth, Wind & Fire", "I Am"),
+            ("Earth, Wind & Fire", "Spirit"),
+            ("Earth, Wind & Fire, The Emotions", "I Am"),
+            // Two lineups, neither cut down to "Crosby".
+            ("Crosby, Stills & Nash", "CSN"),
+            ("Crosby, Stills, Nash & Young", "Deja Vu"),
+        ]);
+        assert_eq!(
+            counts(&found),
+            [
+                ("Alestorm", 3, 2),
+                ("Earth, Wind & Fire", 3, 2),
+                ("CHVRCHES", 2, 1),
+                ("Stray Kids", 2, 1),
+                ("Car, the garden", 1, 1),
+                ("Crosby, Stills & Nash", 1, 1),
+                ("Crosby, Stills, Nash & Young", 1, 1),
+            ]
+        );
+        assert_eq!(credited(&found, "CHVRCHES & Robert Smith"), "CHVRCHES");
+        assert_eq!(credited(&found, "Earth, Wind & Fire, The Emotions"), "Earth, Wind & Fire");
+        assert_eq!(credited(&found, "Car, the garden"), "Car, the garden");
+        assert!(is_list("Alestorm, Christopher Bowes") && !is_list("Alestorm"));
+    }
+
+    // A star an older build put on a whole list moves to the artist that list is now counted under, once, and
+    // never leaves two stars on one artist.
+    #[test]
+    fn a_star_on_a_credit_list_moves_to_its_artist() {
+        let dir = root("settle");
+        let index = grouped([("Alestorm, Christopher Bowes", "A"), ("Alestorm, Traditional", "B"), ("Can", "C")]);
+        std::fs::write(dir.join(FILE), "# kept\nAlestorm, Christopher Bowes\t99\nAlestorm, Traditional\nCan\t7\n").unwrap();
+        let moved = settle_stars(&dir, &index).unwrap();
+        assert_eq!(moved.len(), 2);
+        let names: Vec<(String, Option<u64>)> = favourites(&dir).into_iter().map(|f| (f.name, f.id)).collect();
+        assert_eq!(names, [("Alestorm".to_string(), None), ("Can".to_string(), Some(7))], "the list's id is not Alestorm's");
+        assert!(std::fs::read_to_string(dir.join(FILE)).unwrap().starts_with("# kept"));
+        assert!(settle_stars(&dir, &index).unwrap().is_empty(), "moved again");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn various_artists_is_not_an_artist() {
+        let found = grouped([("Various Artists", "Now 48"), ("Can", "Tago Mago")]);
+        assert_eq!(counts(&found), [("Can", 1, 1)]);
     }
 
     #[test]

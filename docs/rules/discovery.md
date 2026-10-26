@@ -11,6 +11,31 @@
   (`a_band_name_with_an_ampersand_slash_comma_or_with_is_kept_whole`,
   `a_featured_credit_counts_towards_the_lead_artist_only`,
   `a_band_ending_in_feat_is_kept_and_featuring_is_a_credit`).
+- **A credit list is cut to the shortest name in it that stands alone in
+  the library.** YouTube Music tags a track with every artist on it
+  ("Alestorm, Christopher Bowes, Lasse Lammert"), and each list was a row of
+  its own: one band was twenty rows. A name before a `, ` or ` & ` stands
+  alone when a track credits it with nobody else, when it is a whole credit
+  that also leads a list, or when the lists it leads go on to different
+  names. The last is what the first try missed: it took any name leading two
+  lists, so "Earth, Wind & Fire" beside "Earth, Wind & Fire, The Emotions"
+  became "Earth", a different band. "Earth" is always followed by "Wind", so
+  it never stands alone, and the guest list is cut to the band. Names are
+  compared lower-cased with their punctuation, since `key` would make
+  "Crosby, Stills, Nash" the same as "Crosby, Stills & Nash" and fold one
+  lineup into the other. `credited` asks which artist a credit was grouped
+  under, from `Artist.credits`, so `*` on a track stars that row; it walks the
+  library only when the credit is a list. "Various Artists" is a
+  compilation's credit and gets no row
+  (`a_credit_list_counts_towards_a_first_name_the_library_knows`,
+  `a_star_on_a_list_credit_goes_to_its_artist`,
+  `various_artists_is_not_an_artist`).
+- **A star an older build put on a whole list moves to its artist when `b`
+  opens.** It would otherwise be a starred row with no tracks, checked on
+  Deezer every launch, while the artist it meant sat unstarred. The move drops
+  the Deezer id, which was the list's, keeps one star per artist, is written
+  back so it happens once, and is logged
+  (`a_star_on_a_credit_list_moves_to_its_artist`).
 - **`artists::key` is the one identity, and a name of punctuation keeps
   one.** It is `lookup::normalise`, so "Björk" and "bjork" are one row, one
   star and one query match. `normalise` keeps only alphanumerics, so "!!!"
