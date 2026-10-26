@@ -144,7 +144,7 @@ Exit: a pty run against a rebuilt fixture, with a canned search result,
 creates the new folder's `.earworm` with the found `#url`. Wait on the file,
 not the screen.
 
-## 5. Related artists, top tracks, new releases
+## 5. Related artists, top tracks, new releases [done 2026-10-26]
 
 Why last: each is a small extension of wave 3's page and none blocks another.
 Any of them can slip.

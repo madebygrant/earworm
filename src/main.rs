@@ -856,20 +856,22 @@ fn handle_page_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('c') if ctrl => app.quit = true,
         KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
         KeyCode::Char('q') => app.quit = true,
-        // The artists cursor was never moved, so the screen comes back on the row it left from.
-        KeyCode::Esc => app.view = View::Artists,
+        // Back through related artists' pages, then to the artists screen, whose cursor never moved.
+        KeyCode::Esc => app.leave_page(),
         KeyCode::Char('l') => app.show_logs = !app.show_logs,
-        KeyCode::Char('j') | KeyCode::Down => app.page_move(true, 1),
-        KeyCode::Char('k') | KeyCode::Up => app.page_move(false, 1),
-        KeyCode::PageDown => app.page_move(true, app.viewport.max(1)),
-        KeyCode::PageUp => app.page_move(false, app.viewport.max(1)),
-        KeyCode::Char('d') if ctrl => app.page_move(true, app.viewport.max(1)),
-        KeyCode::Char('u') if ctrl => app.page_move(false, app.viewport.max(1)),
-        KeyCode::Char('g') => app.page_jump(false),
-        KeyCode::Char('G') => app.page_jump(true),
-        KeyCode::Char('a') => app.page_kinds(),
+        // Not gated on `busy`: switching lists needs no worker, and a fetch it starts queues behind the last.
+        KeyCode::Tab if app.prompt.is_none() => app.page_section(),
+        KeyCode::Char('j') | KeyCode::Down => app.section_move(true, 1),
+        KeyCode::Char('k') | KeyCode::Up => app.section_move(false, 1),
+        KeyCode::PageDown => app.section_move(true, app.viewport.max(1)),
+        KeyCode::PageUp => app.section_move(false, app.viewport.max(1)),
+        KeyCode::Char('d') if ctrl => app.section_move(true, app.viewport.max(1)),
+        KeyCode::Char('u') if ctrl => app.section_move(false, app.viewport.max(1)),
+        KeyCode::Char('g') => app.section_jump(false),
+        KeyCode::Char('G') => app.section_jump(true),
+        KeyCode::Char('a') if app.page.section == app::Section::Releases => app.page_kinds(),
         KeyCode::Char('o') if app.can_page() => app.artist_folders(),
-        KeyCode::Enter if app.can_page() => app.get_album(),
+        KeyCode::Enter if app.can_page() => app.section_enter(),
         _ => {}
     }
 }
@@ -2661,7 +2663,7 @@ mod tests {
     }
 
     fn album(title: &str, kind: &str, have: usize, of: Option<usize>) -> crate::app::AlbumRow {
-        crate::app::AlbumRow { id: 1, title: title.into(), year: Some(1971), kind: kind.into(), have, of }
+        crate::app::AlbumRow { id: 1, title: title.into(), year: Some(1971), kind: kind.into(), have, of, new: false }
     }
 
     #[test]
@@ -2790,5 +2792,92 @@ mod tests {
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(matches!(cmds.try_recv(), Ok(Cmd::GetAlbum { title, .. }) if title == "Ege Bamyasi"));
         assert!(!app.can_get(), "offered while the worker is busy with the last one");
+    }
+
+    // Asked for once, the first time the tab is opened: going round again costs nothing.
+    #[test]
+    fn tab_asks_for_top_tracks_and_related_once_each() {
+        let (mut app, cmds) = on_page(vec![album("Tago Mago", "album", 7, Some(7))]);
+        handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::Top(name)) if name == "Can"));
+        app.apply(app::Msg::Top { name: "Can".into(), rows: Ok(vec![]) });
+        app.apply(app::Msg::Idle);
+        handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::Related(name)) if name == "Can"));
+        app.apply(app::Msg::Related { name: "Can".into(), rows: Ok(vec![]) });
+        app.apply(app::Msg::Idle);
+        handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.page.section, app::Section::Top);
+        assert!(cmds.try_recv().is_err(), "a list already here was asked for again");
+    }
+
+    // Esc from a related artist's page goes back to the page it was opened from, then to the artists.
+    #[test]
+    fn a_related_artists_page_goes_back_to_the_one_before() {
+        let (mut app, cmds) = on_page(vec![]);
+        handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        app.apply(app::Msg::Idle);
+        handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        let related = vec![app::RelatedRow { name: "Neu!".into(), fans: 1, tracks: 0 }];
+        app.apply(app::Msg::Related { name: "Can".into(), rows: Ok(related) });
+        app.apply(app::Msg::Idle);
+        let _ = cmds.try_iter().count();
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::Discography(name)) if name == "Neu!"));
+        assert_eq!(app.page.name, "Neu!");
+        app.apply(app::Msg::Idle);
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::Discography(name)) if name == "Can"));
+        assert_eq!((app.view, app.page.name.as_str()), (View::Artist, "Can"));
+        app.apply(app::Msg::Idle);
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.view, View::Artists);
+    }
+
+    #[test]
+    fn enter_on_top_tracks_sends_only_the_missing_and_only_once_unlocked() {
+        let (mut app, cmds) = on_page(vec![]);
+        handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        let row = |title: &str, have| app::TopRow { title: title.into(), album: String::new(), have };
+        app.apply(app::Msg::Top { name: "Can".into(), rows: Ok(vec![row("Mushroom", true), row("Spoon", false), row("Vitamin C", false)]) });
+        app.apply(app::Msg::Idle);
+        let _ = cmds.try_iter().count();
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(cmds.try_recv().is_err(), "a locked get reached the worker");
+        assert!(app.stage.contains(crate::cheats::LOCKED), "{}", app.stage);
+        app.unlocked.grant(crate::cheats::Feature::Music);
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::GetTop { titles, .. }) if titles == ["Spoon", "Vitamin C"]));
+    }
+
+    // Dropped while the last list was still coming, Tab read as a dead key.
+    #[test]
+    fn tab_switches_lists_while_the_worker_is_busy() {
+        let (mut app, cmds) = on_page(vec![]);
+        handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert!(app.busy);
+        handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        assert_eq!(app.page.section, app::Section::Related);
+        // Round again before either answer lands: each is asked for once, not once per Tab.
+        for _ in 0..3 {
+            handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+        }
+        let asked: Vec<Cmd> = cmds.try_iter().collect();
+        assert!(matches!(asked.as_slice(), [Cmd::Top(_), Cmd::Related(_)]), "asked {} times", asked.len());
+    }
+
+    // Read on the artist's page, they are marked there and leave the library's count.
+    #[test]
+    fn a_new_release_is_marked_on_its_page_and_then_no_longer_counted() {
+        let (mut app, _cmds) = on_artists(vec![], vec![artist("Can", 3, true)]);
+        app.apply(app::Msg::NewReleases(vec![("Can".into(), 42, "Live 1975".into()), ("Neu!".into(), 7, "Neu! 4".into())]));
+        handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        let mut live = album("Live 1975", "album", 0, None);
+        live.id = 42;
+        app.apply(app::Msg::Discography { name: "Can".into(), found: None, rows: Ok(vec![live, album("Tago Mago", "album", 7, Some(7))]) });
+        assert!(app.page.rows[0].new && !app.page.rows[1].new);
+        assert_eq!(app.new_releases.len(), 1, "Can's stayed counted after its page was read");
+        assert_eq!(app.new_releases[0].0, "Neu!");
     }
 }

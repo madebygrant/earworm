@@ -1802,7 +1802,7 @@ fn copy_known(cfg: &Config, tx: &Sender<Msg>, tracks: &mut [Track], known: &Hash
 }
 
 // The whole title and what follows the last ` - `, since one side often has the artist and the other not.
-fn title_keys(text: &str) -> (String, String) {
+pub(crate) fn title_keys(text: &str) -> (String, String) {
     let whole = normalised(strip_number(text));
     let tail = whole.rsplit_once(" - ").map_or_else(String::new, |(_, t)| t.trim().to_string());
     (whole, tail)
@@ -3138,6 +3138,8 @@ fn serve(
     // all change tags, and listing the ones that do is a list a new command would be left out of.
     let mut known: Option<Vec<artists::Artist>> = None;
     let mut deezer = discover::Cache::default();
+    // After the library is on screen, which is what reaching here means, and off this thread.
+    discover::check_new(cfg.dir.clone(), tx.clone());
     loop {
         if let Some(now) = watch.poll(player::probe()) {
             let _ = tx.send(Msg::Player(now));
@@ -3151,7 +3153,7 @@ fn serve(
         /* Some commands edit what is on screen and some replace it. Only the
            ones that went to the network have an outcome worth a question at
            the end, which is what `synced` carries. */
-        if !matches!(cmd, Cmd::Artists | Cmd::Star(_) | Cmd::Discography(_) | Cmd::GetAlbum { .. }) {
+        if !matches!(cmd, Cmd::Artists | Cmd::Star(_) | Cmd::Discography(_) | Cmd::GetAlbum { .. } | Cmd::Top(_) | Cmd::Related(_) | Cmd::GetTop { .. }) {
             known = None;
         }
         let synced = match cmd {
@@ -3173,6 +3175,24 @@ fn serve(
                 let find = |artist: &str, title: &str| ytdlp::find_album(artist, title, cancel);
                 let got = get_album(cfg, tx, cancel, tracks, &asker, find, &artist, &title, owned);
                 // The download changed what the library holds, or the album would still read missing.
+                known = None;
+                got
+            }
+            Cmd::Top(name) => {
+                let index = known.get_or_insert_with(|| artists::index(&cfg.dir));
+                let rows = discover::top_rows(&cfg.dir, index, &name, &mut deezer);
+                let _ = tx.send(Msg::Top { name, rows });
+                None
+            }
+            Cmd::Related(name) => {
+                let index = known.get_or_insert_with(|| artists::index(&cfg.dir));
+                let rows = discover::related_rows(&cfg.dir, index, &name, &mut deezer);
+                let _ = tx.send(Msg::Related { name, rows });
+                None
+            }
+            Cmd::GetTop { artist, titles } => {
+                let find = |artist: &str, title: &str| ytdlp::find_song(artist, title);
+                let got = get_top(cfg, tx, cancel, tracks, &asker, find, &artist, &titles);
                 known = None;
                 got
             }
@@ -3451,6 +3471,69 @@ fn get_album(
     let link = album_link(cfg, tx, asker, find, artist, title)?;
     let pass = Pass::album(cfg.pick, owned);
     Some(start_link(cfg, tx, cancel, tracks, asker, link, pass))
+}
+
+/// The artist's missing top tracks, found one by one on YouTube Music and downloaded as one playlist.
+#[allow(clippy::too_many_arguments)]
+fn get_top(
+    cfg: &mut Config,
+    tx: &Sender<Msg>,
+    cancel: &AtomicBool,
+    tracks: &mut Vec<Track>,
+    asker: &Asker,
+    find: impl Fn(&str, &str) -> Result<Option<String>, String>,
+    artist: &str,
+    titles: &[String],
+) -> Option<Result<String>> {
+    let link = top_link(cfg, tx, cancel, asker, find, artist, titles)?;
+    Some(start_link(cfg, tx, cancel, tracks, asker, link, Pass::plain(cfg.pick)))
+}
+
+// The same stops as `album_link`. One search per track, so the header counts them off as it goes.
+fn top_link(cfg: &Config, tx: &Sender<Msg>, cancel: &AtomicBool, asker: &Asker, find: impl Fn(&str, &str) -> Result<Option<String>, String>, artist: &str, titles: &[String]) -> Option<Link> {
+    if !cfg.unlocked.has(Feature::Music) {
+        let _ = tx.send(Msg::Flash(format!("{LOCKED}  ·  tracks come from YouTube Music")));
+        return None;
+    }
+    let mut ids = Vec::new();
+    for (n, title) in titles.iter().enumerate() {
+        if cancel.load(Ordering::SeqCst) {
+            return None;
+        }
+        let _ = tx.send(Msg::Stage(format!("finding {} of {} on YouTube Music", n + 1, titles.len())));
+        match find(artist, title) {
+            // Deezer lists one song twice when it is on two albums, and both find the same video.
+            Ok(Some(id)) if ids.contains(&id) => {}
+            Ok(Some(id)) => ids.push(id),
+            Ok(None) => {
+                let _ = tx.send(Msg::Log(format!("top tracks: YouTube Music has no {title} by {artist}")));
+            }
+            Err(why) => {
+                let _ = tx.send(Msg::Log(format!("top tracks: {why}")));
+                let _ = tx.send(Msg::Flash("the YouTube Music search failed  ·  l shows why".into()));
+                return None;
+            }
+        }
+    }
+    if ids.is_empty() {
+        let _ = tx.send(Msg::Flash(format!("YouTube Music has none of {artist}'s missing top tracks")));
+        return None;
+    }
+    let name = format!("{artist} - Top Tracks");
+    let note = format!("found {} of the {} missing  ·  into {name}  ·  l lists any it could not find", ids.len(), titles.len());
+    let options = vec!["no, leave them".to_string(), format!("yes, download {}", ids.len())];
+    if asker.choose_noted(&format!("Download {artist}'s top tracks?"), &note, options) != Some(1) {
+        let _ = tx.send(Msg::Flash("nothing downloaded".into()));
+        return None;
+    }
+    // Through `settle` as `album_link` is, so this path cannot hand yt-dlp a link the URL prompt would refuse.
+    match settle(&import::queue_url(&ids), &cfg.unlocked) {
+        Ok(link) => Some(Link { name: Some(name), ids, ..link }),
+        Err(why) => {
+            let _ = tx.send(Msg::Flash(why));
+            None
+        }
+    }
 }
 
 // Every step that can stop the download, each saying why. The unlock is checked before the search, and the
@@ -10251,6 +10334,51 @@ mod chapter_tests {
         let seen: Vec<Msg> = rx.try_iter().collect();
         assert!(flashes(&seen).iter().any(|f| f.contains("search failed")), "{:?}", flashes(&seen));
         assert!(seen.iter().any(|m| matches!(m, Msg::Log(l) if l.contains("ERROR: blocked"))));
+    }
+
+    #[test]
+    fn locked_top_tracks_are_never_searched() {
+        let cfg = crate::worker::tests::config(true);
+        let (tx, rx) = mpsc::channel();
+        let asker = Asker { tx: tx.clone(), enabled: false };
+        let searched = std::cell::Cell::new(false);
+        let cancel = AtomicBool::new(false);
+        let titles = vec!["Spoon".to_string()];
+        let link = top_link(&cfg, &tx, &cancel, &asker, |_, _| { searched.set(true); Ok(Some("v".into())) }, "Can", &titles);
+        assert!(link.is_none() && !searched.get());
+        let seen: Vec<Msg> = rx.try_iter().collect();
+        assert!(flashes(&seen).iter().any(|f| f.contains(LOCKED)));
+    }
+
+    // What one search could not find is logged and the rest still download, as one queue playlist.
+    #[test]
+    fn top_tracks_found_become_one_queue_named_for_the_artist() {
+        let cfg = crate::worker::tests::config(true);
+        cfg.unlocked.grant(Feature::Music);
+        let (tx, rx) = mpsc::channel();
+        let asker = Asker { tx: tx.clone(), enabled: true };
+        let cancel = AtomicBool::new(false);
+        let titles = vec!["Spoon".to_string(), "Lost".to_string(), "Vitamin C".to_string(), "Spoon (Live at Soest)".to_string()];
+        // The last is one song found twice, which Deezer does when a song is on two albums.
+        let find = |_: &str, t: &str| Ok((t != "Lost").then(|| if t.starts_with("Spoon") { "id-5".into() } else { format!("id-{}", t.len()) }));
+        let link = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| top_link(&cfg, &tx, &cancel, &asker, find, "Can", &titles));
+            loop {
+                match rx.recv_timeout(std::time::Duration::from_millis(500)) {
+                    Ok(Msg::Ask(_, reply)) => {
+                        let _ = reply.send(Reply::Choice(1));
+                    }
+                    Ok(_) => {}
+                    Err(_) if worker.is_finished() => break,
+                    Err(_) => {}
+                }
+            }
+            worker.join().unwrap()
+        })
+        .unwrap();
+        assert_eq!(link.ids, ["id-5", "id-9"]);
+        assert_eq!(link.url, import::queue_url(&link.ids));
+        assert_eq!(link.name.as_deref(), Some("Can - Top Tracks"));
     }
 
     fn tone(at: &Path, seconds: u32) -> bool {

@@ -156,9 +156,54 @@ pub(crate) fn find_album_with(bin: &str, artist: &str, title: &str, cancel: &std
     Ok(None)
 }
 
+pub fn find_song(artist: &str, title: &str) -> Result<Option<String>, String> {
+    find_song_with("yt-dlp", artist, title)
+}
+
+/// The video id of the artist's song by that title on YouTube Music.
+// The songs search gives titles and no artist, so each title match is read once more for its channel:
+// a cover by somebody else ranks beside the song. About three seconds a read; the first is usually right.
+pub(crate) fn find_song_with(bin: &str, artist: &str, title: &str) -> Result<Option<String>, String> {
+    let query = crate::lookup::encode(&format!("{artist} {title}"));
+    let search = format!("https://{}/search?q={query}#songs", crate::worker::MUSIC_HOST);
+    let found = flat(bin, &["--playlist-end", ALBUM_CANDIDATES, "--print", "%(id)s\t%(title)s", &search])?;
+    for id in song_ids(&found, title) {
+        let watch = format!("https://{}/watch?v={id}", crate::worker::MUSIC_HOST);
+        let by = read(bin, &["--skip-download", "--no-warnings", "--print", "%(channel)s", &watch])?;
+        if same_artist(by.trim(), artist) {
+            return Ok(Some(id));
+        }
+    }
+    Ok(None)
+}
+
+// Results whose title is the song asked for, in the search's order.
+fn song_ids(found: &str, want: &str) -> Vec<String> {
+    let want = crate::discover::song_key(want);
+    found
+        .lines()
+        .filter_map(|line| line.split_once('\t'))
+        .filter(|(id, title)| !id.is_empty() && crate::discover::song_key(title) == want)
+        .map(|(id, _)| id.to_string())
+        .collect()
+}
+
+// One contains the other on `artists::key`, so "Coldplay" is the channel "Coldplay" and a credit like
+// "Can & Damo Suzuki" still counts as Can's.
+fn same_artist(by: &str, artist: &str) -> bool {
+    let (theirs, ours) = (crate::artists::key(by), crate::artists::key(artist));
+    !theirs.is_empty() && (theirs.contains(&ours) || ours.contains(&theirs))
+}
+
 fn flat(bin: &str, args: &[&str]) -> Result<String, String> {
+    let mut all = vec!["--flat-playlist"];
+    all.extend_from_slice(args);
+    read(bin, &all)
+}
+
+fn read(bin: &str, args: &[&str]) -> Result<String, String> {
     let mut cmd = Command::new(bin);
-    cmd.arg("--flat-playlist").args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let out = crate::lookup::run_bounded(&mut cmd, ALBUM_LOOKUP).ok_or("yt-dlp did not answer in time")?;
     if !out.status.success() {
         let said = String::from_utf8_lossy(&out.stderr);
@@ -176,8 +221,7 @@ fn album_line(line: &str, artist: &str, want: &str) -> Option<AlbumHit> {
     if !id.starts_with("OLAK5uy_") {
         return None;
     }
-    let (theirs, ours) = (crate::artists::key(by), crate::artists::key(artist));
-    if by != "NA" && !by.is_empty() && !theirs.contains(&ours) && !ours.contains(&theirs) {
+    if by != "NA" && !by.is_empty() && !same_artist(by, artist) {
         return None;
     }
     let title = ["Album - ", "EP - ", "Single - "].iter().find_map(|p| shown.strip_prefix(p)).unwrap_or(shown);
@@ -928,6 +972,40 @@ mod tests {
         // A failure is not a search that found nothing, and yt-dlp's last line says why.
         std::fs::write(&bin, "#!/bin/sh\necho 'ERROR: [youtube:tab] blocked' >&2\nexit 1\n").unwrap();
         assert_eq!(find_album_with(&bin, "Sleep Token", "Sundowning", &cancel), Err("ERROR: [youtube:tab] blocked".into()));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // The search ranks live cuts beside the song, and a remaster suffix is still the song.
+    #[test]
+    fn song_results_are_the_ones_with_the_same_title() {
+        let found = "aaa\tYellow (Live)\nbbb\tYellow\nccc\tYellow (Remastered)\n";
+        assert_eq!(song_ids(found, "Yellow"), ["bbb", "ccc"]);
+        assert!(song_ids(found, "Clocks").is_empty());
+    }
+
+    // A cover of the same title ranks above the song; reading the channel is what passes it over.
+    #[test]
+    fn a_song_by_somebody_else_is_passed_over() {
+        let dir = std::env::temp_dir().join(format!("earworm-findsong-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin = dir.join("yt-dlp");
+        std::fs::write(
+            &bin,
+            "#!/bin/sh\nfor a in \"$@\"; do last=\"$a\"; done\ncase \"$last\" in\n\
+             *search*) printf 'cover\\tSpoon\\nreal\\tSpoon\\n' ;;\n\
+             *v=cover) echo 'Karaoke Kings' ;;\n\
+             *v=real) echo 'Can' ;;\n\
+             esac\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        assert_eq!(find_song_with(&bin.display().to_string(), "Can", "Spoon"), Ok(Some("real".into())));
+        assert_eq!(find_song_with(&bin.display().to_string(), "Neu!", "Spoon"), Ok(None));
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

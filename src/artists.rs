@@ -10,6 +10,11 @@ use crate::{tag, worker};
 
 // Under `--dir` beside `.playlists`, not in the config: the config is written only by `^t` and the format keys.
 const FILE: &str = ".artists";
+// Release ids already known per starred artist, one `key<TAB>id,id` line each. Its own file: it grows with
+// every release of every starred artist, which the favourites file has no reason to carry.
+const SEEN: &str = ".artists-seen";
+// Every read-modify-write of either file holds this: the new-release check writes from its own thread.
+static STORE: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// One artist in the library, as the tags on disk name them.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,10 +124,10 @@ pub fn index(dir: &Path) -> Vec<Artist> {
     group(read.iter().map(|(artist, album, folder, first)| (artist.as_str(), album.as_str(), folder.as_path(), *first)))
 }
 
-/// The titles the library holds of one artist's album, read from their folders when a download needs them.
-// Not kept in the index: every title of every track for the session, to serve one key on one page.
-pub fn owned_titles(index: &[Artist], artist: &str, album: &str) -> Vec<String> {
-    let (who, want) = (key(artist), crate::discover::album_key(album));
+// The title and album of every track by one artist in their folders, read when a page or download needs them.
+// Not kept in the index: every title of every track for the session, to serve a few keys on one page.
+fn tracks_of(index: &[Artist], artist: &str) -> Vec<(String, String)> {
+    let who = key(artist);
     let Some(found) = index.iter().find(|a| key(&a.name) == who) else {
         return Vec::new();
     };
@@ -131,9 +136,47 @@ pub fn owned_titles(index: &[Artist], artist: &str, album: &str) -> Vec<String> 
         .iter()
         .flat_map(|folder| worker::audio_files(folder))
         .filter_map(|file| tag::brief(&file).ok())
-        .filter(|(a, _, al)| key(&lead_artist(a)) == who && crate::discover::album_key(al) == want)
-        .map(|(_, title, _)| title)
+        .filter(|(a, ..)| key(&lead_artist(a)) == who)
+        .map(|(_, title, album)| (title, album))
         .collect()
+}
+
+/// Every title the library holds by one artist.
+pub fn titles_of(index: &[Artist], artist: &str) -> Vec<String> {
+    tracks_of(index, artist).into_iter().map(|(title, _)| title).collect()
+}
+
+/// The titles the library holds of one artist's album, matched as the discography matches it.
+pub fn owned_titles(index: &[Artist], artist: &str, album: &str) -> Vec<String> {
+    let want = crate::discover::album_key(album);
+    tracks_of(index, artist).into_iter().filter(|(_, al)| crate::discover::album_key(al) == want).map(|(title, _)| title).collect()
+}
+
+/// The release ids already known for each starred artist, by `key`. An artist with no line has never been
+/// looked at, which is different from one looked at with nothing out.
+pub fn seen(root: &Path) -> HashMap<String, HashSet<u64>> {
+    let text = std::fs::read_to_string(root.join(SEEN)).unwrap_or_default();
+    text.lines()
+        .filter_map(|line| line.split_once('\t'))
+        .map(|(who, ids)| (who.to_string(), ids.split(',').filter_map(|id| id.trim().parse().ok()).collect()))
+        .collect()
+}
+
+/// Adds release ids to what is known of an artist, which is what stops them being new.
+pub fn mark_seen(root: &Path, artist: &str, ids: impl IntoIterator<Item = u64>) -> Result<()> {
+    let _held = STORE.lock().unwrap_or_else(|e| e.into_inner());
+    let mut all = seen(root);
+    all.entry(key(artist)).or_default().extend(ids);
+    let mut lines: Vec<String> = all
+        .iter()
+        .map(|(who, ids)| {
+            let mut ids: Vec<u64> = ids.iter().copied().collect();
+            ids.sort_unstable();
+            format!("{who}\t{}", ids.iter().map(u64::to_string).collect::<Vec<_>>().join(","))
+        })
+        .collect();
+    lines.sort();
+    crate::config::write_atomically(&root.join(SEEN), &(lines.join("\n") + "\n"))
 }
 
 /// The artists screen's rows: starred first, then by track count.
@@ -165,6 +208,7 @@ pub fn rows(root: &Path, index: &[Artist]) -> Vec<ArtistRow> {
 /// Stars the artist, or unstars one already starred. True when they end up starred.
 pub fn toggle(root: &Path, name: &str) -> Result<bool> {
     let name = writable(name)?;
+    let _held = STORE.lock().unwrap_or_else(|e| e.into_inner());
     let mut store = load(root);
     let on = match position(&store.list, name) {
         Some(at) => {
@@ -255,6 +299,7 @@ fn position(list: &[Favourite], name: &str) -> Option<usize> {
 
 /// Records the Deezer id a starred artist resolved to. Nothing happens for one not starred.
 pub fn set_id(root: &Path, name: &str, id: u64) -> Result<()> {
+    let _held = STORE.lock().unwrap_or_else(|e| e.into_inner());
     let mut store = load(root);
     let Some(at) = position(&store.list, name) else {
         return Ok(());
@@ -502,6 +547,19 @@ mod tests {
         }
         let index = vec![Artist { name: "Can".into(), tracks: 2, albums: 2, folders: vec![folder], held: Vec::new() }];
         assert_eq!(owned_titles(&index, "Can", "Ege Bamyasi (Remastered)"), ["Vitamin C"]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn seen_releases_add_up_per_artist_under_any_spelling() {
+        let dir = root("seen");
+        assert!(seen(&dir).is_empty());
+        mark_seen(&dir, "Björk", [3, 1]).unwrap();
+        mark_seen(&dir, "bjork", [2]).unwrap();
+        mark_seen(&dir, "Can", Vec::new()).unwrap();
+        let all = seen(&dir);
+        assert_eq!(all[&key("Björk")], HashSet::from([1, 2, 3]));
+        assert!(all[&key("Can")].is_empty(), "an artist looked at with nothing out still has a line");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

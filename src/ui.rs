@@ -83,7 +83,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     } else if app.picking.is_some() {
         draw_pick_bar(frame, app, rule);
     } else if app.view == View::Artist {
-        draw_rule(frame, rule, p);
+        // Which of the three lists this is, since they share one screen and Tab is the only way between them.
+        let left = format!(" {}", app.page.section.label().to_uppercase());
+        let right = format!("tab {} ", app.page.section.next().label());
+        draw_band(frame, rule, left, right, p);
     } else if app.view == View::Artists {
         if app.artists.typing || !app.artists.query.is_empty() {
             draw_artists_bar(frame, app, rule);
@@ -707,6 +710,12 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
             format!("{count} {plural}"),
             Style::new().fg(p.text),
         ));
+        // From starred artists since the last look; `b` is where they are marked.
+        if !app.new_releases.is_empty() {
+            let n = app.new_releases.len();
+            spans.push(dim("  ·  ", p));
+            spans.push(Span::styled(format!("{n} new {}", if n == 1 { "release" } else { "releases" }), Style::new().fg(p.accent)));
+        }
     } else if !app.tracks.is_empty() {
         spans.push(dim("  ·  ", p));
         // How much of the run is showing is the filter band's to say.
@@ -958,6 +967,96 @@ fn draw_playlist(frame: &mut Frame, app: &mut App, area: Rect) {
 
 // One row per release. The mark is a glyph and a word, so it reads without colour.
 fn draw_artist_page(frame: &mut Frame, app: &mut App, area: Rect) {
+    match app.page.section {
+        app::Section::Releases => draw_releases(frame, app, area),
+        app::Section::Top => draw_top(frame, app, area),
+        app::Section::Related => draw_related(frame, app, area),
+    }
+}
+
+// What the page says in place of a list that has not come, or came empty or broken.
+fn page_waiting<T>(list: &Option<Result<Vec<T>, String>>, asking: &str, empty: &str) -> Option<String> {
+    match list {
+        None => Some(format!(" {asking}")),
+        Some(Err(why)) => Some(format!(" {why}")),
+        Some(Ok(rows)) if rows.is_empty() => Some(format!(" {empty}")),
+        Some(Ok(_)) => None,
+    }
+}
+
+fn draw_page_list(frame: &mut Frame, area: Rect, items: Vec<ListItem>, at: usize, scroll: &mut usize) {
+    *scroll = app::scroll_to(*scroll, at, items.len(), area.height as usize);
+    let mut state = ListState::default().with_offset(*scroll);
+    state.select(Some(at));
+    frame.render_stateful_widget(List::new(items), area, &mut state);
+}
+
+// The mark is a glyph and a word, as on the releases.
+fn draw_top(frame: &mut Frame, app: &mut App, area: Rect) {
+    let p = app.theme;
+    if let Some(said) = page_waiting(&app.page.top, &format!("asking Deezer for {}'s top tracks", app.page.name), "Deezer lists no top tracks") {
+        frame.render_widget(Paragraph::new(Line::from(dim(said, p))), area);
+        return;
+    }
+    app.viewport = area.height as usize;
+    let title_width = (area.width as usize).saturating_sub(40).max(12);
+    let at = app.page.top_at;
+    let Some(Ok(rows)) = &app.page.top else { return };
+    let items: Vec<ListItem> = rows
+        .iter()
+        .enumerate()
+        .map(|(n, row)| {
+            let (mark, colour) = if row.have { ("● here", p.accent) } else { ("○ missing", p.muted) };
+            let title = truncate(&row.title, title_width);
+            let pad = title_width.saturating_sub(cols(&title));
+            ListItem::new(Line::from(vec![
+                Span::styled(if n == at { "▌" } else { " " }, Style::new().fg(p.cursor)),
+                Span::styled(format!(" {mark:<10}"), Style::new().fg(colour)),
+                dim(format!("{:>3}  ", n + 1), p),
+                Span::styled(title, row_style(n == at, p)),
+                dim(format!("{:pad$}  {}", "", row.album), p),
+            ]))
+        })
+        .collect();
+    let mut scroll = app.page.scroll;
+    draw_page_list(frame, area, items, at, &mut scroll);
+    app.page.scroll = scroll;
+}
+
+fn draw_related(frame: &mut Frame, app: &mut App, area: Rect) {
+    let p = app.theme;
+    if let Some(said) = page_waiting(&app.page.related, &format!("asking Deezer who is like {}", app.page.name), "Deezer lists nobody related") {
+        frame.render_widget(Paragraph::new(Line::from(dim(said, p))), area);
+        return;
+    }
+    app.viewport = area.height as usize;
+    let name_width = (area.width as usize).saturating_sub(36).max(12);
+    let at = app.page.related_at;
+    let Some(Ok(rows)) = &app.page.related else { return };
+    let items: Vec<ListItem> = rows
+        .iter()
+        .enumerate()
+        .map(|(n, row)| {
+            let name = truncate(&row.name, name_width);
+            let pad = name_width.saturating_sub(cols(&name));
+            let here = match row.tracks {
+                0 => "none here".to_string(),
+                1 => "1 track here".to_string(),
+                t => format!("{t} tracks here"),
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(if n == at { "▌" } else { " " }, Style::new().fg(p.cursor)),
+                Span::styled(format!(" {name}"), row_style(n == at, p)),
+                dim(format!("{:pad$}  {here:<15} {} fans", "", row.fans), p),
+            ]))
+        })
+        .collect();
+    let mut scroll = app.page.scroll;
+    draw_page_list(frame, area, items, at, &mut scroll);
+    app.page.scroll = scroll;
+}
+
+fn draw_releases(frame: &mut Frame, app: &mut App, area: Rect) {
     let p = app.theme;
     let rows = app.page_rows();
     if rows.is_empty() {
@@ -992,13 +1091,17 @@ fn draw_artist_page(frame: &mut Frame, app: &mut App, area: Rect) {
             let year = row.year.map_or("    ".to_string(), |y| y.to_string());
             let title = truncate(&row.title, title_width);
             let pad = title_width.saturating_sub(cols(&title));
-            ListItem::new(Line::from(vec![
+            let mut line = vec![
                 Span::styled(if *at == cursor { "▌" } else { " " }, Style::new().fg(p.cursor)),
                 Span::styled(format!(" {mark:<11}"), Style::new().fg(colour)),
                 dim(format!(" {year}  "), p),
                 Span::styled(title, row_style(*at == cursor, p)),
                 dim(format!("{:pad$}  {}", "", row.kind), p),
-            ]))
+            ];
+            if row.new {
+                line.push(Span::styled("  ✦ new", Style::new().fg(p.accent)));
+            }
+            ListItem::new(Line::from(line))
         })
         .collect();
     let at = rows.iter().position(|r| *r == cursor).unwrap_or(0);
@@ -1036,12 +1139,18 @@ fn draw_artists(frame: &mut Frame, app: &mut App, area: Rect) {
             let pad = name_width.saturating_sub(cols(&name));
             let tracks = if row.tracks == 1 { "track" } else { "tracks" };
             let albums = if row.albums == 1 { "album" } else { "albums" };
-            ListItem::new(Line::from(vec![
+            let key = crate::artists::key(&row.name);
+            let fresh = app.new_releases.iter().filter(|(a, ..)| crate::artists::key(a) == key).count();
+            let mut line = vec![
                 Span::styled(if *at == cursor { "▌" } else { " " }, Style::new().fg(p.cursor)),
                 Span::styled(if row.starred { " ★" } else { "  " }, Style::new().fg(p.accent)),
                 Span::styled(format!(" {name}"), row_style(*at == cursor, p)),
                 dim(format!("{:pad$}  {:>4} {tracks:<6}  {:>3} {albums}", "", row.tracks, row.albums), p),
-            ]))
+            ];
+            if fresh > 0 {
+                line.push(Span::styled(format!("  + {fresh} new"), Style::new().fg(p.accent)));
+            }
+            ListItem::new(Line::from(line))
         })
         .collect();
     let at = rows.iter().position(|r| *r == cursor).unwrap_or(0);
@@ -1923,11 +2032,27 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     } else if app.view == View::Artists && app.artists.typing {
         hints.push(("   enter keeps".to_string(), Style::new().fg(p.accent)));
         hints.push(("   esc clears".to_string(), Style::new().fg(p.muted)));
+    } else if app.view == View::Artist && app.page.section == app::Section::Top {
+        // Offered only when it would fetch: locked, busy or nothing missing, it is not advertised.
+        let missing = app.page.top.as_ref().and_then(|r| r.as_ref().ok()).map_or(0, |r| r.iter().filter(|t| !t.have).count());
+        if missing > 0 && app.can_page() && app.unlocked.has(crate::cheats::Feature::Music) {
+            hints.push((format!("   enter get the {missing} missing"), Style::new().fg(p.accent)));
+        }
+        hints.push(("   tab related".to_string(), Style::new().fg(p.muted)));
+        hints.push(("   esc back".to_string(), Style::new().fg(p.muted)));
+    } else if app.view == View::Artist && app.page.section == app::Section::Related {
+        let any = app.page.related.as_ref().and_then(|r| r.as_ref().ok()).is_some_and(|r| !r.is_empty());
+        if any && app.can_page() {
+            hints.push(("   enter open".to_string(), Style::new().fg(p.accent)));
+        }
+        hints.push(("   tab releases".to_string(), Style::new().fg(p.muted)));
+        hints.push(("   esc back".to_string(), Style::new().fg(p.muted)));
     } else if app.view == View::Artist {
         // Offered only when Enter would fetch now: locked or busy, the key is not advertised.
         if app.can_get() {
             hints.push(("   enter get".to_string(), Style::new().fg(p.accent)));
         }
+        hints.push(("   tab top tracks".to_string(), Style::new().fg(p.muted)));
         // Only when it would change something: nothing hidden, or nothing loaded yet, is a dead key.
         if app.page.all_kinds {
             hints.push(("   a albums and EPs".to_string(), Style::new().fg(p.accent)));
@@ -1935,7 +2060,8 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             hints.push((format!("   a show {} more", app.page_hidden()), Style::new().fg(p.accent)));
         }
         hints.push(("   o their folders".to_string(), Style::new().fg(p.muted)));
-        hints.push(("   esc artists".to_string(), Style::new().fg(p.muted)));
+        let esc = if app.page_back.is_empty() { "   esc artists" } else { "   esc back" };
+        hints.push((esc.to_string(), Style::new().fg(p.muted)));
     } else if app.view == View::Artists {
         hints.push(("   enter discography".to_string(), Style::new().fg(p.accent)));
         hints.push(("   o their folders".to_string(), Style::new().fg(p.muted)));
@@ -2124,11 +2250,13 @@ fn draw_help(frame: &mut Frame, app: &App) {
         ]);
     } else if app.view == View::Artist {
         rows.extend([
-            ("get", "enter", "find a missing release on YouTube Music and download it"),
-            ("show", "a", "albums and EPs, or every release"),
+            ("get", "enter", "a missing release, or the missing top tracks, from YouTube Music"),
+            ("", "enter", "on a related artist, their page"),
+            ("show", "tab", "releases, top tracks, related artists"),
+            ("", "a", "albums and EPs, or every release"),
             ("open", "o", "the library, narrowed to their folders"),
             ("view", "l", "yt-dlp output"),
-            ("back", "Esc", "the artists"),
+            ("back", "Esc", "the page before, or the artists"),
             ("quit", "q  ^c", ""),
         ]);
     } else if app.view == View::Pick {
@@ -5845,7 +5973,7 @@ mod tests {
     }
 
     fn release(title: &str, year: u16, have: usize, of: Option<usize>) -> crate::app::AlbumRow {
-        crate::app::AlbumRow { id: 1, title: title.into(), year: Some(year), kind: "album".into(), have, of }
+        crate::app::AlbumRow { id: 1, title: title.into(), year: Some(year), kind: "album".into(), have, of, new: false }
     }
 
     #[test]
@@ -5900,5 +6028,47 @@ mod tests {
         single.kind = "single".into();
         let mut app = page_app(Ok(vec![release("Tago Mago", 1971, 7, Some(7)), single]));
         assert!(screen_of(&mut app, 100, 10).contains("a show 1 more"));
+    }
+
+    #[test]
+    fn top_tracks_read_here_or_missing_and_the_band_names_the_list() {
+        let mut app = page_app(Ok(vec![]));
+        app.page.section = crate::app::Section::Top;
+        let row = |title: &str, have| crate::app::TopRow { title: title.into(), album: "Parachutes".into(), have };
+        app.apply(Msg::Top { name: "Can".into(), rows: Ok(vec![row("Yellow", true), row("Clocks", false)]) });
+        let screen = screen_of(&mut app, 90, 10);
+        let line = |name: &str| screen.lines().find(|l| l.contains(name)).unwrap_or_default().to_string();
+        assert!(screen.lines().nth(1).unwrap().contains("TOP TRACKS") && screen.lines().nth(1).unwrap().contains("tab related artists"), "{screen}");
+        assert!(line("Yellow").contains("● here") && line("Yellow").starts_with('▌'), "{screen}");
+        assert!(line("Clocks").contains("○ missing"), "{screen}");
+    }
+
+    #[test]
+    fn a_related_artist_shows_what_the_library_holds_of_them() {
+        let mut app = page_app(Ok(vec![]));
+        app.page.section = crate::app::Section::Related;
+        assert!(screen_of(&mut app, 90, 10).contains("asking Deezer who is like Can"));
+        let row = |name: &str, tracks| crate::app::RelatedRow { name: name.into(), fans: 900, tracks };
+        app.apply(Msg::Related { name: "Can".into(), rows: Ok(vec![row("Neu!", 3), row("Faust", 0)]) });
+        let screen = screen_of(&mut app, 90, 10);
+        let line = |name: &str| screen.lines().find(|l| l.contains(name)).unwrap_or_default().to_string();
+        assert!(line("Neu!").contains("3 tracks here") && line("Neu!").contains("900 fans"), "{screen}");
+        assert!(line("Faust").contains("none here"), "{screen}");
+    }
+
+    #[test]
+    fn new_releases_are_counted_on_the_library_and_marked_on_their_artist() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        app.apply(Msg::Library { shelves: vec![kinded("Rock", None)], show: true });
+        app.apply(Msg::NewReleases(vec![("Can".into(), 75, "Live 1975".into()), ("Can".into(), 76, "Live 1976".into())]));
+        assert!(screen_of(&mut app, 90, 10).lines().next().unwrap().contains("2 new releases"));
+        app.view = View::Artists;
+        let row = |name: &str| crate::app::ArtistRow { name: name.into(), tracks: 3, albums: 1, starred: true, folders: Vec::new() };
+        app.apply(Msg::Artists { rows: vec![row("Can"), row("Neu!")], focus: None });
+        let screen = screen_of(&mut app, 90, 10);
+        let line = |name: &str| screen.lines().find(|l| l.contains(name)).unwrap_or_default().to_string();
+        assert!(line("Can").contains("+ 2 new") && !line("Neu!").contains("new"), "{screen}");
     }
 }

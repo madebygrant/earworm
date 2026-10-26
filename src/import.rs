@@ -52,8 +52,13 @@ impl std::fmt::Display for Fault {
 impl Found {
     /// The queue link yt-dlp lists as one playlist.
     pub fn url(&self) -> String {
-        format!("{QUEUE}{}", self.ids.join(","))
+        queue_url(&self.ids)
     }
+}
+
+/// The queue link for a set of video ids, which yt-dlp lists as one playlist.
+pub fn queue_url(ids: &[String]) -> String {
+    format!("{QUEUE}{}", ids.join(","))
 }
 
 /// The ids an import's recorded URL holds, or `None` when the URL is not an import's.

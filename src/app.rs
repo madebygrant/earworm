@@ -408,6 +408,8 @@ pub struct AlbumRow {
     pub have: usize,
     /// Its length on Deezer, asked only for one held, so `have < of` is partial.
     pub of: Option<usize>,
+    /// Out since the artist's page was last read, from the startup check.
+    pub new: bool,
 }
 
 impl AlbumRow {
@@ -432,6 +434,59 @@ pub struct ArtistPage {
     pub all_kinds: bool,
     pub loaded: bool,
     pub error: Option<String>,
+    pub section: Section,
+    /// `None` until the tab is first opened, which is when they are fetched.
+    pub top: Option<Result<Vec<TopRow>, String>>,
+    pub related: Option<Result<Vec<RelatedRow>, String>>,
+    // Each list keeps its own place, so Tab round the three comes back to the row it left.
+    pub top_at: usize,
+    pub related_at: usize,
+    // Asked for and not yet answered, so Tab round again does not ask twice.
+    pub top_asked: bool,
+    pub related_asked: bool,
+}
+
+/// Which of an artist's lists the page shows. Tab walks them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Section {
+    #[default]
+    Releases,
+    Top,
+    Related,
+}
+
+impl Section {
+    pub fn next(self) -> Section {
+        match self {
+            Section::Releases => Section::Top,
+            Section::Top => Section::Related,
+            Section::Related => Section::Releases,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Section::Releases => "releases",
+            Section::Top => "top tracks",
+            Section::Related => "related artists",
+        }
+    }
+}
+
+/// One of the artist's top tracks, and whether a track of that title is here.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TopRow {
+    pub title: String,
+    pub album: String,
+    pub have: bool,
+}
+
+/// An artist Deezer calls related, with how much of them the library holds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RelatedRow {
+    pub name: String,
+    pub fans: u64,
+    pub tracks: usize,
 }
 
 /// The artists screen. `cursor` is a position in `rows`, which the filter narrows as a view.
@@ -549,6 +604,11 @@ pub enum Cmd {
     Discography(String),
     /// Find a release on YouTube Music and download it as a new playlist. By title, as Deezer names it.
     GetAlbum { artist: String, title: String },
+    /// The artist's top tracks, marked against the library.
+    Top(String),
+    Related(String),
+    /// Find the artist's missing top tracks on YouTube Music and download them as one playlist.
+    GetTop { artist: String, titles: Vec<String> },
 }
 
 /* A question the UI asks on its own account. Nothing is blocked on the
@@ -691,6 +751,10 @@ pub enum Msg {
     /// Tracks the next pick gate opens unmarked: what a partial album already has. Sent just before `Pick`,
     /// so the marks are right from the first frame the gate is open.
     PickHeld(Vec<usize>),
+    Top { name: String, rows: Result<Vec<TopRow>, String> },
+    Related { name: String, rows: Result<Vec<RelatedRow>, String> },
+    /// Starred artists' releases not seen before, as (artist, release id, title), newest first.
+    NewReleases(Vec<(String, u64, String)>),
     /// One release's length, sent after the page as each request lands.
     Counted { name: String, id: u64, of: usize },
     /// A list was just made: open the track picker with it as the target.
@@ -1113,6 +1177,10 @@ pub struct App {
     pub page: ArtistPage,
     // The tracks the next pick gate leaves unmarked, from `Msg::PickHeld`; used once.
     pick_held: Vec<usize>,
+    /// Pages left for a related artist's, so Esc walks back through them before leaving.
+    pub page_back: Vec<String>,
+    /// What the startup check found from starred artists, as (artist, release id, title), until their page is read.
+    pub new_releases: Vec<(String, u64, String)>,
     // The search screen's matches, computed once per frame by `draw` so the header, the band and the list read one answer.
     pub found_cache: Vec<crate::picker::Hit>,
     // Tracks marked on the search screen for `P`, by folder and filename like the picker's.
@@ -1275,6 +1343,8 @@ impl App {
             artists: ArtistsView::default(),
             page: ArtistPage::default(),
             pick_held: Vec::new(),
+            page_back: Vec::new(),
+            new_releases: Vec::new(),
             found_cache: Vec::new(),
             found_marks: crate::picker::Marks::default(),
             from_found: false,
@@ -1555,13 +1625,35 @@ impl App {
                     self.page.found = found;
                     self.page.loaded = true;
                     match rows {
-                        Ok(rows) => self.page.rows = rows,
+                        // Marked once, here: the worker has just recorded them as seen, so they leave the count.
+                        Ok(mut rows) => {
+                            let key = crate::artists::key(&name);
+                            let fresh: Vec<u64> = self.new_releases.iter().filter(|(a, ..)| crate::artists::key(a) == key).map(|(_, id, _)| *id).collect();
+                            for row in rows.iter_mut() {
+                                row.new = fresh.contains(&row.id);
+                            }
+                            self.new_releases.retain(|(a, ..)| crate::artists::key(a) != key);
+                            self.page.rows = rows;
+                        }
                         Err(why) => self.page.error = Some(why),
                     }
                     self.page.cursor = self.page_rows().first().copied().unwrap_or(0);
                 }
             }
             Msg::PickHeld(held) => self.pick_held = held,
+            Msg::Top { name, rows } => {
+                if self.page.name == name {
+                    self.page.top = Some(rows);
+                    self.page.top_at = 0;
+                }
+            }
+            Msg::Related { name, rows } => {
+                if self.page.name == name {
+                    self.page.related = Some(rows);
+                    self.page.related_at = 0;
+                }
+            }
+            Msg::NewReleases(found) => self.new_releases = found,
             Msg::Counted { name, id, of } => {
                 if self.page.name == name {
                     for row in self.page.rows.iter_mut().filter(|r| r.id == id) {
@@ -2002,15 +2094,21 @@ impl App {
     // The folders the index read their tags in, not a match on filenames: those say `AC-DC` for AC/DC, and
     // "Can" is inside "Scandal". The library's query and kind go, or they could hide every one of them.
     pub fn artist_folders(&mut self) {
-        let Some(row) = self.artist_selected() else {
-            return;
+        // On a page, the page's artist, which after a related one is not the row the artists screen is on.
+        let name = match self.view {
+            View::Artist => self.page.name.clone(),
+            _ => match self.artist_selected() {
+                Some(row) => row.name.clone(),
+                None => return,
+            },
         };
-        if row.folders.is_empty() {
-            let name = row.name.clone();
-            self.say(format!("no folder holds a track by {name} now  ·  * unstars them"));
+        let key = crate::artists::key(&name);
+        let folders = self.artists.rows.iter().find(|r| crate::artists::key(&r.name) == key).map(|r| r.folders.clone()).unwrap_or_default();
+        if folders.is_empty() {
+            self.say(format!("no folder holds a track by {name} now"));
             return;
         }
-        self.by_artist = Some((row.name.clone(), row.folders.clone()));
+        self.by_artist = Some((name, folders));
         self.filter.clear();
         self.typing_filter = false;
         self.only = None;
@@ -2024,12 +2122,101 @@ impl App {
 
     /// Enter on the artists screen. The page opens at once and fills when the worker answers.
     pub fn open_page(&mut self) {
-        let Some(row) = self.artist_selected() else {
+        let Some(name) = self.artist_selected().map(|r| r.name.clone()) else {
             return;
         };
-        self.page = ArtistPage { name: row.name.clone(), tracks: row.tracks, ..ArtistPage::default() };
+        self.page_back.clear();
+        self.show_page(name);
+    }
+
+    fn show_page(&mut self, name: String) {
+        let key = crate::artists::key(&name);
+        let tracks = self.artists.rows.iter().find(|r| crate::artists::key(&r.name) == key).map_or(0, |r| r.tracks);
+        self.page = ArtistPage { name, tracks, ..ArtistPage::default() };
         self.view = View::Artist;
         self.send(Cmd::Discography(self.page.name.clone()));
+    }
+
+    /// Esc on a page: the one before it, if a related artist's was opened from there, or the artists screen.
+    pub fn leave_page(&mut self) {
+        match self.page_back.pop() {
+            Some(name) => self.show_page(name),
+            None => self.view = View::Artists,
+        }
+    }
+
+    /// Tab: the next list. Top tracks and related artists are asked for the first time they are shown.
+    pub fn page_section(&mut self) {
+        self.page.section = self.page.section.next();
+        let name = self.page.name.clone();
+        match self.page.section {
+            Section::Top if self.page.top.is_none() && !self.page.top_asked => {
+                self.page.top_asked = true;
+                self.send(Cmd::Top(name));
+            }
+            Section::Related if self.page.related.is_none() && !self.page.related_asked => {
+                self.page.related_asked = true;
+                self.send(Cmd::Related(name));
+            }
+            _ => {}
+        }
+    }
+
+    fn section_len(&self) -> usize {
+        match self.page.section {
+            Section::Releases => self.page_rows().len(),
+            Section::Top => self.page.top.as_ref().and_then(|r| r.as_ref().ok()).map_or(0, Vec::len),
+            Section::Related => self.page.related.as_ref().and_then(|r| r.as_ref().ok()).map_or(0, Vec::len),
+        }
+    }
+
+    /// Movement on the page, in whichever list is showing.
+    pub fn section_move(&mut self, down: bool, by: usize) {
+        let all: Vec<usize> = (0..self.section_len()).collect();
+        match self.page.section {
+            Section::Releases => self.page_move(down, by),
+            Section::Top => self.page.top_at = step_in(&all, self.page.top_at, down, by),
+            Section::Related => self.page.related_at = step_in(&all, self.page.related_at, down, by),
+        }
+    }
+
+    pub fn section_jump(&mut self, last: bool) {
+        let all: Vec<usize> = (0..self.section_len()).collect();
+        match self.page.section {
+            Section::Releases => self.page_jump(last),
+            Section::Top => self.page.top_at = end_of(&all, last, self.page.top_at),
+            Section::Related => self.page.related_at = end_of(&all, last, self.page.related_at),
+        }
+    }
+
+    /// Enter on the page, which means the list's own action.
+    pub fn section_enter(&mut self) {
+        match self.page.section {
+            Section::Releases => self.get_album(),
+            Section::Top => self.get_top(),
+            Section::Related => {
+                let Some(name) = self.page.related.as_ref().and_then(|r| r.as_ref().ok()).and_then(|r| r.get(self.page.related_at)).map(|r| r.name.clone()) else {
+                    return;
+                };
+                self.page_back.push(self.page.name.clone());
+                self.show_page(name);
+            }
+        }
+    }
+
+    /// The missing top tracks, as one download. Locked, it says why, as `get_album` does.
+    pub fn get_top(&mut self) {
+        let Some(Ok(rows)) = &self.page.top else {
+            return;
+        };
+        let titles: Vec<String> = rows.iter().filter(|r| !r.have).map(|r| r.title.clone()).collect();
+        if titles.is_empty() {
+            self.say("every one of these is already here");
+        } else if !self.unlocked.has(crate::cheats::Feature::Music) {
+            self.say(format!("{}  ·  tracks come from YouTube Music", crate::cheats::LOCKED));
+        } else {
+            self.send(Cmd::GetTop { artist: self.page.name.clone(), titles });
+        }
     }
 
     // Albums and EPs unless `all_kinds`: a band's singles and compilations outnumber its records.
@@ -2067,6 +2254,7 @@ impl App {
     /// Whether Enter would fetch the release under the cursor: possibly incomplete, and the unlock on.
     pub fn can_get(&self) -> bool {
         self.can_page()
+            && self.page.section == Section::Releases
             && self.unlocked.has(crate::cheats::Feature::Music)
             && self.page_selected().is_some_and(|r| !r.complete())
     }
