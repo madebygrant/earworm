@@ -26,5 +26,10 @@ unicode-segmentation = "1.13.3"
 unicode-width = "0.2"
 ureq = { version = "3", features = ["json"] }
 
+# Dependencies build without debug info to keep target/ small. earworm itself
+# keeps full debug info, so its own backtraces still have line numbers.
+[profile.dev.package."*"]
+debug = false
+
 [profile.release]
 strip = true
