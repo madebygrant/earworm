@@ -9,7 +9,7 @@ use crate::protocol::Shelf;
 use crate::config::composed;
 use crate::manifest::Kind;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct Hit {
     pub shelf: usize,
     pub file: usize,

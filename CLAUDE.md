@@ -1,7 +1,7 @@
 # earworm
 
 Rust/ratatui TUI that downloads a YouTube playlist as tagged opus files, built
-on a core library a desktop front end will share. See
+on a core library it shares with a Tauri desktop front end. See
 README.md for user-facing behaviour.
 
 ## Architecture
@@ -74,6 +74,15 @@ turns on.
   `filter` behind `rows()`, which asks `view` and keeps only the cursors
 - `ui.rs` — every draw function
 
+`crates/gui` is the desktop front end: Tauri 2 with Svelte and TypeScript
+through Vite. `src-tauri/src/main.rs` (package `earworm-gui`, binary
+`earworm-desktop`) starts the worker, sends every `Msg` to the page on the
+`earworm://msg` event, and exposes `send`, `answer`, the theme and `view`
+functions as commands. `src/lib/reducer.ts` is the page's `App::apply`;
+`src/lib/msgs.json` is recorded from core's samples for its tests. Run it
+with `pnpm dev` in `crates/gui` and `cargo run -p earworm-gui`, or
+`pnpm tauri dev`; `pnpm test` runs the reducer tests.
+
 ## Rules
 
 Each rule has the reason it exists, because the reason is what stops the next
@@ -104,6 +113,7 @@ which is read when somebody doubts a rule rather than at the start of a session.
 | Themes and colour depth: `Palette`, `[themes.*]`, `[colors]`, `^t`, truecolor vs 256, `NO_COLOR` | `docs/rules/themes-and-colour.md` | touching `theme.rs`, `recolour`, theme config or any colour in `ui.rs` |
 | Lists, narrowing and search: scrolling, flashes, the filter, review, the library order, `t` search, undo | `docs/rules/lists-and-search.md` | touching `view.rs`, `rows()`, `shelf_rows()`, `found_hits`, the filter box or undo |
 | Artists and discovery: the artist index, stars, the artist page, getting albums and top tracks, new releases | `docs/rules/discovery.md` | touching `artists.rs`, `discover.rs`, `find_album`/`find_song`, `View::Artists`/`View::Artist` or `by_artist` |
+| The desktop app: what the page may keep, the worker's start, the recorded messages, the palette as CSS | `docs/rules/desktop.md` | touching anything in `crates/gui` |
 | Verbs, text, subprocesses and drawing: status verbs, the bell, column widths, `run_bounded`, the intro, the gradient | `docs/rules/ui-details.md` | touching text widths, subprocess calls, the intro or `draw_*` layout |
 
 A rule that mentions "the albums section" or a similar section name means the

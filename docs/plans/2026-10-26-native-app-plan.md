@@ -140,7 +140,7 @@ way; the GUI should call them, not reimplement them in TypeScript.
 Exit: the moved tests pass in core, the TUI calls core for each, and no
 filter or sort logic is left in `crates/tui/src/app.rs`.
 
-## 6. The Tauri shell
+## 6. The Tauri shell [done 2026-10-28]
 
 - `crates/gui`: Tauri 2, Svelte and TypeScript through Vite.
 - The backend:
@@ -184,6 +184,10 @@ and a `[colors]` override in the fixture config shows on screen.
   layout does not wait on it.
 - Read `questions-and-forms.md` and `keys-and-screens.md` first.
 
+- Carried from wave 6's review: the page stores `Msg::Ask` and `Msg::Pick`
+  but draws and answers neither, so a first run with an empty library sits
+  at the URL prompt.
+
 Exit: with a stub `yt-dlp` on the resolved path, syncing a fixture playlist
 from the GUI writes its `.m3u8` and `.earworm` (wait on the files), and an
 answered pick gate downloads only what was marked. Each screen, captured at
@@ -202,6 +206,10 @@ and colour.
   shell before building it, so it is reviewed as a picture first.
 - Each screen checked against the same fixture library, one at a time;
   any can slip to a later release except settings.
+
+- Carried from wave 6's review: the reducer does not mark an artist page's
+  new releases or record the page as read, which `App::apply` does with
+  `artists::key`. Move that marking into core before the page uses it.
 
 Exit: every TUI screen has a GUI counterpart, and the discovery rules hold
 in the GUI (the locked page offers no download).

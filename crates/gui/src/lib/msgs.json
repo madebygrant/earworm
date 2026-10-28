@@ -1,0 +1,561 @@
+{
+  "cmds": [
+    {
+      "Edit": 1
+    },
+    {
+      "Cover": 1
+    },
+    {
+      "Search": 1
+    },
+    {
+      "Open": [
+        "/music/Krautrock",
+        "01 - a.opus"
+      ]
+    },
+    "SyncOne",
+    {
+      "Sync": "/music/Krautrock"
+    },
+    "ResyncAll",
+    "Url",
+    "Retry",
+    {
+      "Swap": [
+        1,
+        2
+      ]
+    },
+    {
+      "Artist": [
+        3
+      ]
+    },
+    {
+      "Play": "/music/Krautrock"
+    },
+    "Toggle",
+    "Format",
+    {
+      "Switch": [
+        "cover",
+        false
+      ]
+    },
+    {
+      "Icons": "Symbols"
+    },
+    "Undo",
+    {
+      "Rename": "/music/Krautrock"
+    },
+    "Purge",
+    {
+      "Reveal": "/music/Krautrock"
+    },
+    {
+      "Remove": "/music/Krautrock"
+    },
+    "NewPlaylist",
+    {
+      "EditPlaylist": {
+        "add": [
+          [
+            "/music/Krautrock",
+            "a.opus"
+          ]
+        ],
+        "name": "Mix",
+        "remove": []
+      }
+    },
+    {
+      "AddToPlaylist": [
+        [
+          [
+            "/music/Krautrock",
+            "a.opus"
+          ]
+        ],
+        null
+      ]
+    },
+    {
+      "OpenPlaylist": "Mix"
+    },
+    {
+      "MoveEntry": {
+        "id": "a",
+        "name": "Mix",
+        "up": true
+      }
+    },
+    {
+      "RemoveEntry": {
+        "id": "a",
+        "name": "Mix"
+      }
+    },
+    {
+      "RenamePlaylist": "Mix"
+    },
+    {
+      "DeletePlaylist": "Mix"
+    },
+    {
+      "PlayPlaylist": "Mix"
+    },
+    {
+      "Export": {
+        "List": "Mix"
+      }
+    },
+    "Artists",
+    {
+      "Star": "Can"
+    },
+    {
+      "Discography": "Can"
+    },
+    {
+      "GetAlbum": {
+        "artist": "Can",
+        "title": "Tago Mago"
+      }
+    },
+    {
+      "Top": "Can"
+    },
+    {
+      "Related": "Can"
+    },
+    {
+      "GetTop": {
+        "artist": "Can",
+        "titles": [
+          "Vitamin C"
+        ]
+      }
+    },
+    {
+      "Thumbs": [
+        "/music/Krautrock"
+      ]
+    }
+  ],
+  "msgs": [
+    {
+      "Stage": "fetching"
+    },
+    {
+      "Flash": "saved"
+    },
+    {
+      "Playlist": "Krautrock"
+    },
+    {
+      "Folder": "/music/Krautrock/01 - Neu! - Hallogallo.opus"
+    },
+    {
+      "Player": {
+        "folder": "/music/Focus",
+        "player": "Running",
+        "playing": true,
+        "track": null
+      }
+    },
+    {
+      "OnAir": [
+        "Mix",
+        [
+          "/music/Krautrock/01 - Neu! - Hallogallo.opus"
+        ]
+      ]
+    },
+    {
+      "Tracks": [
+        {
+          "album": "",
+          "artist": "",
+          "departure_proven": false,
+          "duration": 0,
+          "id": "vid1",
+          "index": 1,
+          "isrc": null,
+          "listed": false,
+          "mbid": null,
+          "name": "Hallogallo",
+          "note": "",
+          "path": "/music/Krautrock/01 - Neu! - Hallogallo.opus",
+          "percent": 0,
+          "source": "",
+          "status": "Pending",
+          "title": "",
+          "twin": "same recording in A",
+          "was": "Hallogallo",
+          "year": 1972
+        }
+      ]
+    },
+    {
+      "Progress": {
+        "index": 1,
+        "percent": 40
+      }
+    },
+    {
+      "Twin": {
+        "index": 1,
+        "twin": null
+      }
+    },
+    {
+      "Update": {
+        "index": 1,
+        "name": "n",
+        "note": null,
+        "source": "Deezer",
+        "status": "Weak"
+      }
+    },
+    {
+      "Meta": {
+        "album": "Neu!",
+        "index": 1,
+        "year": null
+      }
+    },
+    {
+      "Path": {
+        "index": 1,
+        "path": "/music/Krautrock/01 - Neu! - Hallogallo.opus"
+      }
+    },
+    {
+      "Log": "ERROR: x"
+    },
+    {
+      "Library": {
+        "shelves": [
+          {
+            "files": [
+              [
+                "a.opus",
+                false
+              ]
+            ],
+            "kind": "Album",
+            "missing": 0,
+            "name": "Krautrock",
+            "path": "/music/Krautrock/01 - Neu! - Hallogallo.opus",
+            "playlist": null,
+            "synced": null,
+            "tracks": 0,
+            "url": "u"
+          }
+        ],
+        "show": true
+      }
+    },
+    {
+      "Custom": {
+        "focus": "a",
+        "name": "Mix",
+        "rows": [
+          {
+            "file": "x",
+            "folder": "f",
+            "id": "a",
+            "label": "l",
+            "path": null
+          }
+        ],
+        "show": false
+      }
+    },
+    {
+      "Order": {
+        "focus": null,
+        "ids": [
+          "a"
+        ],
+        "name": "Mix"
+      }
+    },
+    {
+      "Select": "/music/Krautrock/01 - Neu! - Hallogallo.opus"
+    },
+    "FoundUnmark",
+    {
+      "Artists": {
+        "focus": null,
+        "rows": [
+          {
+            "albums": 1,
+            "folders": [
+              "/music/Krautrock/01 - Neu! - Hallogallo.opus"
+            ],
+            "name": "Can",
+            "starred": true,
+            "tracks": 3
+          }
+        ]
+      }
+    },
+    {
+      "Discography": {
+        "found": [
+          "Cluster",
+          48210
+        ],
+        "name": "Cluster",
+        "rows": {
+          "Ok": [
+            {
+              "have": 2,
+              "id": 7,
+              "kind": "album",
+              "new": true,
+              "of": 10,
+              "title": "Zuckerzeit",
+              "year": 1974
+            }
+          ]
+        }
+      }
+    },
+    {
+      "PickHeld": [
+        2,
+        3
+      ]
+    },
+    {
+      "Top": {
+        "name": "Can",
+        "rows": {
+          "Ok": [
+            {
+              "album": "Ege Bamyasi",
+              "have": true,
+              "title": "Vitamin C"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "Related": {
+        "name": "Can",
+        "rows": {
+          "Err": "offline"
+        }
+      }
+    },
+    {
+      "NewReleases": [
+        [
+          "Can",
+          9,
+          "New"
+        ]
+      ]
+    },
+    {
+      "Counted": {
+        "id": 9,
+        "name": "Can",
+        "of": 11
+      }
+    },
+    {
+      "PickTracks": "Mix"
+    },
+    {
+      "Renamed": {
+        "new": "b",
+        "old": "a"
+      }
+    },
+    {
+      "Ask": {
+        "id": 3,
+        "prompt": {
+          "Form": {
+            "escape": "Skip",
+            "fields": [
+              [
+                "artist",
+                "Neu!"
+              ]
+            ],
+            "header": "track 4",
+            "note": "was"
+          }
+        }
+      }
+    },
+    {
+      "Pick": {
+        "id": 4
+      }
+    },
+    {
+      "Done": {
+        "result": {
+          "Err": "no network"
+        },
+        "stage": "finished"
+      }
+    },
+    "Unmark",
+    "Idle",
+    "Restart",
+    {
+      "Settings": {
+        "format": "opus",
+        "rows": [
+          {
+            "key": "cover",
+            "source": "Flag",
+            "value": {
+              "Icons": "Nerd"
+            },
+            "what": "fetch and embed cover art",
+            "when": "NextStart"
+          }
+        ],
+        "text": "format opus"
+      }
+    },
+    {
+      "Undoable": "the swap"
+    },
+    {
+      "Dropped": [
+        5
+      ]
+    },
+    "Review",
+    {
+      "Focus": 2
+    },
+    "Artwork",
+    "Quit",
+    {
+      "Thumb": {
+        "file": "/music/Krautrock/01 - Neu! - Hallogallo.opus",
+        "thumb": null
+      }
+    }
+  ],
+  "statuses": [
+    {
+      "label": "queued",
+      "look": false,
+      "settled": false,
+      "status": "Pending",
+      "tally": null
+    },
+    {
+      "label": "on disk",
+      "look": false,
+      "settled": true,
+      "status": "Have",
+      "tally": 8
+    },
+    {
+      "label": "fetching",
+      "look": false,
+      "settled": false,
+      "status": "Downloading",
+      "tally": null
+    },
+    {
+      "label": "fetched",
+      "look": false,
+      "settled": false,
+      "status": "Downloaded",
+      "tally": null
+    },
+    {
+      "label": "tagging",
+      "look": false,
+      "settled": false,
+      "status": "Tagging",
+      "tally": null
+    },
+    {
+      "label": "convert",
+      "look": false,
+      "settled": false,
+      "status": "Converting",
+      "tally": null
+    },
+    {
+      "label": "ok",
+      "look": false,
+      "settled": true,
+      "status": "Ok",
+      "tally": 0
+    },
+    {
+      "label": "manual",
+      "look": false,
+      "settled": true,
+      "status": "Manual",
+      "tally": 1
+    },
+    {
+      "label": "guessed",
+      "look": true,
+      "settled": true,
+      "status": "Kept",
+      "tally": 2
+    },
+    {
+      "label": "unsure",
+      "look": true,
+      "settled": true,
+      "status": "Weak",
+      "tally": 3
+    },
+    {
+      "label": "no match",
+      "look": true,
+      "settled": true,
+      "status": "NoMatch",
+      "tally": 4
+    },
+    {
+      "label": "failed",
+      "look": true,
+      "settled": true,
+      "status": "Failed",
+      "tally": 5
+    },
+    {
+      "label": "gone",
+      "look": false,
+      "settled": true,
+      "status": "Gone",
+      "tally": 6
+    },
+    {
+      "label": "skipped",
+      "look": false,
+      "settled": true,
+      "status": "Skipped",
+      "tally": 7
+    },
+    {
+      "label": "local",
+      "look": false,
+      "settled": true,
+      "status": "Local",
+      "tally": 9
+    }
+  ]
+}

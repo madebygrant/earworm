@@ -57,7 +57,7 @@ pub fn shown(tracks: &[Track], narrow: &Narrow) -> usize {
 
 /// Library order. Name is what the worker hands over, so it is the one that
 /// costs nothing; the other two answer "which of these needs a sync".
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub enum Sort {
     #[default]
     Name,

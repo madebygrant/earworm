@@ -1718,38 +1718,9 @@ impl App {
         let name = name.to_string();
         self.theme = palette;
         self.theme_name = name.clone();
-        /* The walk moves the base palette only, so what is on screen now is a
-           clean built-in. The `[colors]` table stays in the file and is
-           applied on top of whatever is named at the next start, which makes
-           this screen and that one different colours. Future tense on purpose:
-           "still repaints it" reads as a claim about the colours in front of
-           you, and those are the ones it is not repainting. */
-        let kept = if self.theme_overridden {
-            "  ·  [colors] repaints it again next start"
-        } else {
-            ""
-        };
-        /* Saved, the name would stop the next start: the config would name a
-           theme nothing has unlocked yet. */
-        if crate::theme::SECRETS.iter().any(|(secret, _)| *secret == name) {
-            self.say(format!("theme {name}  ·  secret, this session only{kept}"));
-            return;
-        }
-        let Some(file) = self.config_file.clone() else {
-            // --no-config asked for the file to stay out of the run.
-            self.say(format!("theme {name}  ·  this session{kept}"));
-            return;
-        };
-        match crate::config::save_theme(&file, &name) {
-            Ok(()) => {
-                self.theme_saved = true;
-                self.say(format!("theme {name}{kept}"));
-            }
-            /* Not a failure of the key: the theme applied and only the
-               remembering did not, which is a different thing to tell
-               somebody and a different thing to do about it. */
-            Err(e) => self.say(format!("theme {name}  ·  not saved: {e}")),
-        }
+        let kept = crate::config::keep_theme(self.config_file.as_deref(), &name);
+        self.theme_saved = matches!(kept, crate::config::Kept::Saved) || self.theme_saved;
+        self.say(kept.said(&name, self.theme_overridden));
     }
 
     pub fn send(&mut self, cmd: Cmd) {

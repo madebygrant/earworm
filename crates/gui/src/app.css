@@ -1,0 +1,14 @@
+/* What the real window changes from the mockups: real traffic lights, so no painted ones, and the
+   gradient's stop from the palette rather than fixed. */
+body { background: linear-gradient(160deg, var(--near) 0%, var(--far) var(--stop, 76%), var(--far) 100%); user-select: none; }
+.hd::before { display: none; }
+.hd { -webkit-user-select: none; cursor: default; }
+.rail li { cursor: pointer; }
+.fail { padding: 24px var(--gutter); }
+.fail h1 { font-size: var(--s-17); color: var(--error); margin-bottom: 8px; }
+.fail pre { white-space: pre-wrap; color: var(--text); font: inherit; }
+.files { list-style: none; padding: 0; font-size: var(--s-13); }
+.files li { display: grid; grid-template-columns: 9ch 1fr; gap: 1ch; padding: 1px 0; white-space: nowrap; }
+.files li span:last-child { overflow: hidden; text-overflow: ellipsis; }
+.console { position: fixed; left: 0; right: 0; bottom: 30px; background: var(--surface); border-top: 1px solid var(--accent); padding: 4px var(--gutter); display: flex; gap: 1ch; z-index: 6; }
+.console input { flex: 1; outline: none; }

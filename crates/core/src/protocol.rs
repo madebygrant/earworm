@@ -38,13 +38,9 @@ pub enum Status {
     Local,
 }
 
-/* Every variant, for the tests that have to walk them all. Rust will not
-   enumerate them and this list is hand-kept, so a new status left out of it
-   costs coverage rather than correctness: nothing in the running tool reads
-   it. `counts()` used to, which made forgetting one drop a whole column from
-   the tally with nothing saying why, and it now builds itself from the
-   tracks instead. */
-#[cfg(any(test, feature = "test-support"))]
+// Every variant, hand-kept because Rust will not enumerate them: the tests walk it and the desktop app is
+// sent each one's word and rules at start. A status left out costs coverage, and the GUI's reducer test
+// fails on a message carrying it.
 pub const TALLY: [Status; 15] = [
     Status::Pending,
     Status::Have,
@@ -863,7 +859,7 @@ impl Asker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use super::test_support::at;
+    use super::test_support::{at, every_cmd, every_msg};
 
     // Every variant serde knows, read off its own error for a variant that does not exist, so the list is
     // the derive's and nobody keeps it by hand. The derive is also what refuses to compile a variant whose
@@ -882,110 +878,6 @@ mod tests {
             serde_json::Value::Object(map) => map.keys().next().unwrap().clone(),
             other => panic!("not an externally tagged variant: {other}"),
         }
-    }
-
-    fn every_msg() -> Vec<Msg> {
-        let p = || PathBuf::from("/music/Krautrock/01 - Neu! - Hallogallo.opus");
-        let mut track = Track::new(1, "vid1".into(), "Hallogallo".into(), p());
-        track.year = Some(1972);
-        track.twin = Some("same recording in A".into());
-        let shelf = Shelf { path: p(), name: "Krautrock".into(), url: Some("u".into()), kind: Some(crate::manifest::Kind::Album), files: vec![("a.opus".into(), false)], ..Shelf::default() };
-        let row = crate::config::Row {
-            key: "cover".into(),
-            value: crate::config::Value::Icons(crate::icons::Icons::Nerd),
-            source: crate::config::Source::Flag,
-            what: "fetch and embed cover art".into(),
-            when: crate::config::When::NextStart,
-        };
-        let album = AlbumRow { id: 7, title: "Zuckerzeit".into(), year: Some(1974), kind: "album".into(), have: 2, of: Some(10), new: true };
-        vec![
-            Msg::Stage("fetching".into()),
-            Msg::Flash("saved".into()),
-            Msg::Playlist("Krautrock".into()),
-            Msg::Folder(p()),
-            Msg::Player(at(Player::Running, Some("/music/Focus"), true)),
-            Msg::OnAir(Some(("Mix".into(), vec![p()]))),
-            Msg::Tracks(vec![track]),
-            Msg::Progress { index: 1, percent: 40 },
-            Msg::Twin { index: 1, twin: None },
-            Msg::Update { index: 1, status: Status::Weak, source: Some("Deezer".into()), note: None, name: Some("n".into()) },
-            Msg::Meta { index: 1, album: "Neu!".into(), year: None },
-            Msg::Path { index: 1, path: p() },
-            Msg::Log("ERROR: x".into()),
-            Msg::Library { shelves: vec![shelf], show: true },
-            Msg::Custom { name: "Mix".into(), rows: vec![PlaylistRow { id: "a".into(), label: "l".into(), folder: "f".into(), file: "x".into(), path: None }], show: false, focus: Some("a".into()) },
-            Msg::Order { name: "Mix".into(), ids: vec!["a".into()], focus: None },
-            Msg::Select(p()),
-            Msg::FoundUnmark,
-            Msg::Artists { rows: vec![ArtistRow { name: "Can".into(), tracks: 3, albums: 1, starred: true, folders: vec![p()] }], focus: None },
-            Msg::Discography { name: "Cluster".into(), found: Some(("Cluster".into(), 48210)), rows: Ok(vec![album]) },
-            Msg::PickHeld(vec![2, 3]),
-            Msg::Top { name: "Can".into(), rows: Ok(vec![TopRow { title: "Vitamin C".into(), album: "Ege Bamyasi".into(), have: true }]) },
-            Msg::Related { name: "Can".into(), rows: Err("offline".into()) },
-            Msg::NewReleases(vec![("Can".into(), 9, "New".into())]),
-            Msg::Counted { name: "Can".into(), id: 9, of: 11 },
-            Msg::PickTracks("Mix".into()),
-            Msg::Renamed { old: "a".into(), new: "b".into() },
-            Msg::Ask { id: 3, prompt: Prompt::Form { header: "track 4".into(), note: "was".into(), fields: vec![("artist".into(), "Neu!".into())], escape: Escape::Skip } },
-            Msg::Pick { id: 4 },
-            Msg::Done { result: Err("no network".into()), stage: "finished".into() },
-            Msg::Unmark,
-            Msg::Idle,
-            Msg::Restart,
-            Msg::Settings { text: "format opus".into(), format: "opus".into(), rows: vec![row] },
-            Msg::Undoable(Some("the swap".into())),
-            Msg::Dropped(vec![5]),
-            Msg::Review,
-            Msg::Focus(2),
-            Msg::Artwork,
-            Msg::Quit,
-            Msg::Thumb { file: p(), thumb: None },
-        ]
-    }
-
-    fn every_cmd() -> Vec<Cmd> {
-        let p = || PathBuf::from("/music/Krautrock");
-        vec![
-            Cmd::Edit(1),
-            Cmd::Cover(1),
-            Cmd::Search(1),
-            Cmd::Open(p(), Some("01 - a.opus".into())),
-            Cmd::SyncOne,
-            Cmd::Sync(p()),
-            Cmd::ResyncAll,
-            Cmd::Url,
-            Cmd::Retry,
-            Cmd::Swap(vec![1, 2]),
-            Cmd::Artist(vec![3]),
-            Cmd::Play(p()),
-            Cmd::Toggle,
-            Cmd::Format,
-            Cmd::Switch("cover".into(), false),
-            Cmd::Icons(crate::icons::Icons::Symbols),
-            Cmd::Undo,
-            Cmd::Rename(p()),
-            Cmd::Purge,
-            Cmd::Reveal(p()),
-            Cmd::Remove(p()),
-            Cmd::NewPlaylist,
-            Cmd::EditPlaylist { name: "Mix".into(), add: vec![(p(), "a.opus".into())], remove: vec![] },
-            Cmd::AddToPlaylist(vec![(p(), "a.opus".into())], None),
-            Cmd::OpenPlaylist("Mix".into()),
-            Cmd::MoveEntry { name: "Mix".into(), id: "a".into(), up: true },
-            Cmd::RemoveEntry { name: "Mix".into(), id: "a".into() },
-            Cmd::RenamePlaylist("Mix".into()),
-            Cmd::DeletePlaylist("Mix".into()),
-            Cmd::PlayPlaylist("Mix".into()),
-            Cmd::Export(crate::export::Target::List("Mix".into())),
-            Cmd::Artists,
-            Cmd::Star("Can".into()),
-            Cmd::Discography("Can".into()),
-            Cmd::GetAlbum { artist: "Can".into(), title: "Tago Mago".into() },
-            Cmd::Top("Can".into()),
-            Cmd::Related("Can".into()),
-            Cmd::GetTop { artist: "Can".into(), titles: vec!["Vitamin C".into()] },
-            Cmd::Thumbs(vec![p()]),
-        ]
     }
 
     // A front end in another process or a webview sees only JSON, so every message and command has to come
@@ -1220,8 +1112,7 @@ mod tests {
 // For the front ends' tests too, which is why it is not inside `tests`.
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support {
-    use super::{Playback, Player};
-    use std::path::PathBuf;
+    use super::*;
 
     pub fn at(player: Player, folder: Option<&str>, playing: bool) -> Playback {
         Playback {
@@ -1230,5 +1121,110 @@ pub mod test_support {
             track: None,
             playing,
         }
+    }
+
+    /// One of every message, which the JSON round trip and the desktop app's reducer tests both run on.
+    pub fn every_msg() -> Vec<Msg> {
+        let p = || PathBuf::from("/music/Krautrock/01 - Neu! - Hallogallo.opus");
+        let mut track = Track::new(1, "vid1".into(), "Hallogallo".into(), p());
+        track.year = Some(1972);
+        track.twin = Some("same recording in A".into());
+        let shelf = Shelf { path: p(), name: "Krautrock".into(), url: Some("u".into()), kind: Some(crate::manifest::Kind::Album), files: vec![("a.opus".into(), false)], ..Shelf::default() };
+        let row = crate::config::Row {
+            key: "cover".into(),
+            value: crate::config::Value::Icons(crate::icons::Icons::Nerd),
+            source: crate::config::Source::Flag,
+            what: "fetch and embed cover art".into(),
+            when: crate::config::When::NextStart,
+        };
+        let album = AlbumRow { id: 7, title: "Zuckerzeit".into(), year: Some(1974), kind: "album".into(), have: 2, of: Some(10), new: true };
+        vec![
+            Msg::Stage("fetching".into()),
+            Msg::Flash("saved".into()),
+            Msg::Playlist("Krautrock".into()),
+            Msg::Folder(p()),
+            Msg::Player(at(Player::Running, Some("/music/Focus"), true)),
+            Msg::OnAir(Some(("Mix".into(), vec![p()]))),
+            Msg::Tracks(vec![track]),
+            Msg::Progress { index: 1, percent: 40 },
+            Msg::Twin { index: 1, twin: None },
+            Msg::Update { index: 1, status: Status::Weak, source: Some("Deezer".into()), note: None, name: Some("n".into()) },
+            Msg::Meta { index: 1, album: "Neu!".into(), year: None },
+            Msg::Path { index: 1, path: p() },
+            Msg::Log("ERROR: x".into()),
+            Msg::Library { shelves: vec![shelf], show: true },
+            Msg::Custom { name: "Mix".into(), rows: vec![PlaylistRow { id: "a".into(), label: "l".into(), folder: "f".into(), file: "x".into(), path: None }], show: false, focus: Some("a".into()) },
+            Msg::Order { name: "Mix".into(), ids: vec!["a".into()], focus: None },
+            Msg::Select(p()),
+            Msg::FoundUnmark,
+            Msg::Artists { rows: vec![ArtistRow { name: "Can".into(), tracks: 3, albums: 1, starred: true, folders: vec![p()] }], focus: None },
+            Msg::Discography { name: "Cluster".into(), found: Some(("Cluster".into(), 48210)), rows: Ok(vec![album]) },
+            Msg::PickHeld(vec![2, 3]),
+            Msg::Top { name: "Can".into(), rows: Ok(vec![TopRow { title: "Vitamin C".into(), album: "Ege Bamyasi".into(), have: true }]) },
+            Msg::Related { name: "Can".into(), rows: Err("offline".into()) },
+            Msg::NewReleases(vec![("Can".into(), 9, "New".into())]),
+            Msg::Counted { name: "Can".into(), id: 9, of: 11 },
+            Msg::PickTracks("Mix".into()),
+            Msg::Renamed { old: "a".into(), new: "b".into() },
+            Msg::Ask { id: 3, prompt: Prompt::Form { header: "track 4".into(), note: "was".into(), fields: vec![("artist".into(), "Neu!".into())], escape: Escape::Skip } },
+            Msg::Pick { id: 4 },
+            Msg::Done { result: Err("no network".into()), stage: "finished".into() },
+            Msg::Unmark,
+            Msg::Idle,
+            Msg::Restart,
+            Msg::Settings { text: "format opus".into(), format: "opus".into(), rows: vec![row] },
+            Msg::Undoable(Some("the swap".into())),
+            Msg::Dropped(vec![5]),
+            Msg::Review,
+            Msg::Focus(2),
+            Msg::Artwork,
+            Msg::Quit,
+            Msg::Thumb { file: p(), thumb: None },
+        ]
+    }
+
+    pub fn every_cmd() -> Vec<Cmd> {
+        let p = || PathBuf::from("/music/Krautrock");
+        vec![
+            Cmd::Edit(1),
+            Cmd::Cover(1),
+            Cmd::Search(1),
+            Cmd::Open(p(), Some("01 - a.opus".into())),
+            Cmd::SyncOne,
+            Cmd::Sync(p()),
+            Cmd::ResyncAll,
+            Cmd::Url,
+            Cmd::Retry,
+            Cmd::Swap(vec![1, 2]),
+            Cmd::Artist(vec![3]),
+            Cmd::Play(p()),
+            Cmd::Toggle,
+            Cmd::Format,
+            Cmd::Switch("cover".into(), false),
+            Cmd::Icons(crate::icons::Icons::Symbols),
+            Cmd::Undo,
+            Cmd::Rename(p()),
+            Cmd::Purge,
+            Cmd::Reveal(p()),
+            Cmd::Remove(p()),
+            Cmd::NewPlaylist,
+            Cmd::EditPlaylist { name: "Mix".into(), add: vec![(p(), "a.opus".into())], remove: vec![] },
+            Cmd::AddToPlaylist(vec![(p(), "a.opus".into())], None),
+            Cmd::OpenPlaylist("Mix".into()),
+            Cmd::MoveEntry { name: "Mix".into(), id: "a".into(), up: true },
+            Cmd::RemoveEntry { name: "Mix".into(), id: "a".into() },
+            Cmd::RenamePlaylist("Mix".into()),
+            Cmd::DeletePlaylist("Mix".into()),
+            Cmd::PlayPlaylist("Mix".into()),
+            Cmd::Export(crate::export::Target::List("Mix".into())),
+            Cmd::Artists,
+            Cmd::Star("Can".into()),
+            Cmd::Discography("Can".into()),
+            Cmd::GetAlbum { artist: "Can".into(), title: "Tago Mago".into() },
+            Cmd::Top("Can".into()),
+            Cmd::Related("Can".into()),
+            Cmd::GetTop { artist: "Can".into(), titles: vec!["Vitamin C".into()] },
+            Cmd::Thumbs(vec![p()]),
+        ]
     }
 }

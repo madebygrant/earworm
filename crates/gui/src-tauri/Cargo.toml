@@ -1,0 +1,27 @@
+[package]
+name = "earworm-gui"
+description = "The desktop front end for earworm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+
+[[bin]]
+name = "earworm-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+earworm-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+ratatui-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tauri = { version = "2", features = [] }
+
+[dev-dependencies]
+earworm-core = { workspace = true, features = ["test-support"] }

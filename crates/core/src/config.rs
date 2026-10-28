@@ -529,6 +529,45 @@ pub fn save_theme(path: &std::path::Path, theme: &str) -> Result<()> {
     save_key(path, "theme", &format!("\"{theme}\""))
 }
 
+/// What became of a theme a front end switched to.
+pub enum Kept {
+    Saved,
+    /// Saved, the name would stop the next start: the config would name a theme nothing has unlocked yet.
+    Secret,
+    /// `--no-config` asked for the file to stay out of the run.
+    Session,
+    /// The theme applied and only the remembering did not, which is a different thing to tell somebody.
+    Failed(String),
+}
+
+impl Kept {
+    /// What a front end says about the switch. `overridden` is whether a `[colors]` table repaints the
+    /// theme at the next start: the walk moved the base only, so the screen now and then differ.
+    pub fn said(&self, name: &str, overridden: bool) -> String {
+        let kept = if overridden { "  ·  [colors] repaints it again next start" } else { "" };
+        match self {
+            Kept::Saved => format!("theme {name}{kept}"),
+            Kept::Secret => format!("theme {name}  ·  secret, this session only{kept}"),
+            Kept::Session => format!("theme {name}  ·  this session{kept}"),
+            Kept::Failed(e) => format!("theme {name}  ·  not saved: {e}"),
+        }
+    }
+}
+
+/// Remembers the theme `^t` or a picker landed on, the same way from every front end.
+pub fn keep_theme(file: Option<&std::path::Path>, name: &str) -> Kept {
+    if crate::theme::SECRETS.iter().any(|(secret, _)| *secret == name) {
+        return Kept::Secret;
+    }
+    let Some(file) = file else {
+        return Kept::Session;
+    };
+    match save_theme(file, name) {
+        Ok(()) => Kept::Saved,
+        Err(e) => Kept::Failed(e.to_string()),
+    }
+}
+
 pub fn save_convert(path: &std::path::Path, on: bool) -> Result<()> {
     save_switch(path, "convert", on)
 }

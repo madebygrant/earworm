@@ -317,6 +317,11 @@ impl Themes {
         (name, *palette)
     }
 
+    /// Every name in walk order, for a picker that lists them.
+    pub fn list(&self) -> Vec<&str> {
+        self.0.iter().map(|(name, _)| name.as_str()).collect()
+    }
+
     /// Every name earworm knows, for the message that lists them.
     pub fn names(&self) -> String {
         self.0
