@@ -12,11 +12,15 @@ exception is `^t` writing the theme to the config, and the reason it is one is
 in docs/rules/themes-and-colour.md.
 
 - `main.rs` — terminal setup, event loop, key handling, shutdown
-- `app.rs` — `App` state, `Track`, `Status`, `Shelf` (one library row), `View`
-  (which screen has the keys), `Msg` (worker to UI), `Cmd` (UI to worker),
-  `Asker` (worker asks the UI a question and blocks on the reply), `Escape`
-  (what Esc on a prompt does), `picking` (the reply channel for the pick gate),
-  the `marked` set behind `targets()`, and the `filter` behind `rows()`
+- `protocol.rs` — what the worker and a front end exchange: `Msg` (worker to
+  UI), `Cmd` (UI to worker), `Track`, `Status`, `Shelf` (one library row),
+  `Prompt`, `Reply`, `Asker` (worker asks the UI a question and blocks on the
+  reply), `Escape` (what Esc on a prompt does), the row structs and
+  `Playback`. Non-UI modules import these from here, never from `app`, and
+  `app` keeps its imports private so the compiler holds that line
+- `app.rs` — `App` state, `View` (which screen has the keys), `picking` (the
+  reply channel for the pick gate), the `marked` set behind `targets()`, and
+  the `filter` behind `rows()`
 - `config.rs` — `Cli`, the TOML `FileConfig`, and `Config::build`, which merges
   them; `SWITCHES` and `Config::rows`, what the settings screen lists
 - `worker.rs` — `ask_start` (library, resync or the URL prompt, which loops

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
-use crate::app::ArtistRow;
+use crate::protocol::ArtistRow;
 use crate::lookup::{lead_artist, normalise};
 use crate::manifest::Kind;
 use crate::{tag, worker};

@@ -9,7 +9,8 @@ use ratatui::widgets::{Widget as _,
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{self, App, Confirm, Player, Prompt, Shelf, Status, View};
+use crate::app::{self, App, Confirm, View};
+use crate::protocol::{Player, Prompt, Shelf, Status, Track};
 use crate::config::composed;
 use crate::icons::Icons;
 use crate::manifest;
@@ -33,6 +34,20 @@ const KIND_WIDTH_CUSTOM: usize = 9;
 const NOW_PLAYING: usize = 28;
 /// The widest the twin column grows, so a long folder name cannot push the tail off.
 const TWIN_MAX: usize = 30;
+
+// Colour is confidence and the word is provenance, so `ok` and `manual` share one: both were
+// confirmed, and telling them apart is the label's job. Nothing unverified wears a settled colour.
+fn status_color(status: Status, p: Palette) -> Color {
+    match status {
+        Status::Ok | Status::Manual => p.cursor,
+        Status::Weak => p.warn,
+        Status::Kept | Status::NoMatch => p.unsure,
+        Status::Failed => p.error,
+        Status::Downloading | Status::Tagging | Status::Downloaded | Status::Converting => p.accent,
+        // Nothing to act on: not downloaded, deliberately left alone, or the user's own file.
+        Status::Pending | Status::Have | Status::Gone | Status::Skipped | Status::Local => p.muted,
+    }
+}
 
 /* Columns, not characters. A Korean or Japanese glyph takes two cells and a
    combining mark takes none, so a column padded to a character count is as
@@ -1727,7 +1742,7 @@ fn cover_pixels(font: ratatui_image::FontSize, area: Rect) -> (u32, u32) {
    `None` leaves the pane exactly as it was before any of this. */
 fn draw_detail(
     frame: &mut Frame,
-    track: &crate::app::Track,
+    track: &Track,
     art: Option<u16>,
     area: Rect,
     p: Palette,
@@ -1756,7 +1771,7 @@ fn draw_detail(
     lines.extend(detail_rows(
         "status",
         track.status.label(),
-        Style::new().fg(track.status.color(p)),
+        Style::new().fg(status_color(track.status, p)),
         width,
         p,
     ));
@@ -1798,7 +1813,7 @@ fn draw_detail(
 }
 
 // The dim words after a track's name: where it came from, why, and what it was before.
-fn tail_of(track: &app::Track) -> String {
+fn tail_of(track: &Track) -> String {
     let mut bits: Vec<String> = Vec::new();
     if !track.source.is_empty() {
         bits.push(track.source.clone());
@@ -1922,7 +1937,7 @@ fn draw_tracks(frame: &mut Frame, app: &mut App, area: Rect) {
             } else {
                 spans.push(Span::styled(
                     format!("{:<STATUS_WIDTH$}", track.status.label()),
-                    Style::new().fg(track.status.color(p)),
+                    Style::new().fg(status_color(track.status, p)),
                 ));
             }
 
@@ -2250,7 +2265,7 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
             break;
         }
         used += cols(&text);
-        spans.push(Span::styled(text, Style::new().fg(status.color(p))));
+        spans.push(Span::styled(text, Style::new().fg(status_color(status, p))));
     }
     if dropped && used < budget {
         spans.push(dim("…", p));
@@ -2542,7 +2557,7 @@ fn draw_help(frame: &mut Frame, app: &App) {
             for status in &statuses {
                 spans.push(Span::styled(
                     format!("{:<9}", status.label()),
-                    Style::new().fg(status.color(p)),
+                    Style::new().fg(status_color(*status, p)),
                 ));
             }
             /* Two columns of air whatever the row holds: `no match` is
@@ -2897,7 +2912,8 @@ fn take_cols(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::{TAGLINE, bar, popup_width, wrap};
-    use crate::app::{App, Msg, Shelf, Status, Track, View};
+    use crate::app::{App, View};
+    use crate::protocol::{Msg, Shelf, Status, Track};
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
@@ -3356,8 +3372,8 @@ mod tests {
             app.tracks = spread();
             app.done = Some(Ok(String::new()));
             app.intro_done = true;
-            app.apply(Msg::Player(crate::app::Playback {
-                player: crate::app::Player::Running,
+            app.apply(Msg::Player(crate::protocol::Playback {
+                player: crate::protocol::Player::Running,
                 folder: None,
                 track: title.map(str::to_string),
                 playing: true,
@@ -3403,14 +3419,14 @@ mod tests {
        which of the two things it was doing. */
     #[test]
     fn no_state_in_the_bar_is_told_by_colour_alone() {
-        let bar = |logs: Vec<&str>, player: crate::app::Player, playing: bool| {
+        let bar = |logs: Vec<&str>, player: crate::protocol::Player, playing: bool| {
             let (tx, _rx) = std::sync::mpsc::channel();
             let mut app = App::new(tx, "settings".into());
             app.tracks = vec![track_named(1, "Autobahn")];
             app.done = Some(Ok(String::new()));
             app.intro_done = true;
             app.logs = logs.into_iter().map(str::to_string).collect();
-            app.apply(Msg::Player(crate::app::Playback {
+            app.apply(Msg::Player(crate::protocol::Playback {
                 player,
                 playing,
                 ..Default::default()
@@ -3422,7 +3438,7 @@ mod tests {
                 .map(|x| buffer[(x, 11)].symbol().to_string())
                 .collect::<String>()
         };
-        use crate::app::Player;
+        use crate::protocol::Player;
 
         let warned = bar(vec!["WARNING: one video"], Player::Missing, false);
         let broke = bar(vec!["ERROR: it went wrong"], Player::Missing, false);
@@ -3618,11 +3634,11 @@ mod tests {
         let mut app = App::new(tx, "settings".into());
         let (reply, _answers) = std::sync::mpsc::channel();
         app.apply(Msg::Ask(
-            crate::app::Prompt::Input {
+            crate::protocol::Prompt::Input {
                 header: "YouTube playlist URL".into(),
                 note: "a playlist, a video or a file of links  ·  esc quits".into(),
                 value: String::new(),
-                escape: crate::app::Escape::Quit,
+                escape: crate::protocol::Escape::Quit,
             },
             reply,
         ));
@@ -4532,7 +4548,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(tx, "settings".into());
         app.intro_done = true;
-        let track = crate::app::Track::new(1, "a".into(), "Song".into(), "/music/B/01 - Song.opus".into());
+        let track = crate::protocol::Track::new(1, "a".into(), "Song".into(), "/music/B/01 - Song.opus".into());
         app.apply(Msg::Tracks(vec![track]));
         assert!(!screen_of(&mut app, 100, 12).contains('≈'));
         app.apply(Msg::Twin { index: 1, twin: Some("maybe in A".into()) });
@@ -4547,7 +4563,7 @@ mod tests {
         let mut app = App::new(tx, "settings".into());
         app.intro_done = true;
         let mk = |n: usize, name: &str| {
-            crate::app::Track::new(n, format!("id{n}"), name.into(), format!("/m/{n:02}.opus").into())
+            crate::protocol::Track::new(n, format!("id{n}"), name.into(), format!("/m/{n:02}.opus").into())
         };
         let mut with_tail = mk(2, "A much longer track name");
         with_tail.source = "deezer".into();
@@ -4609,7 +4625,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(tx, "settings".into());
         app.intro_done = true;
-        let row = |id: &str, here: bool| crate::app::PlaylistRow {
+        let row = |id: &str, here: bool| crate::protocol::PlaylistRow {
             id: id.into(),
             label: format!("Kraftwerk - Song {id}"),
             folder: "Focus".into(),
@@ -4639,7 +4655,7 @@ mod tests {
             let mut app = App::new(tx, "settings".into());
             app.intro_done = true;
             let name = "Radiohead - Creep (Official Music Video, Remastered)";
-            let mut track = crate::app::Track::new(1, "a".into(), name.into(), "/m/01.opus".into());
+            let mut track = crate::protocol::Track::new(1, "a".into(), name.into(), "/m/01.opus".into());
             track.source = "deezer".into();
             track.note = "score 0.91".into();
             app.apply(Msg::Tracks(vec![track]));
@@ -4689,8 +4705,8 @@ mod tests {
             let mut app = App::new(tx, "settings".into());
             app.apply(Msg::Library { shelves: shelves(), show: true });
             app.intro_done = true;
-            app.apply(Msg::Player(crate::app::Playback {
-                player: crate::app::Player::Running,
+            app.apply(Msg::Player(crate::protocol::Playback {
+                player: crate::protocol::Player::Running,
                 folder: folder.map(std::path::PathBuf::from),
                 track: None,
                 playing,
@@ -4732,13 +4748,13 @@ mod tests {
        has to stop offering them the moment it is not. */
     #[test]
     fn the_library_help_offers_the_cliamp_keys_only_while_it_runs() {
-        let help = |player: crate::app::Player| {
+        let help = |player: crate::protocol::Player| {
             let (tx, _rx) = std::sync::mpsc::channel();
             let mut app = App::new(tx, "settings".into());
             app.apply(Msg::Library { shelves: shelves(), show: true });
             app.intro_done = true;
             app.show_help = true;
-            app.apply(Msg::Player(crate::app::Playback {
+            app.apply(Msg::Player(crate::protocol::Playback {
                 player,
                 ..Default::default()
             }));
@@ -4755,11 +4771,11 @@ mod tests {
                 .join("\n")
         };
 
-        let up = help(crate::app::Player::Running);
+        let up = help(crate::protocol::Player::Running);
         assert!(up.contains("play/pause cliamp"), "{up}");
         assert!(up.contains("hand this playlist to cliamp"), "{up}");
 
-        let down = help(crate::app::Player::Stopped);
+        let down = help(crate::protocol::Player::Stopped);
         assert!(!down.contains("play/pause cliamp"), "{down}");
         assert!(!down.contains("hand this playlist to cliamp"), "{down}");
         // The rest of the library keys are unaffected.
@@ -4846,7 +4862,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(tx, "settings".into());
         app.apply(Msg::Ask(
-            crate::app::Prompt::Choice {
+            crate::protocol::Prompt::Choice {
                 header: "finished".into(),
                 note: "12 tracks".into(),
                 options: vec![
@@ -4855,7 +4871,7 @@ mod tests {
                     "sync another playlist".into(),
                     "quit".into(),
                 ],
-                escape: crate::app::Escape::Keep,
+                escape: crate::protocol::Escape::Keep,
             },
             std::sync::mpsc::channel().0,
         ));
@@ -4883,14 +4899,14 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(tx, "settings".into());
         app.apply(Msg::Ask(
-            crate::app::Prompt::Form {
+            crate::protocol::Prompt::Form {
                 header: "track 4".into(),
                 note: "Roygbiv - Boards Of Canada (Official Audio)".into(),
                 fields: vec![
                     ("artist".into(), "Roygbiv".into()),
                     ("title".into(), "Boards Of Canada".into()),
                 ],
-                escape: crate::app::Escape::Skip,
+                escape: crate::protocol::Escape::Skip,
             },
             std::sync::mpsc::channel().0,
         ));
@@ -5075,11 +5091,11 @@ mod tests {
             let (tx, _rx) = std::sync::mpsc::channel();
             let mut app = App::new(tx, "settings".into());
             app.apply(Msg::Ask(
-                crate::app::Prompt::Input {
+                crate::protocol::Prompt::Input {
                     note: String::new(),
                     header: "Title".into(),
                     value: "Autobahn".into(),
-                    escape: crate::app::Escape::Skip,
+                    escape: crate::protocol::Escape::Skip,
                 },
                 std::sync::mpsc::channel().0,
             ));
@@ -5473,12 +5489,12 @@ mod tests {
        there a moment ago unexplained. */
     #[test]
     fn the_play_key_and_its_indicator_follow_cliamp() {
-        let bar = |state: crate::app::Player| {
+        let bar = |state: crate::protocol::Player| {
             let (tx, _rx) = std::sync::mpsc::channel();
             let mut app = App::new(tx, "settings".into());
             app.tracks = spread();
             app.done = Some(Ok("finished".into()));
-            app.apply(Msg::Player(crate::app::Playback {
+            app.apply(Msg::Player(crate::protocol::Playback {
                 player: state,
                 ..Default::default()
             }));
@@ -5497,19 +5513,19 @@ mod tests {
             (screen, app.can_play())
         };
 
-        let (running, can) = bar(crate::app::Player::Running);
+        let (running, can) = bar(crate::protocol::Player::Running);
         assert!(can, "cliamp was up and p was still refused");
         assert!(running.contains("♪ cliamp"), "no indicator: {running}");
         assert!(!running.contains("cliamp off"), "{running}");
         assert!(running.contains("play it in cliamp"), "the key went unlisted");
 
-        let (stopped, can) = bar(crate::app::Player::Stopped);
+        let (stopped, can) = bar(crate::protocol::Player::Stopped);
         assert!(!can, "p was offered with nothing to hand it to");
         assert!(stopped.contains("♪ cliamp off"), "no reason given: {stopped}");
         assert!(!stopped.contains("play it in cliamp"), "the key is still listed");
 
         // Nobody needs telling about a player they have not installed.
-        let (missing, can) = bar(crate::app::Player::Missing);
+        let (missing, can) = bar(crate::protocol::Player::Missing);
         assert!(!can);
         assert!(!missing.contains("cliamp"), "{missing}");
     }
@@ -5960,11 +5976,11 @@ mod tests {
         let mut asked = fresh();
         let (reply, _back) = std::sync::mpsc::channel();
         asked.apply(Msg::Ask(
-            crate::app::Prompt::Input {
+            crate::protocol::Prompt::Input {
                 note: String::new(),
                 header: "YouTube playlist URL".into(),
                 value: String::new(),
-                escape: crate::app::Escape::Quit,
+                escape: crate::protocol::Escape::Quit,
             },
             reply,
         ));
@@ -6036,7 +6052,7 @@ mod tests {
     #[test]
     fn an_artist_row_shows_its_star_its_counts_and_the_cursor() {
         let mut app = artists_app();
-        let row = |name: &str, tracks, albums, starred| crate::app::ArtistRow { name: name.into(), tracks, albums, starred, folders: Vec::new() };
+        let row = |name: &str, tracks, albums, starred| crate::protocol::ArtistRow { name: name.into(), tracks, albums, starred, folders: Vec::new() };
         app.apply(Msg::Artists { rows: vec![row("Can", 12, 3, true), row("Neu!", 1, 1, false), row("Seohwa Lee", 1, 0, false)], focus: None });
         app.artist_move(true, 1);
         let screen = screen_of(&mut app, 80, 10);
@@ -6052,7 +6068,7 @@ mod tests {
     #[test]
     fn a_filtered_artist_list_shows_only_its_matches_and_the_band_counts_them() {
         let mut app = artists_app();
-        let rows = (0..30).map(|n| crate::app::ArtistRow { name: format!("Band {n:02}"), tracks: 1, albums: 1, starred: false, folders: Vec::new() });
+        let rows = (0..30).map(|n| crate::protocol::ArtistRow { name: format!("Band {n:02}"), tracks: 1, albums: 1, starred: false, folders: Vec::new() });
         app.apply(Msg::Artists { rows: rows.collect(), focus: None });
         app.artist_query(|q| q.push_str("band 2"));
         // The first match, not the last: `ListState` clamps, so a last-row answer passes either way.
@@ -6079,7 +6095,7 @@ mod tests {
         assert!(screen.contains("Rock") && !screen.contains("Jazz"), "{screen}");
     }
 
-    fn page_app(rows: Result<Vec<crate::app::AlbumRow>, String>) -> App {
+    fn page_app(rows: Result<Vec<crate::protocol::AlbumRow>, String>) -> App {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(tx, String::new());
         app.intro_done = true;
@@ -6109,8 +6125,8 @@ mod tests {
         assert!(screen_of(&mut app, 100, 12).contains("enter get"));
     }
 
-    fn release(title: &str, year: u16, have: usize, of: Option<usize>) -> crate::app::AlbumRow {
-        crate::app::AlbumRow { id: 1, title: title.into(), year: Some(year), kind: "album".into(), have, of, new: false }
+    fn release(title: &str, year: u16, have: usize, of: Option<usize>) -> crate::protocol::AlbumRow {
+        crate::protocol::AlbumRow { id: 1, title: title.into(), year: Some(year), kind: "album".into(), have, of, new: false }
     }
 
     #[test]
@@ -6171,7 +6187,7 @@ mod tests {
     fn top_tracks_read_here_or_missing_and_the_band_names_the_list() {
         let mut app = page_app(Ok(vec![]));
         app.page.section = crate::app::Section::Top;
-        let row = |title: &str, have| crate::app::TopRow { title: title.into(), album: "Parachutes".into(), have };
+        let row = |title: &str, have| crate::protocol::TopRow { title: title.into(), album: "Parachutes".into(), have };
         app.apply(Msg::Top { name: "Can".into(), rows: Ok(vec![row("Yellow", true), row("Clocks", false)]) });
         let screen = screen_of(&mut app, 90, 10);
         let line = |name: &str| screen.lines().find(|l| l.contains(name)).unwrap_or_default().to_string();
@@ -6185,7 +6201,7 @@ mod tests {
         let mut app = page_app(Ok(vec![]));
         app.page.section = crate::app::Section::Related;
         assert!(screen_of(&mut app, 90, 10).contains("asking Deezer who is like Can"));
-        let row = |name: &str, tracks| crate::app::RelatedRow { name: name.into(), fans: 900, tracks };
+        let row = |name: &str, tracks| crate::protocol::RelatedRow { name: name.into(), fans: 900, tracks };
         app.apply(Msg::Related { name: "Can".into(), rows: Ok(vec![row("Neu!", 3), row("Faust", 0)]) });
         let screen = screen_of(&mut app, 90, 10);
         let line = |name: &str| screen.lines().find(|l| l.contains(name)).unwrap_or_default().to_string();
@@ -6202,7 +6218,7 @@ mod tests {
         app.apply(Msg::NewReleases(vec![("Can".into(), 75, "Live 1975".into()), ("Can".into(), 76, "Live 1976".into())]));
         assert!(screen_of(&mut app, 90, 10).lines().next().unwrap().contains("2 new releases"));
         app.view = View::Artists;
-        let row = |name: &str| crate::app::ArtistRow { name: name.into(), tracks: 3, albums: 1, starred: true, folders: Vec::new() };
+        let row = |name: &str| crate::protocol::ArtistRow { name: name.into(), tracks: 3, albums: 1, starred: true, folders: Vec::new() };
         app.apply(Msg::Artists { rows: vec![row("Can"), row("Neu!")], focus: None });
         let screen = screen_of(&mut app, 90, 10);
         let line = |name: &str| screen.lines().find(|l| l.contains(name)).unwrap_or_default().to_string();
@@ -6213,7 +6229,7 @@ mod tests {
     #[test]
     fn an_artist_query_that_matches_nothing_is_named_in_the_pane() {
         let mut app = artists_app();
-        let row = crate::app::ArtistRow { name: "Can".into(), tracks: 1, albums: 1, starred: false, folders: Vec::new() };
+        let row = crate::protocol::ArtistRow { name: "Can".into(), tracks: 1, albums: 1, starred: false, folders: Vec::new() };
         app.apply(Msg::Artists { rows: vec![row], focus: None });
         app.filter = "rock".into();
         app.artist_query(|q| q.push_str("zzz"));

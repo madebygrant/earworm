@@ -7,7 +7,7 @@ use std::sync::mpsc::Sender;
 
 use anyhow::{Result, bail};
 
-use crate::app::{Msg, Status, Track};
+use crate::protocol::{Msg, Status, Track};
 use crate::config::Config;
 use crate::manifest;
 

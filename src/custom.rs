@@ -3,7 +3,7 @@ use std::sync::mpsc::Sender;
 
 use anyhow::{Context, Result, bail};
 
-use crate::app::{Asker, Msg, PlaylistRow};
+use crate::protocol::{Asker, Msg, PlaylistRow};
 use crate::config::composed;
 use crate::manifest;
 use crate::playlists::{self, Entry, Playlist};
@@ -113,7 +113,7 @@ pub fn open(dir: &Path, tx: &Sender<Msg>, name: &str) -> Result<()> {
 }
 
 pub fn new(dir: &Path, tx: &Sender<Msg>, asker: &Asker) -> Result<()> {
-    let Some(name) = asker.input_noted("Playlist name", "a list built from tracks in your other folders", "", crate::app::Escape::Keep) else {
+    let Some(name) = asker.input_noted("Playlist name", "a list built from tracks in your other folders", "", crate::protocol::Escape::Keep) else {
         return Ok(());
     };
     let name = name.trim().to_string();
@@ -296,7 +296,7 @@ pub fn remove_entry(dir: &Path, tx: &Sender<Msg>, name: &str, id: &str) -> Resul
 
 pub fn rename(dir: &Path, tx: &Sender<Msg>, asker: &Asker, name: &str) -> Result<()> {
     load(dir, name)?;
-    let Some(new) = asker.input_noted("Playlist name", "renames the list  ·  its tracks stay where they are", name, crate::app::Escape::Keep) else {
+    let Some(new) = asker.input_noted("Playlist name", "renames the list  ·  its tracks stay where they are", name, crate::protocol::Escape::Keep) else {
         return Ok(());
     };
     let new = new.trim().to_string();
@@ -344,7 +344,7 @@ pub fn play(dir: &Path, name: &str) -> Result<(String, Vec<std::path::PathBuf>)>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::Reply;
+    use crate::protocol::Reply;
     use std::path::PathBuf;
     use std::sync::mpsc::{Receiver, channel};
     use std::time::Duration;

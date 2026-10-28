@@ -34,7 +34,7 @@ default. Waves 2, 3 and 6 to 10 carry what that plan needs.
   `PATH` without `/opt/homebrew/bin`, so every tool would read as missing.
 - `serde` is already a dependency.
 
-## 1. Move the protocol out of `app.rs`
+## 1. Move the protocol out of `app.rs` [done 2026-10-28]
 
 Why first: every later wave depends on the core not importing the TUI, and
 it is a pure move with the suite as its check.
@@ -57,6 +57,17 @@ Exit: `cargo test` passes and `grep -n "crate::app" src/{worker,tag,lookup,custo
 - `crates/tui` (bin `earworm`): main, app, ui, icons, the intro.
 - Tests move with their modules. Fixtures shared through a `test-support`
   feature on core rather than copied.
+- Three `worker.rs` tests run the worker, feed its messages to `App` and draw
+  the screen (one near `can_purge`, two checking the `≈` twin marker). Core
+  cannot reach `App`, so move them to the TUI crate on core's
+  `test-support`, or assert on the `Msg` values instead. Left from wave 1.
+- `Cmd::Icons` carries `icons::Icons`, and `config.rs` uses it too, but
+  `icons.rs` is listed for the TUI. Move the `Icons` enum (the choice, not
+  the glyph tables) into core, or `Cmd` will not compile there.
+- `Palette` holds `ratatui::style::Color`, so theme data in core still pulls
+  in ratatui. Either core keeps ratatui as a dependency for the colour type
+  alone, or palettes become plain RGB triples with the TUI converting. Decide
+  before the move; wave 6's CSS generation wants the RGB form anyway.
 - The binary name, flags and `cargo install` stay the same.
 - Add the `graphite` palette (UX plan, colour table) beside the four in
   `theme.rs`. If the TUI ships it too, it goes in `BUILT_INS` and

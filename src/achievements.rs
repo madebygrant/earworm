@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
 
-use crate::app::{Playback, Shelf, Status, Track};
+use crate::protocol::{Playback, Shelf, Status, Track};
 use crate::manifest::Kind;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -191,7 +191,7 @@ pub fn writer(path: PathBuf) -> (Sender<Vec<&'static str>>, JoinHandle<()>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::Player;
+    use crate::protocol::Player;
 
     fn dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("earworm-ach-{tag}-{}", std::process::id()));

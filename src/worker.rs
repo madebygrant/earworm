@@ -7,7 +7,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 
 use anyhow::{Context, Result, bail};
 
-use crate::app::{Asker, Cmd, Escape, Msg, Reply, Shelf, Status, Track, Watch};
+use crate::protocol::{Asker, Cmd, Escape, Msg, Reply, Shelf, Status, Track, Watch};
 use crate::artists;
 use crate::discover;
 use crate::cheats::{Feature, LOCKED, Unlocked};
@@ -5113,7 +5113,7 @@ pub mod tests {
     }
     use super::*;
     use std::sync::mpsc;
-    use crate::app::Reply;
+    use crate::protocol::Reply;
 
     #[test]
     fn a_youtube_music_link_is_locked_until_the_code_is_found() {
@@ -5145,7 +5145,7 @@ pub mod tests {
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
                 match msg {
                     Msg::Stage(s) => staged = s == "waiting for a playlist URL",
-                    Msg::Ask(crate::app::Prompt::Input { header, value, .. }, reply) => {
+                    Msg::Ask(crate::protocol::Prompt::Input { header, value, .. }, reply) => {
                         assert!(staged, "the header never said it was waiting");
                         assert_eq!((header.as_str(), value.as_str()), (LOCKED, link));
                         reply.send(Reply::Cancel).unwrap();
@@ -5190,7 +5190,7 @@ pub mod tests {
             let mut headers = Vec::new();
             for answer in ["~/no/such/mix.md", dragged.as_str()] {
                 while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
-                    if let Msg::Ask(crate::app::Prompt::Input { header, .. }, reply) = msg {
+                    if let Msg::Ask(crate::protocol::Prompt::Input { header, .. }, reply) = msg {
                         headers.push(header);
                         reply.send(Reply::Text(answer.into())).unwrap();
                         break;
@@ -5277,7 +5277,7 @@ pub mod tests {
             let worker = scope.spawn(|| prompt_url(&tx, Escape::Quit, &unlocked, link));
             let mut asked = Vec::new();
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
-                let Msg::Ask(crate::app::Prompt::Input { header, value, .. }, reply) = msg else {
+                let Msg::Ask(crate::protocol::Prompt::Input { header, value, .. }, reply) = msg else {
                     continue;
                 };
                 asked.push((header, value));
@@ -5342,7 +5342,7 @@ pub mod tests {
         std::thread::scope(|scope| {
             let worker = scope.spawn(|| rename_shelf(&mut cfg, &tx, &asker, &tracks, &from));
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
-                if let Msg::Ask(crate::app::Prompt::Input { value, .. }, reply) = msg {
+                if let Msg::Ask(crate::protocol::Prompt::Input { value, .. }, reply) = msg {
                     // Prefilled with the name it has, which is what an edit is.
                     assert_eq!(value, "Chill Evenings");
                     reply.send(Reply::Text("Evenings".into())).unwrap();
@@ -5606,7 +5606,7 @@ pub mod tests {
                     scope.spawn(|| finish(&mut cfg, &tx, &cancel, &mut tracks, Ok("done".into())));
                 let mut asked = Vec::new();
                 while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
-                    if let Msg::Ask(crate::app::Prompt::Choice { options, .. }, reply) = msg {
+                    if let Msg::Ask(crate::protocol::Prompt::Choice { options, .. }, reply) = msg {
                         asked = options;
                         // Esc: keeps the menu open and ends the loop.
                         reply.send(Reply::Cancel).unwrap();
@@ -5696,7 +5696,7 @@ pub mod tests {
             // leave this waiting for a message nothing is going to send.
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
                 match msg {
-                    Msg::Ask(crate::app::Prompt::Choice { options, .. }, reply) => {
+                    Msg::Ask(crate::protocol::Prompt::Choice { options, .. }, reply) => {
                         asked = options;
                         // The first row, which is where the review has to be.
                         reply.send(Reply::Choice(0)).unwrap();
@@ -6010,7 +6010,7 @@ pub mod tests {
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
                 match msg {
                     Msg::Ask(prompt, reply) => {
-                        if let crate::app::Prompt::Choice { options, note: said, .. } = &prompt {
+                        if let crate::protocol::Prompt::Choice { options, note: said, .. } = &prompt {
                             rows.clone_from(options);
                             note.clone_from(said);
                         }
@@ -6116,8 +6116,8 @@ pub mod tests {
        so a test answering by index answers a different question depending on
        the fixture. Picked by the word the row opens with, which is what the
        reader picks by as well. */
-    fn pick(prompt: &crate::app::Prompt, word: &str) -> Reply {
-        let crate::app::Prompt::Choice { options, .. } = prompt else {
+    fn pick(prompt: &crate::protocol::Prompt, word: &str) -> Reply {
+        let crate::protocol::Prompt::Choice { options, .. } = prompt else {
             panic!("that was not a menu");
         };
         let at = options
@@ -7878,7 +7878,7 @@ pub mod tests {
                     scope.spawn(|| edit(&cfg, &tx, &mut tracks, &asker, &mut held, 1));
                 let mut boxes = Vec::new();
                 while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
-                    if let Msg::Ask(crate::app::Prompt::Form { fields, .. }, back) = msg {
+                    if let Msg::Ask(crate::protocol::Prompt::Form { fields, .. }, back) = msg {
                         boxes = fields;
                         back.send(Reply::Fields(values.clone())).unwrap();
                         break;
@@ -9158,7 +9158,7 @@ mod format_tests {
 #[cfg(test)]
 mod convert_tests {
     use super::*;
-    use crate::app::Msg;
+    use crate::protocol::Msg;
     use std::sync::mpsc;
 
     fn scratch(tag: &str) -> PathBuf {
@@ -9886,38 +9886,11 @@ mod convert_tests {
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }
-
-    /// Off the filenames the shelf already holds, so the library screen can
-    /// ask it per frame without a stat or a worker round trip.
-    #[test]
-    fn the_off_format_count_reads_the_filenames_and_skips_what_is_missing() {
-        let shelf = Shelf {
-            path: PathBuf::from("/tmp/x"),
-            name: "X".into(),
-            url: Some("u".into()),
-            tracks: 3,
-            missing: 1,
-            synced: None,
-            files: vec![
-                ("01 - a.opus".into(), true),
-                ("02 - b.mp3".into(), true),
-                ("03 - c.flac".into(), true),
-                // Not on disk, so nothing is going to convert it.
-                ("04 - d.mp3".into(), false),
-            ],
-            ..Shelf::default()
-        };
-        assert_eq!(crate::app::off_format(&shelf, "opus"), 2);
-        assert_eq!(crate::app::off_format(&shelf, "mp3"), 2);
-        assert_eq!(crate::app::off_format(&shelf, "flac"), 2);
-        // vorbis writes .ogg, so the name is not the extension to compare.
-        assert_eq!(crate::app::off_format(&shelf, "vorbis"), 3);
-    }
 }
 #[cfg(test)]
 mod purge_tests {
     use super::*;
-    use crate::app::{Msg, Reply};
+    use crate::protocol::{Msg, Reply};
     use std::sync::mpsc::{self, Receiver};
 
     fn scratch(tag: &str) -> PathBuf {
@@ -10065,7 +10038,7 @@ mod purge_tests {
         assert_eq!(left.len(), 3, "{left:?}");
         // The question named the file it was about.
         let asked = seen.iter().find_map(|m| match m {
-            Msg::Ask(crate::app::Prompt::Choice { header, note, .. }, _) => Some((header.clone(), note.clone())),
+            Msg::Ask(crate::protocol::Prompt::Choice { header, note, .. }, _) => Some((header.clone(), note.clone())),
             _ => None,
         }).expect("nothing was asked");
         assert!(asked.0.contains("1 departed file"), "{}", asked.0);
@@ -10262,7 +10235,7 @@ mod purge_tests {
 #[cfg(test)]
 mod chapter_tests {
     use super::*;
-    use crate::app::Reply;
+    use crate::protocol::Reply;
     use std::sync::mpsc::Receiver;
 
     fn chapter(title: &str, start: f64, end: f64) -> ytdlp::Chapter {

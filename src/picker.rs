@@ -5,7 +5,7 @@ use nucleo_matcher::pattern::{AtomKind, CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Matcher, Utf32Str};
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::app::Shelf;
+use crate::protocol::Shelf;
 use crate::config::composed;
 use crate::manifest::Kind;
 

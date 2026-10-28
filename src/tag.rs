@@ -11,7 +11,7 @@ use lofty::tag::{Accessor, ItemKey, Tag, TagExt, TagType};
 
 use std::time::Duration;
 
-use crate::app::{Asker, Status};
+use crate::protocol::{Asker, Status};
 use crate::config::Config;
 use crate::lookup::{self, Match};
 
@@ -941,7 +941,7 @@ fn manual(
             ("artist".into(), artist.to_string()),
             ("title".into(), title.to_string()),
         ],
-        crate::app::Escape::Skip,
+        crate::protocol::Escape::Skip,
     )?;
     let [new_artist, new_title] = answers.as_slice() else {
         return None;

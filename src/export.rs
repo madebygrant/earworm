@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
 
-use crate::app::{Asker, Msg};
+use crate::protocol::{Asker, Msg};
 use crate::config::{self, composed};
 use crate::lookup;
 use crate::playlists::{self, Playlist};
@@ -578,7 +578,7 @@ fn destination(asker: &Asker, dir: &Path) -> Result<Option<PathBuf>> {
     } else {
         format!("a folder on a stick, card or synced drive  ·  mounted: {}", found.join("  "))
     };
-    let Some(answer) = asker.input_noted("Export to", &note, "", crate::app::Escape::Keep) else {
+    let Some(answer) = asker.input_noted("Export to", &note, "", crate::protocol::Escape::Keep) else {
         return Ok(None);
     };
     let answer = answer.trim();

@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 
 use serde_json::Value;
 
-use crate::app::{Playback, Player};
+use crate::protocol::{Playback, Player};
 use crate::lookup;
 
 const BIN: &str = "cliamp";

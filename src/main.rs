@@ -15,6 +15,7 @@ mod player;
 mod playlists;
 mod picker;
 mod portable;
+mod protocol;
 mod tag;
 mod theme;
 mod ui;
@@ -34,7 +35,8 @@ use clap::{CommandFactory, FromArgMatches};
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::{execute, terminal::SetTitle};
 
-use app::{App, Cmd, Prompt, Reply, View};
+use app::{App, View};
+use protocol::{Cmd, Prompt, Reply};
 use config::{Cli, Config};
 
 fn main() -> Result<()> {
@@ -302,7 +304,7 @@ fn list(cfg: &Config) {
 
 /// One `--list` row. Kept apart from the printing so it is testable as the
 /// text it is, the way `deps::report` is.
-fn list_line(shelf: &app::Shelf, format: &str, widest: usize) -> String {
+fn list_line(shelf: &protocol::Shelf, format: &str, widest: usize) -> String {
     let synced = match (&shelf.url, shelf.synced) {
         (Some(_), Some(at)) => manifest::ago(at),
         (Some(_), None) => "never synced".to_string(),
@@ -367,7 +369,7 @@ fn theme_notice(warnings: &[String]) -> Option<String> {
 fn run(
     terminal: &mut ratatui::DefaultTerminal,
     app: &mut App,
-    rx: mpsc::Receiver<app::Msg>,
+    rx: mpsc::Receiver<protocol::Msg>,
     update_rx: Option<mpsc::Receiver<String>>,
     theme_warnings: &[String],
 ) -> Result<()> {
@@ -1342,7 +1344,7 @@ mod tests {
        is the difference between a row and a bug report. */
     #[test]
     fn the_listing_says_which_folders_have_no_url() {
-        let synced = crate::app::Shelf {
+        let synced = crate::protocol::Shelf {
             name: "Focus".into(),
             url: Some("https://youtube.com/playlist?list=PL1".into()),
             tracks: 3,
@@ -1355,13 +1357,13 @@ mod tests {
             ),
             ..Default::default()
         };
-        let waiting = crate::app::Shelf {
+        let waiting = crate::protocol::Shelf {
             name: "New".into(),
             url: Some("https://youtube.com/playlist?list=PL2".into()),
             tracks: 0,
             ..Default::default()
         };
-        let copied = crate::app::Shelf {
+        let copied = crate::protocol::Shelf {
             name: "Copied".into(),
             tracks: 7,
             ..Default::default()
@@ -1397,10 +1399,10 @@ mod tests {
         app.playlist = "Focus".into();
         app.tracks = (1..=3)
             .map(|n| {
-                crate::app::Track::new(n, "id".into(), "name".into(), std::path::PathBuf::new())
+                crate::protocol::Track::new(n, "id".into(), "name".into(), std::path::PathBuf::new())
             })
             .collect();
-        app.tracks[0].status = crate::app::Status::Ok;
+        app.tracks[0].status = crate::protocol::Status::Ok;
         assert_eq!(window_title(&app), "earworm · Focus · 1/3");
 
         app.done = Some(Ok("12 tracks".into()));
@@ -1537,7 +1539,7 @@ mod tests {
         let mut app = App::new(tx, String::new());
         app.intro_done = true;
         app.tracks = (1..=3)
-            .map(|n| app::Track::new(n, format!("id{n}"), format!("t{n}"), std::path::PathBuf::new()))
+            .map(|n| crate::protocol::Track::new(n, format!("id{n}"), format!("t{n}"), std::path::PathBuf::new()))
             .collect();
         app.reward = Some((
             Instant::now(),
@@ -1587,12 +1589,12 @@ mod tests {
         let mut app = App::new(tx, String::new());
         app.intro_done = true;
         let (reply, answered) = std::sync::mpsc::channel();
-        app.apply(app::Msg::Ask(
+        app.apply(crate::protocol::Msg::Ask(
             Prompt::Input {
                 header: cheats::LOCKED.into(),
                 note: String::new(),
                 value: "music.youtube.com/playlist?list=PL1".into(),
-                escape: app::Escape::Quit,
+                escape: crate::protocol::Escape::Quit,
             },
             reply,
         ));
@@ -1713,8 +1715,8 @@ mod tests {
         let (tx, cmds) = std::sync::mpsc::channel();
         let mut app = App::new(tx, String::new());
         app.view = View::Library;
-        app.apply(app::Msg::Library {
-            shelves: vec![crate::app::Shelf {
+        app.apply(crate::protocol::Msg::Library {
+            shelves: vec![crate::protocol::Shelf {
                 path: std::path::PathBuf::from("/music/Focus"),
                 name: "Focus".into(),
                 url: Some("u".into()),
@@ -1743,8 +1745,8 @@ mod tests {
         let (tx, cmds) = std::sync::mpsc::channel();
         let mut app = App::new(tx, String::new());
         app.intro_done = true;
-        app.apply(app::Msg::Library {
-            shelves: vec![crate::app::Shelf {
+        app.apply(crate::protocol::Msg::Library {
+            shelves: vec![crate::protocol::Shelf {
                 path: std::path::PathBuf::from("/music/.playlists/Mix.playlist"),
                 name: "Mix".into(),
                 kind: Some(crate::manifest::Kind::Custom),
@@ -1761,7 +1763,7 @@ mod tests {
     fn a_custom_row_is_routed_by_name_and_never_sent_as_a_folder() {
         let (mut app, cmds) = custom_library();
         for (key, want) in [('e', "rename"), ('D', "delete"), ('p', "play")] {
-            app.playback.player = crate::app::Player::Running;
+            app.playback.player = crate::protocol::Player::Running;
             handle_key(&mut app, KeyCode::Char(key), KeyModifiers::NONE);
             let sent = cmds.try_recv().unwrap_or_else(|_| panic!("{key} sent nothing"));
             let name = match (&sent, want) {
@@ -1794,14 +1796,14 @@ mod tests {
 
     fn open_list() -> (App, std::sync::mpsc::Receiver<Cmd>) {
         let (mut app, cmds) = custom_library();
-        let row = |id: &str, here: bool| crate::app::PlaylistRow {
+        let row = |id: &str, here: bool| crate::protocol::PlaylistRow {
             id: id.into(),
             label: format!("Song {id}"),
             folder: "Focus".into(),
             file: format!("{id}.opus"),
             path: here.then(|| std::path::PathBuf::from(format!("/music/Focus/{id}.opus"))),
         };
-        app.apply(app::Msg::Custom { name: "Mix".into(), rows: vec![row("a", true), row("b", false), row("c", true)], show: true, focus: None });
+        app.apply(crate::protocol::Msg::Custom { name: "Mix".into(), rows: vec![row("a", true), row("b", false), row("c", true)], show: true, focus: None });
         (app, cmds)
     }
 
@@ -1832,7 +1834,7 @@ mod tests {
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(app.view, View::Playlist);
         assert!(cmds.try_recv().is_err());
-        let folder = crate::app::Shelf {
+        let folder = crate::protocol::Shelf {
             path: std::path::PathBuf::from("/music/Focus"),
             name: "Focus".into(),
             files: vec![("01 - Creep.opus".into(), true)],
@@ -1840,7 +1842,7 @@ mod tests {
         };
         let mut shelves = app.library.clone();
         shelves.push(folder);
-        app.apply(app::Msg::Library { shelves, show: false });
+        app.apply(crate::protocol::Msg::Library { shelves, show: false });
         handle_key(&mut app, KeyCode::Char('P'), KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -1850,7 +1852,7 @@ mod tests {
 
     fn open_list_with_folder() -> (App, std::sync::mpsc::Receiver<Cmd>) {
         let (mut app, cmds) = open_list();
-        let folder = crate::app::Shelf {
+        let folder = crate::protocol::Shelf {
             path: std::path::PathBuf::from("/music/Focus"),
             name: "Focus".into(),
             files: ["a.opus", "c.opus", "d.opus"].iter().map(|f| (f.to_string(), true)).collect(),
@@ -1858,7 +1860,7 @@ mod tests {
         };
         let mut shelves = app.library.clone();
         shelves.push(folder);
-        app.apply(app::Msg::Library { shelves, show: false });
+        app.apply(crate::protocol::Msg::Library { shelves, show: false });
         (app, cmds)
     }
 
@@ -1906,15 +1908,15 @@ mod tests {
         let (tx, cmds) = std::sync::mpsc::channel();
         let mut app = App::new(tx, String::new());
         app.intro_done = true;
-        let shelf = |name: &str, files: &[&str]| crate::app::Shelf {
+        let shelf = |name: &str, files: &[&str]| crate::protocol::Shelf {
             path: std::path::PathBuf::from("/music").join(name),
             name: name.into(),
             files: files.iter().map(|f| (f.to_string(), true)).collect(),
             ..Default::default()
         };
         let library = vec![shelf("A", &["01 - Alpha.opus", "02 - Beta.opus"]), shelf("B", &["01 - Gamma.opus"])];
-        app.apply(app::Msg::Library { shelves: library, show: true });
-        app.apply(app::Msg::PickTracks("Mix".into()));
+        app.apply(crate::protocol::Msg::Library { shelves: library, show: true });
+        app.apply(crate::protocol::Msg::PickTracks("Mix".into()));
         (app, cmds)
     }
 
@@ -2031,13 +2033,13 @@ mod tests {
         let (tx, cmds) = std::sync::mpsc::channel();
         let mut app = App::new(tx, String::new());
         app.intro_done = true;
-        let shelf = crate::app::Shelf {
+        let shelf = crate::protocol::Shelf {
             path: std::path::PathBuf::from("/music/Focus"),
             name: "Focus".into(),
             files: vec![("01 - Creep.opus".into(), true), ("02 - Creek.opus".into(), true), ("03 - Creel.opus".into(), false)],
             ..Default::default()
         };
-        app.apply(app::Msg::Library { shelves: vec![shelf], show: true });
+        app.apply(crate::protocol::Msg::Library { shelves: vec![shelf], show: true });
         app.filter = "cree".into();
         app.find_tracks();
         (app, cmds)
@@ -2059,7 +2061,7 @@ mod tests {
         ));
         // The marks go when the add has been made, not when the key is pressed.
         assert_eq!(app.found_marks.len(), 2);
-        app.apply(app::Msg::FoundUnmark);
+        app.apply(crate::protocol::Msg::FoundUnmark);
         assert_eq!(app.found_marks.len(), 0);
     }
 
@@ -2094,13 +2096,13 @@ mod tests {
         let (tx, _cmds) = std::sync::mpsc::channel();
         let mut app = App::new(tx, String::new());
         app.intro_done = true;
-        let shelf = crate::app::Shelf {
+        let shelf = crate::protocol::Shelf {
             path: std::path::PathBuf::from("/music/Focus"),
             name: "Focus".into(),
             files: vec![("01 - Creep.opus".into(), true), ("02 - Creek.opus".into(), true)],
             ..Default::default()
         };
-        app.apply(app::Msg::Library { shelves: vec![shelf], show: true });
+        app.apply(crate::protocol::Msg::Library { shelves: vec![shelf], show: true });
         app.filter = "cree".into();
         app.find_tracks();
         app.typing_filter = true;
@@ -2127,13 +2129,13 @@ mod tests {
         let (tx, cmds) = std::sync::mpsc::channel();
         let mut app = App::new(tx, String::new());
         app.intro_done = true;
-        let focus = crate::app::Shelf {
+        let focus = crate::protocol::Shelf {
             path: std::path::PathBuf::from("/music/Focus"),
             name: "Focus".into(),
             files: vec![("01 - Creep.opus".into(), true)],
             ..Default::default()
         };
-        app.apply(app::Msg::Library { shelves: vec![focus], show: true });
+        app.apply(crate::protocol::Msg::Library { shelves: vec![focus], show: true });
         app.filter = "creep".into();
         app.find_tracks();
         handle_key(&mut app, KeyCode::Char('P'), KeyModifiers::NONE);
@@ -2182,8 +2184,8 @@ mod tests {
         let (tx, cmds) = std::sync::mpsc::channel();
         let mut app = App::new(tx, String::new());
         app.view = View::Library;
-        app.apply(app::Msg::Library {
-            shelves: vec![crate::app::Shelf {
+        app.apply(crate::protocol::Msg::Library {
+            shelves: vec![crate::protocol::Shelf {
                 path: std::path::PathBuf::from("/music/Focus"),
                 name: "Focus".into(),
                 url: Some("u".into()),
@@ -2234,7 +2236,7 @@ mod tests {
     fn enter_at_the_pick_with_nothing_marked_stays_and_says_so() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(tx, String::new());
-        app.tracks = vec![crate::app::Track::new(
+        app.tracks = vec![crate::protocol::Track::new(
             1,
             "id".into(),
             "name".into(),
@@ -2260,7 +2262,7 @@ mod tests {
     fn esc_on_the_track_list_clears_marks_before_leaving() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(tx, String::new());
-        app.tracks = vec![crate::app::Track::new(
+        app.tracks = vec![crate::protocol::Track::new(
             1,
             "id".into(),
             "name".into(),
@@ -2281,7 +2283,7 @@ mod tests {
         let sent = |undoable: Option<&str>| {
             let (tx, cmds) = std::sync::mpsc::channel();
             let mut app = App::new(tx, String::new());
-            app.tracks = vec![crate::app::Track::new(
+            app.tracks = vec![crate::protocol::Track::new(
                 1,
                 "id".into(),
                 "name".into(),
@@ -2305,7 +2307,7 @@ mod tests {
         let mut app = App::new(tx, String::new());
         app.intro_done = true;
         app.tracks = (1..=30)
-            .map(|n| crate::app::Track::new(n, "id".into(), "n".into(), std::path::PathBuf::new()))
+            .map(|n| crate::protocol::Track::new(n, "id".into(), "n".into(), std::path::PathBuf::new()))
             .collect();
         app.done = Some(Ok(String::new()));
         app.undoable = Some("the edit of track 1".into());
@@ -2321,19 +2323,19 @@ mod tests {
         assert_eq!(cmds.try_iter().count(), 1, "the guard took the undo as well");
     }
 
-    fn browsing(shelves: Vec<crate::app::Shelf>) -> (App, mpsc::Receiver<Cmd>) {
+    fn browsing(shelves: Vec<crate::protocol::Shelf>) -> (App, mpsc::Receiver<Cmd>) {
         let (tx, cmds) = mpsc::channel();
         let mut app = App::new(tx, String::new());
         app.intro_done = true;
-        app.apply(app::Msg::Library {
+        app.apply(crate::protocol::Msg::Library {
             shelves,
             show: true,
         });
         (app, cmds)
     }
 
-    fn shelf(name: &str, files: &[&str]) -> crate::app::Shelf {
-        crate::app::Shelf {
+    fn shelf(name: &str, files: &[&str]) -> crate::protocol::Shelf {
+        crate::protocol::Shelf {
             path: std::path::PathBuf::from("/music").join(name),
             name: name.into(),
             url: Some("u".into()),
@@ -2500,7 +2502,7 @@ mod tests {
                     header: "finished".into(),
                     note: String::new(),
                     options: (0..options).map(|n| format!("option {n}")).collect(),
-                    escape: crate::app::Escape::Keep,
+                    escape: crate::protocol::Escape::Keep,
                 },
                 reply,
             ));
@@ -2524,7 +2526,7 @@ mod tests {
                 note: String::new(),
                 header: "Title".into(),
                 value: String::new(),
-                escape: crate::app::Escape::Skip,
+                escape: crate::protocol::Escape::Skip,
             },
             mpsc::channel().0,
         ));
@@ -2540,7 +2542,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(tx, String::new());
         app.intro_done = true;
-        app.tracks = vec![crate::app::Track::new(
+        app.tracks = vec![crate::protocol::Track::new(
             1,
             "id".into(),
             "name".into(),
@@ -2553,17 +2555,17 @@ mod tests {
         assert_eq!(app.confirm, None);
     }
 
-    fn artist(name: &str, tracks: usize, starred: bool) -> crate::app::ArtistRow {
-        crate::app::ArtistRow { name: name.into(), tracks, albums: 1, starred, folders: Vec::new() }
+    fn artist(name: &str, tracks: usize, starred: bool) -> crate::protocol::ArtistRow {
+        crate::protocol::ArtistRow { name: name.into(), tracks, albums: 1, starred, folders: Vec::new() }
     }
 
     // On the artists screen with these rows, the worker's `Cmd::Artists` taken and the keys live again.
-    fn on_artists(shelves: Vec<crate::app::Shelf>, rows: Vec<crate::app::ArtistRow>) -> (App, mpsc::Receiver<Cmd>) {
+    fn on_artists(shelves: Vec<crate::protocol::Shelf>, rows: Vec<crate::protocol::ArtistRow>) -> (App, mpsc::Receiver<Cmd>) {
         let (mut app, cmds) = browsing(shelves);
         handle_key(&mut app, KeyCode::Char('b'), KeyModifiers::NONE);
         assert!(matches!(cmds.try_recv(), Ok(Cmd::Artists)));
-        app.apply(app::Msg::Artists { rows, focus: None });
-        app.apply(app::Msg::Idle);
+        app.apply(crate::protocol::Msg::Artists { rows, focus: None });
+        app.apply(crate::protocol::Msg::Idle);
         (app, cmds)
     }
 
@@ -2577,7 +2579,7 @@ mod tests {
         app.view = View::Library;
         app.shelf = 2;
         handle_key(&mut app, KeyCode::Char('b'), KeyModifiers::NONE);
-        app.apply(app::Msg::Idle);
+        app.apply(crate::protocol::Msg::Idle);
         handle_key(&mut app, KeyCode::Char('/'), KeyModifiers::NONE);
         type_keys(&mut app, "can");
         assert!(app.filter.is_empty(), "the artist query went into the library's box");
@@ -2644,10 +2646,10 @@ mod tests {
     fn the_cursor_follows_a_starred_artist_to_its_new_row() {
         let (mut app, _cmds) = on_artists(vec![], vec![artist("Can", 3, false), artist("Neu!", 1, false)]);
         handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
-        app.apply(app::Msg::Artists { rows: vec![artist("Neu!", 1, true), artist("Can", 3, false)], focus: Some("Neu!".into()) });
+        app.apply(crate::protocol::Msg::Artists { rows: vec![artist("Neu!", 1, true), artist("Can", 3, false)], focus: Some("Neu!".into()) });
         assert_eq!(app.artist_selected().map(|r| r.name.as_str()), Some("Neu!"));
         // A refresh with no focus keeps the artist too.
-        app.apply(app::Msg::Artists { rows: vec![artist("Can", 3, true), artist("Neu!", 1, true)], focus: None });
+        app.apply(crate::protocol::Msg::Artists { rows: vec![artist("Can", 3, true), artist("Neu!", 1, true)], focus: None });
         assert_eq!(app.artist_selected().map(|r| r.name.as_str()), Some("Neu!"));
     }
 
@@ -2656,7 +2658,7 @@ mod tests {
     fn rows_that_shrink_under_the_cursor_leave_it_on_a_row() {
         let (mut app, _cmds) = on_artists(vec![], vec![artist("Can", 3, false), artist("Neu!", 1, false), artist("Ghost", 0, true)]);
         app.artist_jump(true);
-        app.apply(app::Msg::Artists { rows: vec![artist("Can", 3, false)], focus: None });
+        app.apply(crate::protocol::Msg::Artists { rows: vec![artist("Can", 3, false)], focus: None });
         assert_eq!(app.artist_selected().map(|r| r.name.as_str()), Some("Can"));
     }
 
@@ -2679,7 +2681,7 @@ mod tests {
         let (tx, cmds) = mpsc::channel();
         let mut app = App::new(tx, String::new());
         app.intro_done = true;
-        let mut track = crate::app::Track::new(1, "a".into(), "01 - A.opus".into(), "/music/F/01 - A.opus".into());
+        let mut track = crate::protocol::Track::new(1, "a".into(), "01 - A.opus".into(), "/music/F/01 - A.opus".into());
         track.artist = "Can feat. Damo Suzuki".into();
         app.tracks = vec![track];
         app.done = Some(Ok(String::new()));
@@ -2694,8 +2696,8 @@ mod tests {
         assert!(!app.can_browse() && !app.can_command() && !app.can_find() && !app.can_playlist() && !app.can_pick());
     }
 
-    fn album(title: &str, kind: &str, have: usize, of: Option<usize>) -> crate::app::AlbumRow {
-        crate::app::AlbumRow { id: 1, title: title.into(), year: Some(1971), kind: kind.into(), have, of, new: false }
+    fn album(title: &str, kind: &str, have: usize, of: Option<usize>) -> crate::protocol::AlbumRow {
+        crate::protocol::AlbumRow { id: 1, title: title.into(), year: Some(1971), kind: kind.into(), have, of, new: false }
     }
 
     #[test]
@@ -2705,7 +2707,7 @@ mod tests {
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(app.view, View::Artist);
         assert!(matches!(cmds.try_recv(), Ok(Cmd::Discography(name)) if name == "Neu!"));
-        app.apply(app::Msg::Idle);
+        app.apply(crate::protocol::Msg::Idle);
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(app.view, View::Artists);
         assert_eq!(app.artist_selected().map(|r| r.name.as_str()), Some("Neu!"));
@@ -2716,11 +2718,11 @@ mod tests {
     fn an_answer_for_a_page_already_left_is_dropped() {
         let (mut app, _cmds) = on_artists(vec![], vec![artist("Can", 3, false), artist("Neu!", 1, false)]);
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        app.apply(app::Msg::Idle);
+        app.apply(crate::protocol::Msg::Idle);
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        app.apply(app::Msg::Discography { name: "Can".into(), found: None, rows: Ok(vec![album("Tago Mago", "album", 7, Some(7))]) });
+        app.apply(crate::protocol::Msg::Discography { name: "Can".into(), found: None, rows: Ok(vec![album("Tago Mago", "album", 7, Some(7))]) });
         assert!(!app.page.loaded && app.page.rows.is_empty());
     }
 
@@ -2728,12 +2730,12 @@ mod tests {
     fn a_shows_singles_and_back_and_the_cursor_stays_on_a_row_that_shows() {
         let (mut app, _cmds) = on_artists(vec![], vec![artist("Can", 3, false)]);
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        app.apply(app::Msg::Discography {
+        app.apply(crate::protocol::Msg::Discography {
             name: "Can".into(),
             found: Some(("Can".into(), 57000)),
             rows: Ok(vec![album("Spoon", "single", 0, None), album("Tago Mago", "album", 7, Some(7)), album("Moonshake", "single", 0, None)]),
         });
-        app.apply(app::Msg::Idle);
+        app.apply(crate::protocol::Msg::Idle);
         assert_eq!(app.page_rows(), vec![1]);
         assert_eq!(app.page.cursor, 1, "the page opened on a hidden single");
         handle_key(&mut app, KeyCode::Char('a'), KeyModifiers::NONE);
@@ -2749,7 +2751,7 @@ mod tests {
         can.folders = vec!["/music/Kraut".into()];
         let (mut app, _cmds) = on_artists(vec![shelf("Kraut", &["01 A.opus"]), shelf("Jazz", &["01 B.opus"])], vec![can]);
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        app.apply(app::Msg::Idle);
+        app.apply(crate::protocol::Msg::Idle);
         handle_key(&mut app, KeyCode::Char('o'), KeyModifiers::NONE);
         assert_eq!(app.view, View::Library);
         assert_eq!(app.shelf_rows(), vec![0]);
@@ -2762,19 +2764,19 @@ mod tests {
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         let mut tago = album("Tago Mago", "album", 7, None);
         tago.id = 42;
-        app.apply(app::Msg::Discography { name: "Can".into(), found: None, rows: Ok(vec![tago]) });
-        app.apply(app::Msg::Counted { name: "Neu!".into(), id: 42, of: 9 });
+        app.apply(crate::protocol::Msg::Discography { name: "Can".into(), found: None, rows: Ok(vec![tago]) });
+        app.apply(crate::protocol::Msg::Counted { name: "Neu!".into(), id: 42, of: 9 });
         assert_eq!(app.page.rows[0].of, None);
-        app.apply(app::Msg::Counted { name: "Can".into(), id: 42, of: 7 });
+        app.apply(crate::protocol::Msg::Counted { name: "Can".into(), id: 42, of: 7 });
         assert_eq!(app.page.rows[0].of, Some(7));
     }
 
-    fn on_page(rows: Vec<crate::app::AlbumRow>) -> (App, mpsc::Receiver<Cmd>) {
+    fn on_page(rows: Vec<crate::protocol::AlbumRow>) -> (App, mpsc::Receiver<Cmd>) {
         let (mut app, cmds) = on_artists(vec![], vec![artist("Can", 3, false)]);
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(matches!(cmds.try_recv(), Ok(Cmd::Discography(_))));
-        app.apply(app::Msg::Discography { name: "Can".into(), found: None, rows: Ok(rows) });
-        app.apply(app::Msg::Idle);
+        app.apply(crate::protocol::Msg::Discography { name: "Can".into(), found: None, rows: Ok(rows) });
+        app.apply(crate::protocol::Msg::Idle);
         (app, cmds)
     }
 
@@ -2807,10 +2809,10 @@ mod tests {
     fn the_pick_gate_opens_with_owned_tracks_unmarked() {
         let (tx, _cmds) = mpsc::channel();
         let mut app = App::new(tx, String::new());
-        app.tracks = (1..=3).map(|i| crate::app::Track::new(i, format!("v{i}"), format!("T{i}"), format!("/m/{i}.opus").into())).collect();
+        app.tracks = (1..=3).map(|i| crate::protocol::Track::new(i, format!("v{i}"), format!("T{i}"), format!("/m/{i}.opus").into())).collect();
         let (reply, _rx) = mpsc::channel();
-        app.apply(app::Msg::PickHeld(vec![2]));
-        app.apply(app::Msg::Pick(reply));
+        app.apply(crate::protocol::Msg::PickHeld(vec![2]));
+        app.apply(crate::protocol::Msg::Pick(reply));
         let mut marked: Vec<usize> = app.marked.iter().copied().collect();
         marked.sort_unstable();
         assert_eq!(marked, [1, 3]);
@@ -2833,12 +2835,12 @@ mod tests {
         let (mut app, cmds) = on_page(vec![album("Tago Mago", "album", 7, Some(7))]);
         handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
         assert!(matches!(cmds.try_recv(), Ok(Cmd::Top(name)) if name == "Can"));
-        app.apply(app::Msg::Top { name: "Can".into(), rows: Ok(vec![]) });
-        app.apply(app::Msg::Idle);
+        app.apply(crate::protocol::Msg::Top { name: "Can".into(), rows: Ok(vec![]) });
+        app.apply(crate::protocol::Msg::Idle);
         handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
         assert!(matches!(cmds.try_recv(), Ok(Cmd::Related(name)) if name == "Can"));
-        app.apply(app::Msg::Related { name: "Can".into(), rows: Ok(vec![]) });
-        app.apply(app::Msg::Idle);
+        app.apply(crate::protocol::Msg::Related { name: "Can".into(), rows: Ok(vec![]) });
+        app.apply(crate::protocol::Msg::Idle);
         handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
         assert_eq!(app.page.section, app::Section::Top);
@@ -2850,20 +2852,20 @@ mod tests {
     fn a_related_artists_page_goes_back_to_the_one_before() {
         let (mut app, cmds) = on_page(vec![]);
         handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-        app.apply(app::Msg::Idle);
+        app.apply(crate::protocol::Msg::Idle);
         handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-        let related = vec![app::RelatedRow { name: "Neu!".into(), fans: 1, tracks: 0 }];
-        app.apply(app::Msg::Related { name: "Can".into(), rows: Ok(related) });
-        app.apply(app::Msg::Idle);
+        let related = vec![crate::protocol::RelatedRow { name: "Neu!".into(), fans: 1, tracks: 0 }];
+        app.apply(crate::protocol::Msg::Related { name: "Can".into(), rows: Ok(related) });
+        app.apply(crate::protocol::Msg::Idle);
         let _ = cmds.try_iter().count();
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(matches!(cmds.try_recv(), Ok(Cmd::Discography(name)) if name == "Neu!"));
         assert_eq!(app.page.name, "Neu!");
-        app.apply(app::Msg::Idle);
+        app.apply(crate::protocol::Msg::Idle);
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert!(matches!(cmds.try_recv(), Ok(Cmd::Discography(name)) if name == "Can"));
         assert_eq!((app.view, app.page.name.as_str()), (View::Artist, "Can"));
-        app.apply(app::Msg::Idle);
+        app.apply(crate::protocol::Msg::Idle);
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(app.view, View::Artists);
     }
@@ -2872,9 +2874,9 @@ mod tests {
     fn enter_on_top_tracks_sends_only_the_missing_and_only_once_unlocked() {
         let (mut app, cmds) = on_page(vec![]);
         handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-        let row = |title: &str, have| app::TopRow { title: title.into(), album: String::new(), have };
-        app.apply(app::Msg::Top { name: "Can".into(), rows: Ok(vec![row("Mushroom", true), row("Spoon", false), row("Vitamin C", false)]) });
-        app.apply(app::Msg::Idle);
+        let row = |title: &str, have| crate::protocol::TopRow { title: title.into(), album: String::new(), have };
+        app.apply(crate::protocol::Msg::Top { name: "Can".into(), rows: Ok(vec![row("Mushroom", true), row("Spoon", false), row("Vitamin C", false)]) });
+        app.apply(crate::protocol::Msg::Idle);
         let _ = cmds.try_iter().count();
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(cmds.try_recv().is_err(), "a locked get reached the worker");
@@ -2889,8 +2891,8 @@ mod tests {
     fn esc_during_a_search_stops_it_and_then_leaves() {
         use std::sync::atomic::Ordering;
         let (mut app, _cmds) = on_page(vec![]);
-        app.apply(app::Msg::Discography { name: "Can".into(), found: None, rows: Ok(vec![album("Tago Mago", "album", 0, Some(7))]) });
-        app.apply(app::Msg::Idle);
+        app.apply(crate::protocol::Msg::Discography { name: "Can".into(), found: None, rows: Ok(vec![album("Tago Mago", "album", 0, Some(7))]) });
+        app.apply(crate::protocol::Msg::Idle);
         app.unlocked.grant(crate::cheats::Feature::Music);
         app.stop.store(true, Ordering::SeqCst);
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -2898,7 +2900,7 @@ mod tests {
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert!(app.stop.load(Ordering::SeqCst));
         assert_eq!(app.view, View::Artist, "Esc left the page instead of stopping the search");
-        app.apply(app::Msg::Idle);
+        app.apply(crate::protocol::Msg::Idle);
         handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(app.view, View::Artists);
     }
@@ -2909,7 +2911,7 @@ mod tests {
             crate::config::Row { key: "pick", value: crate::config::Value::Switch(false), source: crate::config::Source::Flag, what: "", when: crate::config::When::NextRun },
             crate::config::Row { key: "dir", value: crate::config::Value::Fixed("/music".into()), source: crate::config::Source::File, what: "", when: crate::config::When::NextStart },
         ];
-        app.apply(app::Msg::Settings { text: String::new(), format: "m4a".into(), rows });
+        app.apply(crate::protocol::Msg::Settings { text: String::new(), format: "m4a".into(), rows });
     }
 
     // `,` opens the settings from a list and Esc goes back to that list, not to the library.
@@ -2936,7 +2938,7 @@ mod tests {
         let _ = cmds.try_iter().count();
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(matches!(cmds.try_recv(), Ok(Cmd::Switch("cover", false))));
-        app.apply(app::Msg::Idle);
+        app.apply(crate::protocol::Msg::Idle);
         handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(cmds.try_recv().is_err(), "changed a setting the command line turned off");
@@ -2958,7 +2960,7 @@ mod tests {
         // Nor during the first run, which no `send` started, so `busy` is clear through it.
         app.busy = false;
         app.done = None;
-        app.tracks = vec![app::Track::new(1, "v".into(), "Spoon".into(), "/m/Spoon.opus".into())];
+        app.tracks = vec![crate::protocol::Track::new(1, "v".into(), "Spoon".into(), "/m/Spoon.opus".into())];
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(cmds.try_recv().is_err(), "sent a change into the first run");
     }
@@ -2986,7 +2988,7 @@ mod tests {
             Row { key: "icons", value: Value::Icons(icons), source: Source::Default, what: "", when: When::Now },
             Row { key: "notify", value: Value::Switch(bell), source: Source::Default, what: "", when: When::Now },
         ];
-        app.apply(app::Msg::Settings { text: String::new(), format: "m4a".into(), rows: rows(crate::icons::Icons::Text, true) });
+        app.apply(crate::protocol::Msg::Settings { text: String::new(), format: "m4a".into(), rows: rows(crate::icons::Icons::Text, true) });
         assert!(app.notify());
         assert_eq!(app.icons, crate::icons::Icons::Text);
         handle_key(&mut app, KeyCode::Char(','), KeyModifiers::NONE);
@@ -2994,7 +2996,7 @@ mod tests {
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(matches!(cmds.try_recv(), Ok(Cmd::Icons(crate::icons::Icons::Symbols))));
         assert_eq!(app.icons, crate::icons::Icons::Text, "drew icons the worker had not saved");
-        app.apply(app::Msg::Settings { text: String::new(), format: "m4a".into(), rows: rows(crate::icons::Icons::Symbols, false) });
+        app.apply(crate::protocol::Msg::Settings { text: String::new(), format: "m4a".into(), rows: rows(crate::icons::Icons::Symbols, false) });
         assert_eq!(app.icons, crate::icons::Icons::Symbols);
         assert!(!app.notify());
     }
@@ -3019,11 +3021,11 @@ mod tests {
     #[test]
     fn a_new_release_is_marked_on_its_page_and_then_no_longer_counted() {
         let (mut app, _cmds) = on_artists(vec![], vec![artist("Can", 3, true)]);
-        app.apply(app::Msg::NewReleases(vec![("Can".into(), 42, "Live 1975".into()), ("Neu!".into(), 7, "Neu! 4".into())]));
+        app.apply(crate::protocol::Msg::NewReleases(vec![("Can".into(), 42, "Live 1975".into()), ("Neu!".into(), 7, "Neu! 4".into())]));
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         let mut live = album("Live 1975", "album", 0, None);
         live.id = 42;
-        app.apply(app::Msg::Discography { name: "Can".into(), found: None, rows: Ok(vec![live, album("Tago Mago", "album", 7, Some(7))]) });
+        app.apply(crate::protocol::Msg::Discography { name: "Can".into(), found: None, rows: Ok(vec![live, album("Tago Mago", "album", 7, Some(7))]) });
         assert!(app.page.rows[0].new && !app.page.rows[1].new);
         assert_eq!(app.new_releases.len(), 1, "Can's stayed counted after its page was read");
         assert_eq!(app.new_releases[0].0, "Neu!");
@@ -3034,8 +3036,8 @@ mod tests {
     fn tab_asks_again_for_a_list_that_failed() {
         let (mut app, cmds) = on_page(vec![]);
         handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
-        app.apply(app::Msg::Top { name: "Can".into(), rows: Err("Deezer did not send the top tracks".into()) });
-        app.apply(app::Msg::Idle);
+        app.apply(crate::protocol::Msg::Top { name: "Can".into(), rows: Err("Deezer did not send the top tracks".into()) });
+        app.apply(crate::protocol::Msg::Idle);
         let _ = cmds.try_iter().count();
         for _ in 0..3 {
             handle_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
@@ -3049,8 +3051,8 @@ mod tests {
     fn a_late_check_does_not_bring_back_a_page_already_read() {
         let (mut app, _cmds) = on_artists(vec![], vec![artist("Can", 3, true)]);
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        app.apply(app::Msg::Discography { name: "Can".into(), found: None, rows: Ok(vec![]) });
-        app.apply(app::Msg::NewReleases(vec![("Can".into(), 42, "Live 1975".into()), ("Neu!".into(), 7, "Neu! 4".into())]));
+        app.apply(crate::protocol::Msg::Discography { name: "Can".into(), found: None, rows: Ok(vec![]) });
+        app.apply(crate::protocol::Msg::NewReleases(vec![("Can".into(), 42, "Live 1975".into()), ("Neu!".into(), 7, "Neu! 4".into())]));
         let left: Vec<&str> = app.new_releases.iter().map(|(a, ..)| a.as_str()).collect();
         assert_eq!(left, ["Neu!"]);
     }

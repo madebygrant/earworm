@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use serde_json::Value;
 
-use crate::app::{AlbumRow, Msg, RelatedRow, TopRow};
+use crate::protocol::{AlbumRow, Msg, RelatedRow, TopRow};
 use crate::artists::{self, Artist};
 use crate::lookup::{self, normalise};
 
