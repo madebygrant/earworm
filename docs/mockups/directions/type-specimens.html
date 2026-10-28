@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Type pairings</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&family=IBM+Plex+Sans:wght@400;600&family=IBM+Plex+Mono:wght@400;600&family=Geist:wght@400;600&family=Geist+Mono:wght@400;600&family=Atkinson+Hyperlegible+Next:wght@400;700&family=Atkinson+Hyperlegible+Mono:wght@400;700&family=Recursive:slnt,wght,CASL,CRSV,MONO@-15..0,300..800,0..1,0..1,0..1&family=Schibsted+Grotesk:wght@400;600&family=Fragment+Mono&family=Martian+Mono:wdth,wght@75..112.5,400..700&display=swap" rel="stylesheet">
+<style>
+:root { color-scheme: dark; --text:#F1F2F4; --accent:#9DB7FF; --cursor:#7CDDB2; --warn:#F5B867; --error:#FF8F87; --muted:#A0A6B2; --rule:#343842; --surface:#262A31; --ink:#16181D; --near:#1D2026; --far:#121418; }
+* { box-sizing: border-box; margin: 0; }
+body { background: var(--far); color: var(--text); font: 14px/1.5 system-ui, sans-serif; padding: 24px 16px 48px; }
+.intro { max-width: 72ch; margin: 0 auto 24px; color: var(--muted); }
+.intro h1 { color: var(--text); font-size: 20px; margin-bottom: 4px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 640px), 1fr)); gap: 20px; max-width: 1340px; margin: 0 auto; }
+.spec { background: linear-gradient(160deg, var(--near), var(--far) 76%); border: 1px solid var(--rule); font: 13px/1.5 var(--data); font-variation-settings: var(--data-axes, normal); }
+.label { display: flex; justify-content: space-between; gap: 12px; align-items: baseline; padding: 10px 14px; border-bottom: 1px solid var(--rule); font: 13px/1.4 system-ui, sans-serif; }
+.label b { font-weight: 600; }
+.label span { color: var(--muted); font-size: 12px; }
+.label a { color: var(--accent); font-size: 12px; white-space: nowrap; }
+.head { padding: 8px 14px; border-bottom: 1px solid var(--rule); white-space: nowrap; overflow: hidden; }
+.head .sep { color: var(--rule); padding: 0 8px; } .head .a { color: var(--accent); } .head .st { color: var(--accent); font-weight: 700; }
+.body { display: grid; grid-template-columns: 1fr 200px; }
+.tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px 10px; padding: 12px 14px; }
+.frame { aspect-ratio: 1; border: 1px solid var(--rule); display: grid; place-items: center; color: var(--muted); font-size: 18px; position: relative; overflow: hidden; }
+.frame img { position: absolute; inset: 0; width: 100%; height: 100%; image-rendering: pixelated; }
+.frame.live { border-color: var(--accent); } .frame.failed { border-color: var(--error); color: var(--error); font-weight: 700; } .frame.queued { border-style: dashed; }
+.cap { margin-top: 5px; font-size: 12px; white-space: nowrap; } .cap .n { color: var(--muted); margin-right: 1ch; }
+.nm { font-family: var(--ui); font-variation-settings: var(--ui-axes, normal); }
+.tt { font-size: var(--ui-size, 12px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ar { font-size: var(--ui-size, 12px); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cur .frame { outline: 2px solid var(--cursor); outline-offset: 2px; } .cur .tt { font-weight: 700; }
+.rows { grid-column: 1 / -1; padding: 0 14px 12px; }
+.r { display: grid; grid-template-columns: 3ch 9ch 1fr 17ch; gap: 1ch; padding: 1px 6px; background: linear-gradient(90deg, color-mix(in srgb, var(--surface) 55%, transparent), transparent); margin-bottom: 2px; white-space: nowrap; }
+.r .n { text-align: right; color: var(--muted); } .r .t { overflow: hidden; text-overflow: ellipsis; font-size: var(--ui-size, 13px); } .r .t .x { color: var(--muted); } .r .src { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.detail { border-left: 1px solid var(--rule); padding: 12px; grid-row: 1 / 3; grid-column: 2; }
+.detail h2 { font-size: var(--ui-h, 14px); font-weight: 700; line-height: 1.2; margin-bottom: 8px; }
+.kv { display: grid; grid-template-columns: 7ch 1fr; column-gap: 1ch; font-size: 12px; }
+.kv dt { color: var(--muted); } .kv dd { word-break: break-all; }
+.keys { margin-top: 10px; font-size: 12px; } .keys .k { background: var(--accent); color: var(--ink); padding: 0 .5ch; margin-right: .5ch; }
+.good { color: var(--cursor); } .warn { color: var(--warn); } .error { color: var(--error); } .muted { color: var(--muted); } .live { color: var(--accent); font-weight: 700; }
+.foot { border-top: 1px solid var(--rule); padding: 6px 14px; font-size: 12px; display: flex; gap: 2ch; white-space: nowrap; overflow: hidden; }
+@media (max-width: 560px) { .body { grid-template-columns: 1fr; } .detail { grid-row: auto; grid-column: auto; border-left: 0; border-top: 1px solid var(--rule); } .tiles { grid-template-columns: repeat(2, 1fr); } }
+</style>
+</head>
+<body>
+<div class="intro"><h1>Type pairings for the Phosphor sheet</h1><p>Same screen, same graphite colours, seven pairings. Names (titles, artists, folders) take the first face; status words, numbers, paths and keys take the second. Open one to see it running.</p></div>
+<div class="grid" id="grid"></div>
+<script src="data.js"></script>
+<script src="type.js"></script>
+<script>
+const pick = [[2, "ok"], [6, "guessed"], [8, "unsure"], [11, "tagging"], [12, "failed"], [13, "queued"], [0, "on disk"], [16, "gone"]];
+const hasArt = st => !["queued", "fetching", "fetched", "tagging", "failed"].includes(st);
+function tile([i, st], cur) {
+  const t = TRACKS[i], tone = TONE[st];
+  const f = hasArt(st) ? `<div class="frame"><img alt="" src="${pixelSleeve(t.album, 16)}"></div>`
+    : `<div class="frame ${st === "failed" ? "failed" : tone === "live" ? "live" : "queued"}">${st === "failed" ? "!" : tone === "live" ? "" : String(t.n).padStart(2, "0")}</div>`;
+  return `<div class="${cur ? "cur" : ""}">${f}<div class="cap"><span class="n">${String(t.n).padStart(2, "0")}</span><span class="${tone}">${st}</span></div>
+    <div class="tt nm">${esc(t.title)}</div><div class="ar nm">${esc(t.artist)}</div></div>`;
+}
+const t = TRACKS[6];
+document.getElementById("grid").innerHTML = PAIRS.map((p, n) => `
+  <section class="spec" data-n="${n}">
+    <div class="label"><div><b>${n + 1}. ${esc(p.name)}</b><br><span>${esc(p.note)}</span></div><a href="g-phosphor-sheet.html?type=${n}">See it running</a></div>
+    <div class="head"><span class="a">earworm</span><span class="sep">·</span><span class="nm">Krautrock</span><span class="sep">·</span><span class="st">tagging</span><span class="sep">·</span>11/14<span class="sep"></span><span class="muted">format opus · lookup on · cover on</span></div>
+    <div class="body">
+      <div class="tiles">${pick.slice(0, 4).map((x, i) => tile(x, i === 1)).join("")}</div>
+      <div class="rows">${[[3, "ok"], [8, "unsure"], [12, "failed"], [16, "gone"]].map(([i, st]) => `<div class="r"><span class="n">${i + 1}</span><span class="${TONE[st]}">${st}</span><span class="t nm">${esc(TRACKS[i].title)} <span class="x">- ${esc(TRACKS[i].artist)}</span></span><span class="src">${esc(TRACKS[i].source)}</span></div>`).join("")}</div>
+      <aside class="detail"><h2 class="nm">${esc(t.title)} - ${esc(t.artist)}</h2>
+        <dl class="kv"><dt>status</dt><dd class="warn">guessed</dd><dt>artist</dt><dd class="nm">${esc(t.artist)}</dd><dt>album</dt><dd class="nm">${esc(t.album)}</dd><dt>year</dt><dd>${t.year}</dd><dt>file</dt><dd>${esc(t.file)}</dd></dl>
+        <p class="keys"><span class="k">T</span>search again</p></aside>
+    </div>
+    <div class="foot"><span class="good">9 ok</span><span class="warn">2 guessed</span><span class="error">1 failed</span><span class="muted">2 gone</span><span class="muted" style="margin-left:auto">e edit  h keys</span></div>
+  </section>`).join("");
+document.querySelectorAll(".spec").forEach(el => applyPair(el, PAIRS[+el.dataset.n]));
+</script>
+</body>
+</html>

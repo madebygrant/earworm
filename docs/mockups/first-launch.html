@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>First launch</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css"><link rel="stylesheet" href="base.css">
+<style>
+.hero { display: grid; align-content: center; justify-items: start; gap: 18px; padding: 40px clamp(16px, 6vw, 96px); overflow: auto; }
+.hero h1 { font-size: var(--s-22); font-weight: 700; }
+.url { width: min(100%, 72ch); font-size: var(--s-28); border-bottom: 2px solid var(--accent); padding: 6px 0; display: flex; gap: 1ch; }
+.url .ph { color: var(--muted); }
+.url.drop { border: 1px dashed var(--accent); padding: 6px 10px; }
+.or { color: var(--muted); }
+.check { font-size: var(--s-13); width: min(100%, 92ch); margin-top: 10px; }
+.check h2 { font-size: var(--s-12); color: var(--muted); font-weight: 400; margin: 12px 0 4px; }
+.check div { display: grid; grid-template-columns: 2ch 10ch 12ch 1fr; gap: 1ch; white-space: nowrap; }
+.check .fix { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.copy { color: var(--accent); }
+@media (max-width: 760px) { .url { font-size: var(--s-17); } .check div { grid-template-columns: 2ch 9ch 1fr; } .check .fix { display: none; } }
+</style>
+</head>
+<body>
+<script src="directions/data.js"></script>
+<script src="shell.js"></script>
+<script>
+mount({
+  head: { right: "~/Music · nothing synced yet" },
+  railOpts: { folders: [] },
+  main: `<section class="hero">
+    <h1>Playlist in, library out.</h1>
+    <div class="url"><span class="k">›</span><span class="caret">&nbsp;</span><span class="ph">paste a playlist link</span></div>
+    <p class="or">Or drop a folder of music you already have, or a markdown file of links, anywhere on this window.</p>
+    <div class="check">
+      <h2>tools</h2>
+      <div><span class="good">✓</span><span>yt-dlp</span><span>2026.08.19</span><span class="fix">downloads and extracts audio</span></div>
+      <div><span class="good">✓</span><span>ffmpeg</span><span>9.0.1</span><span class="fix">conversion, cover art</span></div>
+      <div><span class="warn">✗</span><span>fpcalc</span><span class="warn">not found</span><span class="fix"><span class="copy">brew install chromaprint</span> for acoustic fingerprinting</span></div>
+      <div><span class="good">✓</span><span>cliamp</span><span>v2.1.0</span><span class="fix">plays a finished playlist</span></div>
+      <h2>settings</h2>
+      <div><span class="warn">✗</span><span>acoustid</span><span class="warn">no key</span><span class="fix">lookups fall back to Deezer and Apple. <span class="copy">Add a key</span></span></div>
+      <div><span class="good">✓</span><span>format</span><span>opus</span><span class="fix">change it with <span class="k">,</span></span></div>
+      <div><span class="good">✓</span><span>folder</span><span>~/Music</span><span class="fix">where playlists land</span></div>
+    </div>
+  </section>`,
+  noDetail: true,
+  foot: { hints: [["enter", "sync"], ["⌘v", "paste"], [",", "settings"], ["h", "keys"], ["q", "quit"]] },
+});
+</script>
+</body>
+</html>

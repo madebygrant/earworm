@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>B · Liner notes</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;600;800&family=Newsreader:opsz,wght@6..72,500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --ground: #F2F4F5; --panel: #FFFFFF; --text: #15181C; --muted: #5C636B; --rule: #D9DEE2;
+  --good: #1D7A5C; --warn: #94580A; --error: #B3261E; --live: #2B4FD8;
+  --tint: 210; color-scheme: light;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --ground: #121518; --panel: #1A1E22; --text: #ECEFF2; --muted: #9AA3AC; --rule: #2C3238;
+  --good: #6FD1A8; --warn: #E8A65A; --error: #F08A80; --live: #8EA6FF; color-scheme: dark;
+}}
+:root[data-theme="dark"] {
+  --ground: #121518; --panel: #1A1E22; --text: #ECEFF2; --muted: #9AA3AC; --rule: #2C3238;
+  --good: #6FD1A8; --warn: #E8A65A; --error: #F08A80; --live: #8EA6FF; color-scheme: dark;
+}
+* { box-sizing: border-box; margin: 0; }
+html, body { height: 100%; }
+body { font: 14px/1.45 "Hanken Grotesk", system-ui, sans-serif; font-variant-numeric: tabular-nums; color: var(--text); background: var(--ground);
+  display: grid; grid-template-columns: 252px 1fr 380px; grid-template-rows: 1fr 30px; overflow: hidden; }
+button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--live); outline-offset: 2px; }
+
+.rail { grid-row: 1; padding: 44px 14px 14px; overflow: auto; border-right: 1px solid var(--rule); }
+.rail .top { display: flex; align-items: baseline; justify-content: space-between; margin-bottom: 14px; }
+.rail .brand { font-weight: 800; font-size: 17px; letter-spacing: -.01em; }
+.rail .add { font-size: 12px; color: var(--muted); }
+.search { display: block; width: 100%; height: 32px; padding: 0 10px; border: 1px solid var(--rule); border-radius: 8px; background: var(--panel); color: var(--muted); font-size: 13px; margin-bottom: 14px; display: flex; align-items: center; }
+.wall { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 10px; list-style: none; padding: 0; }
+.wall li { min-width: 0; }
+.tile { aspect-ratio: 1; border-radius: 6px; position: relative; overflow: hidden; }
+.tile.mosaic { display: grid; grid-template: 1fr 1fr / 1fr 1fr; gap: 2px; background: var(--rule); }
+.tile.local { background: var(--panel); border: 1px dashed var(--rule); display: grid; place-items: center; color: var(--muted); font-size: 22px; }
+.wall li[aria-current="true"] .tile { outline: 3px solid var(--text); outline-offset: 2px; }
+.tile .badge { position: absolute; left: 6px; bottom: 6px; font-size: 11px; font-weight: 600; padding: 1px 6px; border-radius: 99px; background: var(--panel); color: var(--warn); }
+.tile .badge.live { color: var(--live); }
+.wall .name { font-weight: 600; font-size: 13px; margin-top: 6px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wall .sub { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.list { grid-row: 1; overflow: auto; padding: 0 0 24px; min-width: 0; }
+.list header { position: sticky; top: 0; background: var(--ground); padding: 40px 24px 12px; z-index: 1; }
+.list h1 { font-weight: 800; font-size: 34px; letter-spacing: -.02em; line-height: 1.1; }
+.list .meta { color: var(--muted); margin-top: 4px; display: flex; gap: 14px; align-items: center; }
+.meta .live { color: var(--live); font-weight: 600; }
+.track-bar { height: 4px; border-radius: 4px; background: var(--rule); margin-top: 14px; overflow: hidden; }
+.track-bar i { display: block; height: 100%; width: 0; background: var(--live); transition: width .25s ease-out; }
+ol { list-style: none; padding: 0 12px; }
+li.row { display: grid; grid-template-columns: 40px 1fr auto; gap: 14px; align-items: center; height: 52px; padding: 0 12px; border-radius: 8px; }
+li.row.cur { background: var(--panel); box-shadow: 0 0 0 1px var(--rule); }
+.thumb { width: 40px; height: 40px; border-radius: 4px; display: grid; place-items: center; color: var(--muted); font-size: 13px; background: color-mix(in srgb, var(--rule) 60%, transparent); transition: opacity .3s; }
+.thumb.art { animation: arrive .45s cubic-bezier(.2, .9, .3, 1.2); }
+@keyframes arrive { from { transform: scale(.6); opacity: 0; } }
+.row .t { min-width: 0; }
+.row .t b { display: block; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row .t span { color: var(--muted); font-size: 13px; }
+.st { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 99px; border: 1px solid currentColor; white-space: nowrap; }
+.good { color: var(--good); } .warn { color: var(--warn); } .error { color: var(--error); } .muted { color: var(--muted); border-color: transparent; } .live { color: var(--live); }
+.st.good { border-color: transparent; }
+
+.notes { grid-row: 1 / 3; grid-column: 3; overflow: auto; position: relative;
+  background: linear-gradient(180deg, hsl(var(--tint) 45% 50% / .22), transparent 70%), var(--panel); border-left: 1px solid var(--rule); transition: background .4s; }
+.notes .cover { margin: 40px 32px 0; aspect-ratio: 1; border-radius: 6px; box-shadow: 0 24px 48px -24px hsl(var(--tint) 50% 25% / .6); }
+.notes .body { padding: 24px 32px; }
+.notes h2 { font: 500 30px/1.15 "Newsreader", Georgia, serif; letter-spacing: -.01em; }
+.notes .by { font-size: 17px; margin-top: 4px; }
+.notes .from { color: var(--muted); margin-top: 2px; }
+.verdict { margin-top: 20px; padding: 14px 16px; border-radius: 8px; background: var(--ground); display: grid; gap: 4px; }
+.verdict .st { justify-self: start; }
+.verdict p { color: var(--muted); }
+.notes dl { display: grid; grid-template-columns: 56px 1fr; gap: 6px 12px; margin-top: 18px; font-size: 13px; }
+.notes dt { color: var(--muted); }
+.notes dd { word-break: break-all; }
+.acts { display: flex; gap: 8px; margin-top: 20px; }
+.btn { height: 34px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--rule); background: var(--panel); font-weight: 600; }
+.btn.primary { background: var(--text); color: var(--panel); border-color: var(--text); }
+
+#tally { display: flex; gap: 14px; }
+#tally .muted { border: 0; }
+footer { grid-column: 1 / 3; display: flex; gap: 16px; align-items: center; padding: 0 16px; border-top: 1px solid var(--rule); font-size: 12px; color: var(--muted); }
+footer .r { margin-left: auto; display: flex; gap: 14px; }
+kbd { font: 600 11px/1 "Hanken Grotesk", sans-serif; padding: 2px 5px; border-radius: 4px; background: var(--panel); border: 1px solid var(--rule); color: var(--text); margin-right: 4px; }
+.switch { position: fixed; left: 50%; transform: translateX(-50%); top: 8px; z-index: 3; display: flex; gap: 4px; font-size: 12px; }
+.switch button { padding: 3px 8px; border-radius: 99px; color: var(--muted); border: 1px solid var(--rule); background: var(--panel); }
+.switch button[aria-pressed="true"] { color: var(--panel); background: var(--text); }
+.lights { position: fixed; left: 16px; top: 16px; width: 52px; height: 12px; z-index: 2;
+  background: radial-gradient(circle at 6px 6px, #ED6A5E 5.5px, transparent 6px), radial-gradient(circle at 26px 6px, #F4BF4F 5.5px, transparent 6px), radial-gradient(circle at 46px 6px, #61C554 5.5px, transparent 6px); }
+
+@media (max-width: 1180px) { body { grid-template-columns: 252px 1fr; } .notes { display: none; } #tally { display: flex; gap: 14px; }
+#tally .muted { border: 0; }
+footer { grid-column: 1 / 3; } }
+@media (max-width: 860px) { body { grid-template-columns: 84px 1fr; } .wall { grid-template-columns: 1fr; } .wall .name, .wall .sub, .rail .top .add, .search, .tile .badge { display: none; } .rail .brand { font-size: 0; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<span class="lights" aria-hidden="true"></span>
+<div class="switch" role="group" aria-label="Theme"><button data-t="light">Light</button><button data-t="dark">Dark</button></div>
+<nav class="rail" aria-label="Library">
+  <div class="top"><span class="brand">earworm</span><button class="add"><kbd>n</kbd>New link</button></div>
+  <div class="search">Search the library&nbsp;&nbsp;<kbd style="margin-left:auto">t</kbd></div>
+  <ul class="wall" id="wall"></ul>
+</nav>
+<section class="list">
+  <header>
+    <h1>Krautrock</h1>
+    <div class="meta"><span>Playlist</span><span>18 tracks</span><span class="live" id="stage">Syncing</span></div>
+    <div class="track-bar"><i id="bar"></i></div>
+  </header>
+  <ol id="rows"></ol>
+</section>
+<aside class="notes" id="notes"></aside>
+<footer><span id="tally"></span><span class="r"><span><kbd>space</kbd>mark</span><span><kbd>e</kbd>edit</span><span><kbd>h</kbd>keys</span></span></footer>
+<script src="data.js"></script>
+<script>
+const root = document.documentElement;
+document.querySelectorAll(".switch button").forEach(b => b.onclick = () => { root.dataset.theme = b.dataset.t; mark(); });
+function mark() {
+  const t = root.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+  document.querySelectorAll(".switch button").forEach(b => b.setAttribute("aria-pressed", b.dataset.t === t));
+}
+mark();
+
+document.getElementById("wall").innerHTML = FOLDERS.map(f => {
+  const tile = f.kind === "local" ? `<div class="tile local">◆</div>`
+    : f.kind === "playlist" ? `<div class="tile mosaic">${TRACKS.slice(hash(f.name) % 10, hash(f.name) % 10 + 4).map(t => `<span style="background:${sleeve(t.album)}"></span>`).join("")}${f.missing ? `<span class="badge">${f.missing} missing</span>` : f.open ? `<span class="badge live">syncing</span>` : ""}</div>`
+    : `<div class="tile" style="background:${sleeve(f.name)}"></div>`;
+  return `<li ${f.open ? 'aria-current="true"' : ""}>${tile}<div class="name">${esc(f.name)}</div><div class="sub">${f.kind === "album" ? esc(f.artist) : f.kind === "local" ? "Your files" : f.count + " tracks"}</div></li>`;
+}).join("");
+
+function notes(i, st) {
+  const t = TRACKS[i], tone = TONE[st];
+  root.style.setProperty("--tint", hue(t.album));
+  const say = {
+    ok: `Confirmed by ${t.source}.`, manual: "You chose this match.", "on disk": "Already in the folder. Tags read from the file.",
+    guessed: "Read off the video title. Nothing confirmed it.", unsure: `${t.source} found a match that didn't fit.`,
+    failed: "The download failed: video unavailable in your country.", gone: "This video has left the playlist.",
+    queued: "Waiting its turn.", fetching: "Downloading.", fetched: "Downloaded. Looking it up.", tagging: "Writing tags and art.",
+  }[st];
+  const act = tone === "warn" ? `<button class="btn primary">Search again</button><button class="btn">Edit tags</button>`
+    : st === "failed" ? `<button class="btn primary">Retry</button>` : st === "gone" ? `<button class="btn">Delete file</button>` : `<button class="btn">Edit tags</button><button class="btn">Show in Finder</button>`;
+  const hasArt = !["queued", "fetching", "fetched", "failed"].includes(st);
+  document.getElementById("notes").innerHTML = `
+    <div class="cover" style="background:${hasArt ? sleeve(t.album) : "var(--ground)"}; display:grid; place-items:center; color:var(--muted)">${hasArt ? "" : "The sleeve arrives with the tags"}</div>
+    <div class="body"><h2>${esc(t.title)}</h2><p class="by">${esc(t.artist)}</p><p class="from">${esc(t.album)}, ${t.year}</p>
+    <div class="verdict"><span class="st ${tone}">${st}</span><p>${say}</p></div>
+    <dl><dt>file</dt><dd>${esc(t.file)}</dd></dl><div class="acts">${act}</div></div>`;
+}
+
+let cursor = 0;
+const seen = new Set();
+startRun((state, done, total, active) => {
+  if (active >= 0) cursor = active;
+  const tally = {};
+  document.getElementById("rows").innerHTML = state.map((st, i) => {
+    const t = TRACKS[i], art = !["queued", "fetching", "fetched", "failed"].includes(st);
+    const fresh = art && !seen.has(i); if (art) seen.add(i); else seen.delete(i);
+    tally[TONE[st]] = (tally[TONE[st]] || 0) + 1;
+    return `<li class="row ${i === cursor ? "cur" : ""}">
+      ${art ? `<div class="thumb ${fresh ? "art" : ""}" style="background:${sleeve(t.album)}"></div>` : `<div class="thumb">${t.n}</div>`}
+      <div class="t"><b>${esc(t.title)}</b><span>${esc(t.artist)}</span></div>
+      <span class="st ${TONE[st]}">${st}</span></li>`;
+  }).join("");
+  const words = { good: "confirmed", warn: "to check", error: "failed", muted: "untouched", live: "in progress" };
+  document.getElementById("tally").innerHTML = Object.entries(tally).map(([k, v]) => `<span class="${k}">${v} ${words[k]}</span>`).join("");
+  document.getElementById("stage").textContent = active < 0 ? (done === total ? "Finished" : "Reading the playlist") : `Syncing ${done} of ${total}`;
+  document.getElementById("bar").style.width = `${done / total * 100}%`;
+  notes(cursor, state[cursor]);
+  document.querySelector('li.row.cur')?.scrollIntoView({ block: 'nearest' });
+});
+</script>
+</body>
+</html>

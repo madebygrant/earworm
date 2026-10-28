@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Settings</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css"><link rel="stylesheet" href="base.css">
+<style>
+.set { display: grid; grid-template-columns: 14ch 10ch 16ch 1fr; gap: 1ch; padding: 2px 8px; position: relative; white-space: nowrap; font-size: var(--s-14); margin-bottom: 2px;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--surface) 55%, transparent), transparent); }
+.set.cur { box-shadow: inset 3px 0 0 var(--cursor); }
+.set.cur .key { font-weight: 700; }
+.set .src { color: var(--muted); }
+.set .what { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.set .v.on { color: var(--cursor); } .set .v.off { color: var(--muted); }
+.set.locked .v { color: var(--warn); }
+h3 { font-size: var(--s-12); color: var(--muted); font-weight: 400; margin: 14px 0 6px 8px; }
+@media (max-width: 900px) { .set { grid-template-columns: 12ch 8ch 1fr; } .set .what { display: none; } }
+</style>
+</head>
+<body>
+<script src="directions/data.js"></script>
+<script src="shell.js"></script>
+<script>
+const GROUPS = [
+  ["How tracks are fetched and tagged", [
+    ["format", "opus", "config", "the audio format new downloads are written in"], ["convert", "on", "default", "tracks on disk follow the format when their playlist syncs"],
+    ["pick", "off", "--no-pick", "stop to choose tracks before a download", "locked"], ["lookup", "on", "default", "identify tracks with AcoustID and Deezer"],
+    ["apple", "on", "default", "try Apple Music when Deezer finds nothing"], ["parse", "on", "default", "read artist and title out of the video title"],
+    ["fix", "on", "default", "ask about tracks nothing could confirm"], ["rename", "on", "default", "rename files from the corrected tags"],
+    ["album", "on", "default", "fill an empty album tag with the playlist name"], ["cover", "on", "default", "fetch and embed cover art"],
+    ["m3u8", "on", "default", "write an .m3u8 beside the tracks"], ["loudness", "on", "config", "write ReplayGain and R128 loudness tags"], ["lyrics", "off", "config", "fetch lyrics from LRCLIB"]]],
+  ["How it looks and sounds", [
+    ["theme", "graphite", "config", "^t walks the five themes and remembers the one you stop on"], ["icons", "glyphs", "default", "● album, ▤ playlist, ◆ yours; nerd or text instead"],
+    ["notify", "on", "default", "ring the bell when a long run finishes"], ["intro", "on", "at start", "the opening animation"],
+    ["update_check", "on", "at start", "ask GitHub once a day for a newer release"], ["achievements", "on", "at start", "announce and remember achievements"]]],
+  ["Only in the file", [
+    ["dir", "~/Music", "config", "where folders are written"], ["acoustid", "set", "env", "the AcoustID key, never shown"], ["extra", "", "default", "arguments passed to yt-dlp"]]],
+];
+let i = 0;
+const rows = GROUPS.map(([g, rs]) => `<h3>${g}</h3>` + rs.map(([k, v, src, what, lock]) => `<div class="set ${i++ === 2 ? "cur" : ""} ${lock || ""}"><span class="key">${k}</span>
+  <span class="v ${v === "on" ? "on" : v === "off" ? "off" : ""}">${esc(v || "none")}</span><span class="src">${esc(src)}</span><span class="what">${esc(what)}</span></div>`).join("")).join("");
+mount({
+  head: { folder: "settings", right: "~/.config/earworm/config.toml" },
+  railOpts: { current: "Krautrock" },
+  main: `<section class="view"><p class="sub">Every setting with its value and where it came from. Enter or space switches one and writes it to the config.</p>${rows}</section>`,
+  side: `<h2>pick</h2><p class="say">Stop to choose tracks before a download.</p>
+    <dl class="kv"><dt>value</dt><dd class="warn">off</dd><dt>set by</dt><dd>--no-pick on the command line</dd></dl>
+    <p style="margin-top:12px">The flag would turn it off again at the next start, so this screen can't switch it. Start earworm without --no-pick to change it here.</p>`,
+  foot: { hints: [["j k", "move"], ["enter", "switch"], ["esc", "back to Krautrock"], ["h", "keys"]] },
+});
+</script>
+</body>
+</html>

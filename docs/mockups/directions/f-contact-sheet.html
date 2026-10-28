@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>F · Contact sheet</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Red+Hat+Display:wght@500;800&family=Red+Hat+Text:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root { color-scheme: dark;
+  --ground: #16181D; --sheet: #1D2026; --text: #F1F2F4; --muted: #A0A6B2; --rule: #30343D;
+  --good: #7CDDB2; --warn: #F5B867; --error: #FF8F87; --live: #9DB7FF; --grease: #E9E26A; }
+* { box-sizing: border-box; margin: 0; }
+html, body { height: 100%; }
+body { font: 14px/1.45 "Red Hat Text", system-ui, sans-serif; font-variant-numeric: tabular-nums; color: var(--text); background: var(--ground);
+  display: grid; grid-template-columns: 220px 1fr 340px; grid-template-rows: 1fr 30px; overflow: hidden; }
+button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--live); outline-offset: 2px; }
+.lights { position: fixed; left: 16px; top: 16px; width: 52px; height: 12px; background: radial-gradient(circle at 6px 6px, #ED6A5E 5.5px, transparent 6px), radial-gradient(circle at 26px 6px, #F4BF4F 5.5px, transparent 6px), radial-gradient(circle at 46px 6px, #61C554 5.5px, transparent 6px); }
+nav { padding: 48px 10px 10px; border-right: 1px solid var(--rule); overflow: auto; }
+nav .brand { font: 800 18px "Red Hat Display", sans-serif; padding: 0 8px 14px; }
+nav ul { list-style: none; padding: 0; }
+nav li { padding: 7px 8px; border-radius: 6px; display: flex; justify-content: space-between; gap: 8px; }
+nav li .nm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+nav li .c { color: var(--muted); font-size: 12px; }
+nav li .c.warn { color: var(--warn); }
+nav li[aria-current="true"] { background: var(--sheet); font-weight: 600; }
+nav h3 { font: 500 12px "Red Hat Text", sans-serif; color: var(--muted); padding: 14px 8px 4px; }
+
+main { overflow: auto; padding: 40px 28px 28px; min-width: 0; }
+.head { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap; }
+.head h1 { font: 800 40px/1 "Red Hat Display", sans-serif; letter-spacing: -.02em; }
+.head .stage { color: var(--live); font-weight: 600; }
+.head .count { margin-left: auto; color: var(--muted); }
+.legend { display: flex; gap: 16px; color: var(--muted); font-size: 12px; margin: 10px 0 20px; flex-wrap: wrap; }
+.legend i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+.sheet { display: grid; grid-template-columns: repeat(auto-fill, minmax(132px, 1fr)); gap: 18px 14px; }
+.tile { position: relative; cursor: pointer; }
+.frame { aspect-ratio: 1; border-radius: 4px; background: var(--sheet); border: 1px solid var(--rule); position: relative; overflow: hidden; display: grid; place-items: center; color: var(--muted);
+  font: 800 28px "Red Hat Display", sans-serif; }
+.frame .img { position: absolute; inset: 0; }
+.frame.dev .img { animation: develop 1.1s ease-out both; }
+@keyframes develop { from { filter: grayscale(1) brightness(2.2) contrast(.4); opacity: .2; } 60% { filter: grayscale(.4) brightness(1.3); opacity: 1; } }
+.frame.work::after { content: ""; position: absolute; inset: 0; background: linear-gradient(100deg, transparent 30%, rgb(157 183 255 / .28) 50%, transparent 70%); background-size: 250% 100%; animation: scan 1.1s linear infinite; }
+@keyframes scan { from { background-position: 120% 0; } to { background-position: -120% 0; } }
+.frame.gone .img { filter: grayscale(1) brightness(.5); }
+.tile.cur .frame { outline: 2px solid var(--text); outline-offset: 3px; }
+.chip { position: absolute; left: 6px; top: 6px; font-size: 11px; font-weight: 600; padding: 1px 7px; border-radius: 99px; background: rgb(22 24 29 / .85); }
+.tile b { display: block; font-weight: 600; font-size: 13px; margin-top: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.tile span.a { display: block; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.good { color: var(--good); } .warn { color: var(--warn); } .error { color: var(--error); } .muted { color: var(--muted); } .live { color: var(--live); }
+.dot-good { background: var(--good); } .dot-warn { background: var(--warn); } .dot-error { background: var(--error); } .dot-muted { background: var(--muted); } .dot-live { background: var(--live); }
+
+aside { grid-row: 1 / 3; grid-column: 3; border-left: 1px solid var(--rule); background: var(--sheet); padding: 40px 24px 24px; overflow: auto; }
+aside .cover { aspect-ratio: 1; border-radius: 4px; position: relative; overflow: hidden; }
+aside .loupe { font-size: 12px; color: var(--muted); margin-top: 8px; }
+aside h2 { font: 800 28px/1.1 "Red Hat Display", sans-serif; letter-spacing: -.01em; margin-top: 18px; }
+aside .by { font-size: 16px; margin-top: 4px; }
+aside .say { margin-top: 16px; padding: 12px 14px; border-radius: 6px; background: var(--ground); }
+aside .say b { display: block; font-size: 12px; }
+aside dl { display: grid; grid-template-columns: 52px 1fr; gap: 4px 10px; margin-top: 14px; font-size: 13px; }
+aside dt { color: var(--muted); } aside dd { word-break: break-all; }
+aside .acts { display: flex; gap: 8px; margin-top: 18px; }
+.btn { height: 34px; padding: 0 14px; border-radius: 6px; border: 1px solid var(--rule); font-weight: 600; }
+.btn.primary { background: var(--text); color: var(--ground); border-color: var(--text); }
+footer { grid-column: 1 / 3; display: flex; align-items: center; gap: 16px; padding: 0 16px; border-top: 1px solid var(--rule); font-size: 12px; color: var(--muted); }
+footer .r { margin-left: auto; display: flex; gap: 14px; }
+kbd { font: 600 11px/1 "Red Hat Text", sans-serif; padding: 2px 5px; border: 1px solid var(--rule); border-radius: 4px; color: var(--text); margin-right: 4px; }
+@media (max-width: 1150px) { body { grid-template-columns: 220px 1fr; } aside { display: none; } }
+@media (max-width: 760px) { body { grid-template-columns: 1fr; } nav { display: none; } main { padding-top: 48px; } footer { grid-column: 1; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<span class="lights" aria-hidden="true"></span>
+<nav aria-label="Library"><p class="brand">earworm</p><h3>Playlists</h3><ul id="pl"></ul><h3>Albums</h3><ul id="al"></ul><h3>Your files</h3><ul id="lo"></ul></nav>
+<main>
+  <div class="head"><h1>Krautrock</h1><span class="stage" id="stage">Reading the playlist</span><span class="count" id="count"></span></div>
+  <div class="legend"><span><i class="dot-good"></i>confirmed</span><span><i class="dot-warn"></i>worth a look</span><span><i class="dot-error"></i>failed</span><span><i class="dot-live"></i>in progress</span><span><i class="dot-muted"></i>waiting or untouched</span></div>
+  <div class="sheet" id="sheet"></div>
+</main>
+<aside id="detail"></aside>
+<footer><span>⟳ following</span><span class="r"><span><kbd>←</kbd><kbd>→</kbd>move</span><span><kbd>e</kbd>edit</span><span><kbd>v</kbd>only unconfirmed</span><span><kbd>h</kbd>keys</span></span></footer>
+<script src="data.js"></script>
+<script>
+// Grouping the rail by kind replaces the TUI's a filter with something always visible.
+const li = f => `<li ${f.open ? 'aria-current="true"' : ""}><span class="nm">${esc(f.name)}</span><span class="c ${f.missing ? "warn" : ""}">${f.missing ? f.missing + " missing" : f.count}</span></li>`;
+document.getElementById("pl").innerHTML = FOLDERS.filter(f => f.kind === "playlist").map(li).join("");
+document.getElementById("al").innerHTML = FOLDERS.filter(f => f.kind === "album").map(li).join("");
+document.getElementById("lo").innerHTML = FOLDERS.filter(f => f.kind === "local").map(li).join("");
+
+const sheet = document.getElementById("sheet");
+sheet.innerHTML = TRACKS.map(t => `<div class="tile" data-i="${t.n - 1}"><div class="frame"></div><b>${esc(t.title)}</b><span class="a">${esc(t.artist)}</span></div>`).join("");
+const tiles = [...sheet.children];
+let cursor = 0, pinned = false, last = [];
+sheet.onclick = e => { const t = e.target.closest(".tile"); if (t) { cursor = +t.dataset.i; pinned = true; paint(last); } };
+
+function detail(i, st) {
+  const t = TRACKS[i], tone = TONE[st], art = !["queued", "fetching", "fetched", "failed"].includes(st);
+  const say = { ok: `Confirmed by ${t.source}.`, manual: "You chose this match.", "on disk": "Already in the folder.", guessed: "Read off the video title. Nothing confirmed it.",
+    unsure: `${t.source} found a match that didn't fit.`, failed: "Video unavailable in your country.", gone: "This video has left the playlist.",
+    queued: "Waiting its turn.", fetching: "Downloading.", fetched: "Looking it up.", tagging: "Writing tags and art." }[st];
+  const act = tone === "warn" ? `<button class="btn primary">Search again</button><button class="btn">Edit tags</button>` : st === "failed" ? `<button class="btn primary">Retry</button>` : st === "gone" ? `<button class="btn">Delete file</button>` : `<button class="btn">Edit tags</button>`;
+  document.getElementById("detail").innerHTML = `<div class="cover" style="background:${art ? sleeve(t.album) : "var(--ground)"}"></div>
+    <p class="loupe">${art ? "1000 × 1000, embedded" : "No sleeve yet"}</p><h2>${esc(t.title)}</h2><p class="by">${esc(t.artist)}</p>
+    <div class="say"><b class="${tone}">${st}</b>${say}</div><dl><dt>album</dt><dd>${esc(t.album)}, ${t.year}</dd><dt>file</dt><dd>${esc(t.file)}</dd></dl><div class="acts">${act}</div>`;
+}
+
+const had = new Set(), shown = [];
+function paint(state) {
+  state.forEach((st, i) => {
+    const t = TRACKS[i], tone = TONE[st], art = !["queued", "fetching", "fetched", "failed"].includes(st);
+    tiles[i].classList.toggle("cur", i === cursor);
+    if (shown[i] === st) return;
+    shown[i] = st;
+    const f = tiles[i].querySelector(".frame"), fresh = art && !had.has(i);
+    art ? had.add(i) : had.delete(i);
+    f.className = `frame ${tone === "live" ? "work" : ""} ${fresh && last.length ? "dev" : ""} ${st === "gone" ? "gone" : ""}`;
+    f.innerHTML = (art ? `<div class="img" style="background:${sleeve(t.album)}"></div>` : st === "failed" ? "!" : t.n) + `<span class="chip ${tone}">${st}</span>`;
+  });
+  detail(cursor, state[cursor]);
+}
+startRun((state, done, total, active) => {
+  if (active >= 0 && !pinned) cursor = active;
+  paint(state); last = state.slice();
+  document.getElementById("stage").textContent = active < 0 ? (done === total ? "Finished" : "Reading the playlist") : `${state[active]} ${TRACKS[active].title}`;
+  document.getElementById("count").textContent = `${done} of ${total} new tracks`;
+  if (!pinned) tiles[cursor].scrollIntoView({ block: "nearest" });
+}, { step: 460 });
+</script>
+</body>
+</html>

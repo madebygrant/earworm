@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>C · Phosphor</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<style>
+:root, [data-theme="warm"] { --text:#ECDFC0; --accent:#D6B460; --cursor:#60B29E; --warn:#D69A4E; --error:#D67E70; --muted:#9E9480; --rule:#5C5442; --surface:#2E2921; --unsure:#A89B7E; --ink:#181210; --near:rgb(55 40 37); --far:rgb(18 1 22); }
+[data-theme="light"] { --text:#26221E; --accent:#7C540E; --cursor:#116E62; --warn:#845206; --error:#AA2828; --muted:#696258; --rule:#ACA496; --surface:#FDFBF7; --unsure:#746038; --ink:#FAF8F4; --near:rgb(247 243 236); --far:rgb(231 225 214); }
+[data-theme="cool"] { --text:#E2E8F0; --accent:#7EB0DE; --cursor:#5ECEC4; --warn:#DEAA5A; --error:#EC8480; --muted:#96A2B0; --rule:#546272; --surface:#222A34; --unsure:#A0AAB8; --ink:#10141A; --near:rgb(44 52 62); --far:rgb(14 18 24); }
+[data-theme="neon"] { --text:#E2E8FF; --accent:#FF5CD5; --cursor:#56F0FF; --warn:#F6E25A; --error:#FF5E78; --muted:#A696CD; --rule:#563078; --surface:#180E26; --unsure:#B4A8D7; --ink:#0A0610; --near:rgb(26 10 44); --far:rgb(8 4 14); }
+* { box-sizing: border-box; margin: 0; }
+html, body { height: 100%; }
+body { font: 14px/1.5 "JetBrains Mono", ui-monospace, monospace; color: var(--text);
+  background: linear-gradient(160deg, var(--near) 0%, var(--far) 76%, var(--far) 100%);
+  display: grid; grid-template-rows: 40px 1fr 30px; overflow: hidden; transition: background .3s; }
+button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+:focus-visible { outline: 1px solid var(--accent); outline-offset: 0; }
+
+header { display: flex; align-items: center; gap: 0; padding: 0 16px 0 84px; border-bottom: 1px solid var(--rule); white-space: nowrap; position: relative; }
+header::before { content: ""; position: absolute; left: 16px; top: 14px; width: 52px; height: 12px;
+  background: radial-gradient(circle at 6px 6px, #ED6A5E 5.5px, transparent 6px), radial-gradient(circle at 26px 6px, #F4BF4F 5.5px, transparent 6px), radial-gradient(circle at 46px 6px, #61C554 5.5px, transparent 6px); }
+header .sep { color: var(--rule); padding: 0 10px; }
+header .brand { color: var(--accent); }
+header .stage { color: var(--accent); font-weight: 700; }
+header .spin { color: var(--accent); display: inline-block; width: 2ch; }
+header .settings { margin-left: auto; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
+header .settings b { font-weight: 400; color: var(--text); }
+
+main { display: grid; grid-template-columns: 232px 1fr 340px; min-height: 0; }
+.rail { border-right: 1px solid var(--rule); overflow: auto; padding: 8px 0; }
+.rail .q { margin: 0 10px 8px; padding: 4px 8px; border: 1px solid var(--rule); color: var(--muted); font-size: 12px; }
+.rail .q .k { color: var(--accent); }
+.rail ul { list-style: none; padding: 0; }
+.rail li { display: grid; grid-template-columns: 22px 1fr auto; gap: 8px; align-items: center; padding: 3px 10px; }
+.rail li .ic { color: var(--muted); text-align: center; }
+.rail li .ic.album { color: var(--accent); }
+.rail li .nm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rail li .ct { color: var(--muted); font-size: 12px; }
+.rail li .ct.miss { color: var(--warn); }
+.rail li[aria-current="true"] { background: var(--accent); color: var(--ink); }
+.rail li[aria-current="true"] .ic, .rail li[aria-current="true"] .ct { color: var(--ink); }
+
+.list { overflow: auto; min-width: 0; padding: 6px 0; }
+.r { display: grid; grid-template-columns: 4ch 10ch 1fr 18ch; gap: 1ch; padding: 2px 12px 2px 8px; position: relative; white-space: nowrap;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--surface) 55%, transparent), transparent); margin-bottom: 2px; }
+.r::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; }
+.r.cur::before { background: var(--cursor); }
+.r.cur .t { font-weight: 700; }
+.r .n { text-align: right; color: var(--muted); }
+.r .t { overflow: hidden; text-overflow: ellipsis; }
+.r .t .a { color: var(--muted); }
+.r .src { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.good { color: var(--cursor); } .warn { color: var(--warn); } .error { color: var(--error); } .muted { color: var(--muted); } .live { color: var(--accent); font-weight: 700; }
+.r.flash { animation: flash .6s steps(3); }
+@keyframes flash { 0%, 66% { background: color-mix(in srgb, var(--cursor) 22%, transparent); } }
+
+.detail { border-left: 1px solid var(--rule); padding: 10px 14px; overflow: auto; }
+.detail .cover { width: 100%; aspect-ratio: 1; image-rendering: pixelated; margin-bottom: 12px; border: 1px solid var(--rule); }
+.detail h2 { font-size: 14px; font-weight: 700; margin-bottom: 12px; }
+.kv { display: grid; grid-template-columns: 8ch 1fr; column-gap: 1ch; row-gap: 2px; }
+.kv dt { color: var(--muted); }
+.kv dd { word-break: break-all; }
+.detail .acts { margin-top: 14px; display: flex; gap: 12px; flex-wrap: wrap; }
+.detail .acts button { color: var(--accent); }
+.detail .acts .k { color: var(--ink); background: var(--accent); padding: 0 .5ch; margin-right: .5ch; }
+
+footer { display: flex; align-items: center; gap: 2ch; padding: 0 16px; border-top: 1px solid var(--rule); font-size: 12px; white-space: nowrap; overflow: hidden; }
+#tally { display: flex; gap: 2ch; }
+footer .right { margin-left: auto; display: flex; gap: 2ch; color: var(--muted); }
+footer .k { color: var(--accent); }
+
+.switch { position: fixed; left: 12px; bottom: 40px; display: flex; gap: 0; font-size: 12px; border: 1px solid var(--rule); background: var(--surface); }
+.switch button { padding: 3px 10px; color: var(--muted); }
+.switch button[aria-pressed="true"] { background: var(--accent); color: var(--ink); }
+
+@media (max-width: 1100px) { main { grid-template-columns: 232px 1fr; } .detail { display: none; } }
+@media (max-width: 860px) { main { grid-template-columns: 1fr; } .rail { display: none; } header .settings { display: none; } .r { grid-template-columns: 3ch 9ch 1fr; } .r .src { display: none; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<header>
+  <span class="brand">earworm</span><span class="sep">·</span><span>Krautrock</span><span class="sep">·</span>
+  <span class="spin" id="spin">⠋</span><span class="stage" id="stage">fetching</span><span class="sep">·</span><span id="count">0/14</span>
+  <span class="settings">format <b>opus</b> · lookup <b>on</b> · cover <b>on</b> · m3u8 <b>on</b> · rename <b>on</b></span>
+</header>
+<main>
+  <nav class="rail" aria-label="Library">
+    <div class="q"><span class="k">/</span> filter folders</div>
+    <ul id="folders"></ul>
+  </nav>
+  <section class="list" id="rows"></section>
+  <aside class="detail" id="detail"></aside>
+</main>
+<footer><span id="tally"></span><span class="right"><span>⟳ following</span><span><span class="k">e</span> edit</span><span><span class="k">,</span> settings</span><span><span class="k">h</span> keys</span></span></footer>
+<div class="switch" role="group" aria-label="Theme">
+  <button data-t="warm">warm</button><button data-t="light">light</button><button data-t="cool">cool</button><button data-t="neon">neon</button>
+</div>
+<script src="data.js"></script>
+<script>
+const root = document.documentElement;
+const buttons = document.querySelectorAll(".switch button");
+function setTheme(t) { root.dataset.theme = t; buttons.forEach(b => b.setAttribute("aria-pressed", b.dataset.t === t)); }
+buttons.forEach(b => b.onclick = () => setTheme(b.dataset.t));
+setTheme("warm");
+addEventListener("keydown", e => { if (e.ctrlKey && e.key === "t") { e.preventDefault(); const ts = [...buttons].map(b => b.dataset.t); setTheme(ts[(ts.indexOf(root.dataset.theme) + 1) % ts.length]); } });
+
+const icon = { album: "●", playlist: "▤", local: "◆" };
+document.getElementById("folders").innerHTML = FOLDERS.map(f => `
+  <li ${f.open ? 'aria-current="true"' : ""}><span class="ic ${f.kind}">${icon[f.kind]}</span><span class="nm">${esc(f.name)}</span>
+  <span class="ct ${f.missing ? "miss" : ""}">${f.missing ? f.missing + "!" : f.count}</span></li>`).join("");
+
+// The TUI draws covers with kitty graphics where it can; here a coarse pixel grid stands in for that look.
+function pixelCover(name) {
+  const c = document.createElement("canvas"); c.width = c.height = 16;
+  const g = c.getContext("2d"), h = hash(name), a = h % 360, b = (a + 60 + (h >> 7) % 120) % 360;
+  for (let y = 0; y < 16; y++) for (let x = 0; x < 16; x++) {
+    const v = (Math.sin((x + (h & 7)) * .5) + Math.cos((y + (h >> 3 & 7)) * .45) + ((hash(name + x + "," + y) & 3) / 6));
+    g.fillStyle = v > .9 ? `hsl(${b} 60% 62%)` : v > 0 ? `hsl(${a} 45% 34%)` : `hsl(${a} 40% 16%)`;
+    g.fillRect(x, y, 1, 1);
+  }
+  return c.toDataURL();
+}
+const covers = {};
+function detail(i, st) {
+  const t = TRACKS[i];
+  covers[t.album] ??= pixelCover(t.album);
+  const act = TONE[st] === "warn" ? `<button><span class="k">T</span>search again</button><button><span class="k">e</span>edit</button>`
+    : st === "failed" ? `<button><span class="k">r</span>retry failed</button>` : st === "gone" ? `<button><span class="k">D</span>delete departed</button>` : `<button><span class="k">e</span>edit</button><button><span class="k">u</span>undo</button>`;
+  document.getElementById("detail").innerHTML = `
+    <img class="cover" src="${covers[t.album]}" alt="">
+    <h2>${esc(t.title)} - ${esc(t.artist)}</h2>
+    <dl class="kv"><dt>status</dt><dd class="${TONE[st]}">${st}</dd><dt>artist</dt><dd>${esc(t.artist)}</dd><dt>title</dt><dd>${esc(t.title)}</dd>
+    <dt>album</dt><dd>${esc(t.album)}</dd><dt>year</dt><dd>${t.year}</dd><dt>source</dt><dd>${esc(t.source)}</dd><dt>file</dt><dd>${esc(t.file)}</dd></dl>
+    <div class="acts">${act}</div>`;
+}
+
+const spin = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"; let s = 0;
+setInterval(() => { document.getElementById("spin").textContent = spin[s++ % spin.length]; }, 90);
+let cursor = 0; const prev = [];
+startRun((state, done, total, active) => {
+  if (active >= 0) cursor = active;
+  const tally = {};
+  document.getElementById("rows").innerHTML = state.map((st, i) => {
+    const t = TRACKS[i], settled = prev[i] && TONE[prev[i]] === "live" && TONE[st] !== "live";
+    tally[st] = (tally[st] || 0) + 1;
+    return `<div class="r ${i === cursor ? "cur" : ""} ${settled ? "flash" : ""}"><span class="n">${t.n}</span><span class="${TONE[st]}">${st}</span>
+      <span class="t">${esc(t.title)} <span class="a">- ${esc(t.artist)}</span></span><span class="src">${TONE[st] === "live" || st === "queued" ? "" : esc(t.source)}</span></div>`;
+  }).join("");
+  state.forEach((v, i) => prev[i] = v);
+  document.getElementById("tally").innerHTML = Object.entries(tally).map(([k, v]) => `<span class="${TONE[k]}">${v} ${k}</span>`).join("");
+  document.getElementById("count").textContent = `${done}/${total}`;
+  document.getElementById("stage").textContent = active < 0 ? (done === total ? "finished" : "reading") : state[active];
+  document.getElementById("spin").style.visibility = active < 0 ? "hidden" : "visible";
+  detail(cursor, state[cursor]);
+  document.querySelector('.r.cur')?.scrollIntoView({ block: 'nearest' });
+});
+</script>
+</body>
+</html>

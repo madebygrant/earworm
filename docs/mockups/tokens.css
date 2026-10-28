@@ -1,0 +1,26 @@
+/* Roles match Palette in src/theme.rs, so a theme here is the same set of slots the TUI paints with.
+   graphite is the desktop default; the other four are the TUI's own values. */
+:root, [data-theme="graphite"] { color-scheme: dark;
+  --text:#F1F2F4; --accent:#9DB7FF; --cursor:#7CDDB2; --warn:#F5B867; --error:#FF8F87; --muted:#A0A6B2;
+  --rule:#343842; --surface:#262A31; --unsure:#B9BEC8; --ink:#16181D; --near:#1D2026; --far:#121418; }
+@media (prefers-color-scheme: light) { :root:not([data-theme]) { color-scheme: light;
+  --text:#26221E; --accent:#7C540E; --cursor:#116E62; --warn:#845206; --error:#AA2828; --muted:#696258;
+  --rule:#ACA496; --surface:#FDFBF7; --unsure:#746038; --ink:#FAF8F4; --near:#F7F3EC; --far:#E7E1D6; } }
+[data-theme="light"] { color-scheme: light;
+  --text:#26221E; --accent:#7C540E; --cursor:#116E62; --warn:#845206; --error:#AA2828; --muted:#696258;
+  --rule:#ACA496; --surface:#FDFBF7; --unsure:#746038; --ink:#FAF8F4; --near:#F7F3EC; --far:#E7E1D6; }
+[data-theme="warm"] { color-scheme: dark;
+  --text:#ECDFC0; --accent:#D6B460; --cursor:#60B29E; --warn:#D69A4E; --error:#D67E70; --muted:#9E9480;
+  --rule:#5C5442; --surface:#2E2921; --unsure:#A89B7E; --ink:#181210; --near:#372825; --far:#120116; }
+[data-theme="cool"] { color-scheme: dark;
+  --text:#E2E8F0; --accent:#7EB0DE; --cursor:#5ECEC4; --warn:#DEAA5A; --error:#EC8480; --muted:#96A2B0;
+  --rule:#546272; --surface:#222A34; --unsure:#A0AAB8; --ink:#10141A; --near:#2C343E; --far:#0E1218; }
+[data-theme="neon"] { color-scheme: dark;
+  --text:#E2E8FF; --accent:#FF5CD5; --cursor:#56F0FF; --warn:#F6E25A; --error:#FF5E78; --muted:#A696CD;
+  --rule:#563078; --surface:#180E26; --unsure:#B4A8D7; --ink:#0A0610; --near:#1A0A2C; --far:#08040E; }
+:root {
+  --font: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  --s-11: 11px; --s-12: 12px; --s-13: 13px; --s-14: 14px; --s-17: 17px; --s-22: 22px; --s-28: 28px;
+  --row: 26px; --gutter: 16px; --rail: 232px; --detail: 340px; --tile: 124px;
+  --t-word: 120ms; --t-bar: 200ms; --t-sheet: 160ms; --t-develop: 340ms;
+}

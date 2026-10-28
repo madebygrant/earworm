@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>A · After hours</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible+Next:wght@400;700&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+<style>
+:root {
+  --far: #0C1412; --near: #18241F; --surface: #1F2D27;
+  --text: #EDE8DC; --accent: #E0B35A; --cursor: #7FD1B4; --warn: #E39A4E;
+  --error: #EE8070; --muted: #9AA69E; --unsure: #B9B19A; --rule: #3A4A42; --ink: #10180F;
+  --row-hi: rgb(127 209 180 / .07);
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: light) { :root:not([data-theme="dark"]) {
+  --far: #DDE5DF; --near: #EEF2EE; --surface: #FBFCFA;
+  --text: #1B2622; --accent: #8A5A0E; --cursor: #137A62; --warn: #8C5A0A;
+  --error: #B23A30; --muted: #5E6B64; --unsure: #6B6244; --rule: #B9C4BC; --ink: #FBFCFA;
+  --row-hi: rgb(19 122 98 / .08); color-scheme: light;
+}}
+:root[data-theme="light"] {
+  --far: #DDE5DF; --near: #EEF2EE; --surface: #FBFCFA;
+  --text: #1B2622; --accent: #8A5A0E; --cursor: #137A62; --warn: #8C5A0A;
+  --error: #B23A30; --muted: #5E6B64; --unsure: #6B6244; --rule: #B9C4BC; --ink: #FBFCFA;
+  --row-hi: rgb(19 122 98 / .08); color-scheme: light;
+}
+* { box-sizing: border-box; margin: 0; }
+html, body { height: 100%; }
+body {
+  font: 14px/1.45 "Atkinson Hyperlegible Next", system-ui, sans-serif;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+  background: linear-gradient(135deg, var(--near) 0%, var(--far) 76%, var(--far) 100%);
+  display: grid; grid-template-rows: 48px 1fr auto 28px; overflow: hidden;
+}
+button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+header { display: flex; align-items: center; gap: 16px; padding: 0 16px 0 84px; position: relative; -webkit-app-region: drag; }
+header::before { content: ""; position: absolute; left: 16px; top: 18px; width: 52px; height: 12px;
+  background: radial-gradient(circle at 6px 6px, #ED6A5E 5.5px, transparent 6px), radial-gradient(circle at 26px 6px, #F4BF4F 5.5px, transparent 6px), radial-gradient(circle at 46px 6px, #61C554 5.5px, transparent 6px); }
+.brand { font-weight: 700; color: var(--accent); letter-spacing: .01em; }
+.run { margin-left: auto; display: flex; gap: 20px; align-items: baseline; }
+.run .folder { font-size: 17px; font-weight: 700; }
+.run .stage { font-size: 17px; color: var(--accent); min-width: 6ch; }
+.run .count { color: var(--muted); }
+.progress { position: absolute; left: 0; right: 0; bottom: 0; height: 2px; background: var(--rule); }
+.progress i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .2s ease-out; }
+
+main { display: grid; grid-template-columns: 240px 1fr 320px; min-height: 0; border-top: 1px solid transparent; }
+.rail { border-right: 1px solid var(--rule); display: flex; flex-direction: column; min-height: 0; }
+.rail .tools { padding: 12px 12px 8px; display: grid; gap: 8px; }
+.field { display: flex; align-items: center; gap: 8px; height: 30px; padding: 0 10px; border: 1px solid var(--rule); border-radius: 3px; color: var(--muted); font-size: 12px; }
+.field kbd { margin-left: auto; }
+.seg { display: flex; border: 1px solid var(--rule); border-radius: 3px; font-size: 12px; }
+.seg button { flex: 1; padding: 4px 0; color: var(--muted); }
+.seg button[aria-pressed="true"] { background: var(--surface); color: var(--text); }
+.seg + .seg { margin-top: -2px; }
+.folders { list-style: none; padding: 4px 0; overflow: auto; }
+.folders li { display: grid; grid-template-columns: 36px 1fr auto; gap: 10px; align-items: center; height: 52px; padding: 0 12px; position: relative; }
+.folders li[aria-current="true"] { background: var(--row-hi); }
+.folders li[aria-current="true"]::before { content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px; background: var(--cursor); }
+.art { width: 36px; height: 36px; border-radius: 3px; background-size: cover; display: grid; place-items: center; color: var(--muted); }
+.art.mosaic { display: grid; grid-template: 1fr 1fr / 1fr 1fr; gap: 1px; overflow: hidden; background: var(--rule); place-items: stretch; }
+.art.mosaic span { border-radius: 0; }
+.art.local { background: var(--surface); border: 1px solid var(--rule); font-size: 14px; }
+.folders .name { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.folders .sub { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.folders .sub.live { color: var(--accent); }
+.pill { font-size: 11px; padding: 1px 6px; border-radius: 3px; border: 1px solid currentColor; color: var(--warn); white-space: nowrap; }
+
+.list { min-width: 0; overflow: auto; }
+.list h1 { font-size: 22px; line-height: 1.2; padding: 16px 16px 2px; }
+.list .meta { padding: 0 16px 12px; color: var(--muted); font-size: 12px; }
+table { width: 100%; border-collapse: collapse; }
+td { height: 32px; padding: 0 8px; white-space: nowrap; }
+tr { position: relative; }
+tr.cur td { background: var(--row-hi); }
+tr.cur td:first-child { box-shadow: inset 3px 0 0 var(--cursor); }
+td.n { width: 44px; text-align: right; color: var(--muted); padding-left: 16px; }
+td.st { width: 92px; }
+td.t { max-width: 0; overflow: hidden; text-overflow: ellipsis; }
+td.t b { font-weight: 700; }
+td.t span { color: var(--muted); margin-left: 10px; }
+td.src { width: 120px; color: var(--muted); font-size: 12px; padding-right: 16px; }
+.w { transition: color .12s; }
+.w.good { color: var(--cursor); } .w.warn { color: var(--warn); } .w.error { color: var(--error); }
+.w.muted { color: var(--muted); } .w.live { color: var(--accent); font-weight: 700; }
+.w.settle { animation: settle .5s ease-out; }
+@keyframes settle { from { background: var(--row-hi); box-shadow: 0 0 0 4px var(--row-hi); } }
+
+.detail { border-left: 1px solid var(--rule); background: var(--surface); padding: 20px; overflow: auto; }
+.detail .cover { width: 100%; aspect-ratio: 1; border-radius: 3px; margin-bottom: 16px; }
+.detail h2 { font-size: 22px; line-height: 1.2; }
+.detail .by { font-size: 17px; color: var(--muted); margin-bottom: 16px; }
+.verdict { display: flex; gap: 8px; align-items: baseline; padding: 10px 0; border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule); margin-bottom: 12px; }
+dl { display: grid; grid-template-columns: 64px 1fr; gap: 6px 12px; font-size: 13px; }
+dt { color: var(--muted); }
+dd.path { font: 12px/1.5 "JetBrains Mono", monospace; word-break: break-all; }
+.actions { display: flex; gap: 8px; margin-top: 20px; }
+.btn { height: 30px; padding: 0 12px; border-radius: 3px; border: 1px solid var(--rule); }
+.btn.primary { background: var(--accent); color: var(--ink); border-color: var(--accent); font-weight: 700; }
+
+.log { border-top: 1px solid var(--rule); height: 128px; overflow: hidden; padding: 8px 16px; font: 12px/1.6 "JetBrains Mono", monospace; color: var(--muted); }
+.log .warn { color: var(--warn); } .log .error { color: var(--error); }
+
+footer { display: flex; align-items: center; gap: 16px; padding: 0 16px; border-top: 1px solid var(--rule); font-size: 12px; color: var(--muted); }
+footer .tally { display: flex; gap: 14px; }
+footer .tally b { font-weight: 400; }
+footer .hints { margin-left: auto; display: flex; gap: 16px; }
+footer .hot { color: var(--error); }
+kbd { font: 11px/1 "Atkinson Hyperlegible Next", sans-serif; padding: 2px 5px; border: 1px solid var(--rule); border-bottom-width: 2px; border-radius: 3px; color: var(--text); margin-right: 4px; }
+
+.switch { position: fixed; left: 50%; transform: translateX(-50%); top: 10px; z-index: 2; display: flex; gap: 4px; font-size: 12px; -webkit-app-region: no-drag; }
+.switch button { padding: 4px 8px; border-radius: 3px; color: var(--muted); border: 1px solid var(--rule); }
+.switch button[aria-pressed="true"] { color: var(--text); background: var(--surface); }
+
+@media (max-width: 1100px) { main { grid-template-columns: 240px 1fr; } .detail { display: none; } }
+@media (max-width: 900px) {
+  main { grid-template-columns: 64px 1fr; }
+  .rail .tools, .folders .name, .folders .sub, .folders .pill { display: none; }
+  .folders li { grid-template-columns: 36px; padding: 0 14px; }
+  td.src { display: none; }
+  .run .folder { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<div class="switch" role="group" aria-label="Theme"><button data-t="dark">Dark</button><button data-t="light">Light</button></div>
+<header>
+  <span class="brand">earworm</span>
+  <div class="run"><span class="folder">Krautrock</span><span class="stage" id="stage">fetching</span><span class="count" id="count">0/14</span></div>
+  <div class="progress"><i id="bar"></i></div>
+</header>
+<main>
+  <nav class="rail" aria-label="Library">
+    <div class="tools">
+      <div class="field">Filter folders <kbd>/</kbd></div>
+      <div class="seg" role="group" aria-label="Sort"><button aria-pressed="true">Name</button><button>Synced</button><button>Missing</button></div>
+      <div class="seg" role="group" aria-label="Kind"><button aria-pressed="true">All</button><button>Albums</button><button>Playlists</button></div>
+    </div>
+    <ul class="folders" id="folders"></ul>
+  </nav>
+  <section class="list">
+    <h1>Krautrock</h1>
+    <p class="meta">Playlist of 18 tracks in music/Krautrock</p>
+    <table><tbody id="rows"></tbody></table>
+  </section>
+  <aside class="detail" id="detail"></aside>
+</main>
+<div class="log" id="log"></div>
+<footer>
+  <div class="tally" id="tally"></div>
+  <div class="hints"><span>⟳ following</span><span><kbd>l</kbd><span class="hot">! log</span></span><span><kbd>e</kbd>edit</span><span><kbd>h</kbd>keys</span></div>
+</footer>
+<script src="data.js"></script>
+<script>
+const root = document.documentElement;
+document.querySelectorAll(".switch button").forEach(b => {
+  b.onclick = () => { root.dataset.theme = b.dataset.t; mark(); };
+});
+function mark() {
+  const t = root.dataset.theme || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+  document.querySelectorAll(".switch button").forEach(b => b.setAttribute("aria-pressed", b.dataset.t === t));
+}
+mark();
+
+function art(f) {
+  if (f.kind === "local") return `<div class="art local" aria-hidden="true">◆</div>`;
+  if (f.kind === "playlist") {
+    const picks = TRACKS.slice(hash(f.name) % 10, hash(f.name) % 10 + 4);
+    return `<div class="art mosaic" aria-hidden="true">${picks.map(t => `<span style="background:${sleeve(t.album)}"></span>`).join("")}</div>`;
+  }
+  return `<div class="art" style="background:${sleeve(f.name)}" aria-hidden="true"></div>`;
+}
+document.getElementById("folders").innerHTML = FOLDERS.map(f => `
+  <li ${f.open ? 'aria-current="true"' : ""}>${art(f)}
+    <div style="min-width:0"><div class="name">${esc(f.name)}</div>
+    <div class="sub ${f.note === "syncing" ? "live" : ""}">${f.kind === "album" ? esc(f.artist) : f.count + " tracks"}${f.note === "syncing" ? ", syncing" : ""}</div></div>
+    ${f.missing ? `<span class="pill">${f.missing} missing</span>` : ""}
+  </li>`).join("");
+
+document.getElementById("log").innerHTML = LOG.map(([c, l]) => `<div class="${c}">${esc(l)}</div>`).join("");
+
+const prev = [];
+function detail(i, st) {
+  const t = TRACKS[i], tone = TONE[st];
+  const say = {
+    ok: `Confirmed by ${t.source}`, manual: "You picked this match", "on disk": "Already on disk, tags read from the file",
+    guessed: "Parsed from the video title. Nothing confirmed it.", unsure: `${t.source} found a match that didn't fit`,
+    failed: "The download failed. The log has the reason.", gone: "This video has left the playlist",
+    queued: "Waiting its turn", fetching: "Downloading", fetched: "Downloaded, looking it up", tagging: "Writing tags",
+  }[st];
+  const act = tone === "warn" ? `<button class="btn primary">Search again</button><button class="btn">Edit tags</button>`
+    : st === "failed" ? `<button class="btn primary">Retry</button>`
+    : st === "gone" ? `<button class="btn">Delete file</button>` : `<button class="btn">Edit tags</button>`;
+  document.getElementById("detail").innerHTML = `
+    <div class="cover" style="background:${sleeve(t.album)}"></div>
+    <h2>${esc(t.title)}</h2><p class="by">${esc(t.artist)}</p>
+    <p class="verdict"><span class="w ${tone}">${st}</span><span>${say}</span></p>
+    <dl><dt>album</dt><dd>${esc(t.album)}</dd><dt>year</dt><dd>${t.year}</dd><dt>file</dt><dd class="path">${esc(t.file)}</dd></dl>
+    <div class="actions">${act}</div>`;
+}
+
+let cursor = 0;
+startRun((state, done, total, active) => {
+  if (active >= 0) cursor = active;
+  const tally = {};
+  document.getElementById("rows").innerHTML = state.map((st, i) => {
+    const t = TRACKS[i], changed = prev[i] && prev[i] !== st && !TONE[st].startsWith("live") && TONE[prev[i]] === "live";
+    tally[st] = (tally[st] || 0) + 1;
+    return `<tr class="${i === cursor ? "cur" : ""}"><td class="n">${t.n}</td>
+      <td class="st"><span class="w ${TONE[st]} ${changed ? "settle" : ""}">${st}</span></td>
+      <td class="t"><b>${esc(t.title)}</b><span>${esc(t.artist)}</span></td>
+      <td class="src">${["queued", "fetching", "fetched", "tagging"].includes(st) ? "" : esc(t.source)}</td></tr>`;
+  }).join("");
+  state.forEach((s, i) => prev[i] = s);
+  document.getElementById("tally").innerHTML = Object.entries(tally).map(([k, v]) => `<span><b class="w ${TONE[k]}">${v} ${k}</b></span>`).join("");
+  document.getElementById("count").textContent = `${done}/${total}`;
+  document.getElementById("stage").textContent = active < 0 ? (done === total ? "finished" : "reading") : state[active];
+  document.getElementById("bar").style.width = `${done / total * 100}%`;
+  document.title = `earworm  Krautrock  ${done}/${total}`;
+  detail(cursor, state[cursor]);
+  document.querySelector('tr.cur')?.scrollIntoView({ block: 'nearest' });
+});
+</script>
+</body>
+</html>

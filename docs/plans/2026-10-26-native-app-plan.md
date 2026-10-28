@@ -9,7 +9,11 @@ hints; re-check before acting. On approval this is saved as
 earworm is a 40k-line Rust TUI. The request is a real desktop GUI, chosen
 over wrapping the TUI in a terminal window. Decisions made: **the TUI stays**
 as a supported front end on a shared core; the GUI is **Tauri 2 with Svelte
-and TypeScript**; the first release targets **macOS and Linux**.
+and TypeScript**; the first release targets **macOS and Linux**. How it
+looks is set in `docs/plans/2026-10-28-desktop-ux-plan.md`, with a mockup of
+every screen in `docs/mockups/`: the TUI's look in one monospace face, the
+open folder as a sheet of cover tiles, and a new `graphite` palette as the
+default. Waves 2, 3 and 6 to 10 carry what that plan needs.
 
 **Already true, found while planning:**
 
@@ -54,6 +58,12 @@ Exit: `cargo test` passes and `grep -n "crate::app" src/{worker,tag,lookup,custo
 - Tests move with their modules. Fixtures shared through a `test-support`
   feature on core rather than copied.
 - The binary name, flags and `cargo install` stay the same.
+- Add the `graphite` palette (UX plan, colour table) beside the four in
+  `theme.rs`. If the TUI ships it too, it goes in `BUILT_INS` and
+  `every_palette_is_legible_on_its_own_ground` covers it; if not, it is a
+  GUI-only constant that test iterates as well. Decide before the move, since
+  it is the UX plan's one open question that touches the TUI. Read
+  `docs/rules/themes-and-colour.md` first.
 - Update CLAUDE.md's module list and the rules table paths.
 
 Exit: `cargo test --workspace` passes with the same count as before the
@@ -74,6 +84,12 @@ path is what keeps one protocol.
   path the GUI will use.
 - Risk: the tests in `worker.rs` that destructure `Msg::Ask` to reply (about a
   dozen) all change; do them in one pass.
+- A new `Msg` for cover thumbnails, which the GUI's tiles need. The worker
+  writes a 256px JPEG of each track's embedded art into a cache folder when a
+  track settles or a folder opens, and sends its path; the webview loads it
+  through Tauri's asset protocol. Image bytes stay out of the JSON channel and
+  the UI side never reads an audio file, which
+  `docs/rules/threads-and-messages.md` forbids. The TUI ignores the message.
 
 Exit: `cargo test --workspace` passes; a test round-trips every `Msg` and
 `Cmd` variant through JSON from an exhaustive `match`, so a new variant that
@@ -126,31 +142,53 @@ filter or sort logic is left in `crates/tui/src/app.rs`.
   console is a hidden key chord, so the unlock stays a secret.
 - A Svelte store applies `Msg` the way `App::apply` does, in one reducer.
 - Reducer tests run in Vitest against `Msg` JSON recorded from the Rust tests.
+- Tokens and styles come from `docs/mockups/tokens.css` and `base.css`; the
+  look is set in `docs/plans/2026-10-28-desktop-ux-plan.md`.
+- The CSS variables are generated at start from core's palettes, not copied
+  by hand, so `[themes.*]` and `[colors]` from the config apply in the GUI as
+  they do in the TUI. The role names already match `Palette`'s fields.
+- `^t` and the theme dropdown save the theme the way the TUI's `^t` does;
+  `themes-and-colour.md` says why that one write skips the worker.
+- JetBrains Mono at 400 and 700 is bundled as local files, never fetched.
 
 Exit: the app opens on a fixture `--dir` and lists its folders from
-`Msg::Library`; the reducer tests pass.
+`Msg::Library` in the rail; the reducer tests pass; `^t` walks every palette
+and a `[colors]` override in the fixture config shows on screen.
 
 ## 7. Library, runs and questions
 
-- Screens:
-  - the library: sort, kind filter, filter box, sync, new URL;
-  - the track list, with live statuses and the log pane;
-  - the pick gate;
-  - every `Prompt` kind (choice, input, form) as a dialog;
-  - quit while a download runs.
+- Screens, each with its mockup:
+  - first launch, with `--check`'s tools table (`first-launch.html`);
+  - the library in the rail: sort, kind filter, filter box, sync, new URL
+    (`library.html`);
+  - the open folder as tiles, with live statuses, the cover settling, follow
+    mode and the log pane, and the list one key away on `w` (`run.html`);
+  - the pick gate, always as rows (`pick.html`);
+  - every `Prompt` kind (choice, input, form) as a dialog (`prompts.html`);
+  - the detail pane in every status (`detail.html`);
+  - quit while a download runs (`overlays.html`).
 - Keyboard shortcuts match the TUI's where they apply, from
-  `docs/keys.md`.
+  `docs/keys.md`; `w` is the one new key.
+- Until the thumbnail message lands, a settled tile shows its number; the
+  layout does not wait on it.
 - Read `questions-and-forms.md` and `keys-and-screens.md` first.
 
 Exit: with a stub `yt-dlp` on the resolved path, syncing a fixture playlist
 from the GUI writes its `.m3u8` and `.earworm` (wait on the files), and an
-answered pick gate downloads only what was marked.
+answered pick gate downloads only what was marked. Each screen, captured at
+1440 wide in graphite, matches its picture in `docs/mockups/shots/` in layout
+and colour.
 
 ## 8. The remaining screens
 
 - Search (`t`), custom playlists and the picker, export, tag edit and undo,
   covers (plain `<img>`, no kitty graphics), settings, help.
 - Artists, the artist page, the YouTube Music fetch, hidden until unlocked.
+- Mocked already: artists and the artist page (`artists.html`), settings
+  (`settings.html`), search, the key sheet, the achievement toast and the
+  console (`overlays.html`). Not yet mocked: custom playlists, the picker,
+  export and the cover chooser. Mock each in `docs/mockups/` on the shared
+  shell before building it, so it is reviewed as a picture first.
 - Each screen checked against the same fixture library, one at a time;
   any can slip to a later release except settings.
 
@@ -172,6 +210,8 @@ in the GUI (the locked page offers no download).
     can point at the GitHub release page, as the TUI's update check does.
 - Linux: AppImage and `.deb` on WebKitGTK; check `xdg-open` in
   `player::reveal` and the cliamp handoff.
+- The bundled JetBrains Mono ships with its OFL licence file. Check the font
+  renders on WebKitGTK with no system copy installed.
 - CI builds both on tags. The TUI keeps its own release.
 
 Exit: the `.dmg`, downloaded through a browser so it carries the quarantine
@@ -183,9 +223,12 @@ stock Ubuntu LTS.
 
 - README: a GUI section and install steps, including the unsigned-app
   first launch on macOS.
-- New `docs/gui.md`.
-- New `docs/rules/gui.md`, covering the reducer, question ids and tool
-  resolution, with a row in CLAUDE.md's rules table.
+- New `docs/gui.md`, illustrated with the shots in `docs/mockups/shots/`
+  retaken from the real app.
+- `docs/keys.md`: `w`, tiles or list, marked as the GUI's alone.
+- New `docs/rules/gui.md`, covering the reducer, question ids, tool
+  resolution, the palette-to-CSS generation and the thumbnail message, with a
+  row in CLAUDE.md's rules table.
 - Update CLAUDE.md's architecture to describe two front ends on one core.
 
 Exit: every new rule names its test or says nothing tests it.
@@ -201,8 +244,10 @@ the app ships.
 ## What can slip
 
 Wave 8's less-used screens (export, covers, cheat console) can ship in a
-later release. Bundling yt-dlp and ffmpeg is deferred by design, and so is signing. Windows is
-out of scope.
+later release. Real covers in tiles can slip too: without the thumbnail
+message, tiles show their numbers and the list view is the better default.
+Bundling yt-dlp and ffmpeg is deferred by design, and so is signing. Windows
+is out of scope.
 
 ## Verification
 
@@ -210,4 +255,9 @@ out of scope.
 - From wave 6: `npm test` (Vitest) for the reducer, and `cargo tauri dev`
   against a fixture `--dir` with a stub `yt-dlp`, waiting on files rather than
   the screen, as CLAUDE.md requires for the TUI.
+- From wave 2: `node docs/mockups/contrast.mjs` exits 0, and the Rust
+  contrast test covers `graphite`.
+- From wave 7: each screen compared with its picture in
+  `docs/mockups/shots/`, and checked with `prefers-reduced-motion` on, where
+  the cover arrives without stepping and the scan line is gone.
 - Before packaging: launch from Finder, not a shell, to prove tool resolution.

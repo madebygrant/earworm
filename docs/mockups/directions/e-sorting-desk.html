@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>E · Sorting desk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wdth,wght@75..100,400..700&display=swap" rel="stylesheet">
+<style>
+:root { color-scheme: light;
+  --ground: #E4E3EC; --lane: #EEEDF4; --card: #FFFFFF; --text: #1E1B2E; --muted: #5E5A70; --rule: #CFCDDB;
+  --good: #1F7A5A; --warn: #9C5800; --error: #B32336; --live: #4B3FD1; }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { color-scheme: dark;
+  --ground: #15131D; --lane: #1C1A27; --card: #262333; --text: #ECEAF4; --muted: #A29DB8; --rule: #34304A;
+  --good: #72D7AC; --warn: #F0AE5C; --error: #FF8D9A; --live: #A79EFF; } }
+:root[data-theme="dark"] { color-scheme: dark;
+  --ground: #15131D; --lane: #1C1A27; --card: #262333; --text: #ECEAF4; --muted: #A29DB8; --rule: #34304A;
+  --good: #72D7AC; --warn: #F0AE5C; --error: #FF8D9A; --live: #A79EFF; }
+* { box-sizing: border-box; margin: 0; }
+html, body { height: 100%; }
+body { font: 14px/1.4 "Instrument Sans", system-ui, sans-serif; font-variant-numeric: tabular-nums; color: var(--text); background: var(--ground);
+  display: grid; grid-template-columns: 220px 1fr; grid-template-rows: 56px 1fr; overflow: hidden; }
+button { font: inherit; color: inherit; background: none; border: 0; cursor: pointer; }
+:focus-visible { outline: 2px solid var(--live); outline-offset: 2px; }
+.lights { position: fixed; left: 16px; top: 22px; width: 52px; height: 12px; background: radial-gradient(circle at 6px 6px, #ED6A5E 5.5px, transparent 6px), radial-gradient(circle at 26px 6px, #F4BF4F 5.5px, transparent 6px), radial-gradient(circle at 46px 6px, #61C554 5.5px, transparent 6px); }
+header { grid-column: 1 / -1; display: flex; align-items: center; gap: 18px; padding: 0 16px 0 220px; border-bottom: 1px solid var(--rule); }
+header h1 { font-size: 20px; font-weight: 700; font-stretch: 80%; }
+header .meta { color: var(--muted); }
+header .bar { flex: 1; max-width: 360px; height: 6px; border-radius: 6px; background: var(--rule); overflow: hidden; margin-left: auto; }
+header .bar i { display: block; height: 100%; width: 0; background: var(--live); transition: width .3s; }
+header .count { font-weight: 600; min-width: 5ch; text-align: right; }
+.theme { display: flex; gap: 2px; font-size: 12px; margin-left: 8px; }
+.theme button { padding: 3px 8px; border-radius: 99px; color: var(--muted); }
+.theme button[aria-pressed="true"] { background: var(--text); color: var(--ground); }
+
+nav { padding: 12px 8px; overflow: auto; border-right: 1px solid var(--rule); }
+nav .brand { font-weight: 700; font-stretch: 80%; font-size: 15px; padding: 0 8px 12px; }
+nav ul { list-style: none; padding: 0; display: grid; gap: 2px; }
+nav li { display: grid; grid-template-columns: 28px 1fr auto; gap: 8px; align-items: center; padding: 6px 8px; border-radius: 8px; }
+nav li[aria-current="true"] { background: var(--card); box-shadow: 0 1px 0 var(--rule); }
+nav .s { width: 28px; height: 28px; border-radius: 4px; }
+nav .s.mosaic { display: grid; grid-template: 1fr 1fr / 1fr 1fr; overflow: hidden; }
+nav .s.local { border: 1px dashed var(--muted); display: grid; place-items: center; font-size: 11px; color: var(--muted); }
+nav .nm { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+nav .c { font-size: 12px; color: var(--muted); }
+nav .c.warn { color: var(--warn); font-weight: 600; }
+
+.board { display: grid; grid-template-columns: repeat(5, minmax(190px, 1fr)); gap: 12px; padding: 14px 16px; overflow: auto; min-width: 0; }
+.lane { background: var(--lane); border-radius: 12px; padding: 10px; display: flex; flex-direction: column; min-height: 0; overflow: auto; }
+.lane h2 { font-size: 13px; font-weight: 600; display: flex; justify-content: space-between; align-items: baseline; padding: 2px 4px 2px; }
+.lane h2 span { color: var(--muted); font-weight: 400; }
+.lane p.hint { font-size: 12px; color: var(--muted); padding: 0 4px 10px; }
+.lane[data-k="warn"] h2 { color: var(--warn); } .lane[data-k="error"] h2 { color: var(--error); } .lane[data-k="good"] h2 { color: var(--good); } .lane[data-k="live"] h2 { color: var(--live); }
+.cards { display: grid; gap: 6px; align-content: start; }
+.card { background: var(--card); border-radius: 8px; padding: 8px; display: grid; grid-template-columns: 34px 1fr; gap: 8px; align-items: center; box-shadow: 0 1px 0 var(--rule); }
+.card .s { width: 34px; height: 34px; border-radius: 4px; background: var(--lane); display: grid; place-items: center; font-size: 12px; color: var(--muted); }
+.card b { display: block; font-weight: 600; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card span { font-size: 12px; color: var(--muted); display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card .why { grid-column: 1 / -1; font-size: 12px; border-top: 1px solid var(--rule); padding-top: 6px; display: flex; justify-content: space-between; gap: 8px; }
+.card .why button { color: var(--live); font-weight: 600; white-space: nowrap; }
+.card .why span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.card.live { outline: 2px solid var(--live); }
+.card.live .s { background: repeating-linear-gradient(45deg, var(--lane) 0 6px, var(--rule) 6px 12px); background-size: 200% 200%; animation: work 1s linear infinite; }
+@keyframes work { to { background-position: 34px 0; } }
+.lane .empty { font-size: 12px; color: var(--muted); padding: 14px 6px; text-align: center; border: 1px dashed var(--rule); border-radius: 8px; }
+@media (max-width: 1100px) { .board { grid-template-columns: repeat(5, 200px); } }
+@media (max-width: 760px) { body { grid-template-columns: 1fr; } nav { display: none; } header { padding-left: 84px; } }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+</head>
+<body>
+<span class="lights" aria-hidden="true"></span>
+<header>
+  <h1>Krautrock</h1><span class="meta" id="stage">Reading the playlist</span>
+  <div class="bar"><i id="bar"></i></div><span class="count" id="count">0/14</span>
+  <div class="theme" role="group" aria-label="Theme"><button data-t="light">Light</button><button data-t="dark">Dark</button></div>
+</header>
+<nav aria-label="Library"><p class="brand">earworm</p><ul id="folders"></ul></nav>
+<section class="board" id="board"></section>
+<script src="data.js"></script>
+<script>
+const root = document.documentElement;
+const tb = document.querySelectorAll(".theme button");
+function mark() { const t = root.dataset.theme || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"); tb.forEach(b => b.setAttribute("aria-pressed", b.dataset.t === t)); }
+tb.forEach(b => b.onclick = () => { root.dataset.theme = b.dataset.t; mark(); }); mark();
+
+document.getElementById("folders").innerHTML = FOLDERS.map(f => {
+  const s = f.kind === "local" ? `<div class="s local">◆</div>` : f.kind === "playlist" ? `<div class="s mosaic">${TRACKS.slice(hash(f.name) % 10, hash(f.name) % 10 + 4).map(t => `<span style="background:${sleeve(t.album)}"></span>`).join("")}</div>` : `<div class="s" style="background:${sleeve(f.name)}"></div>`;
+  return `<li ${f.open ? 'aria-current="true"' : ""}>${s}<span class="nm">${esc(f.name)}</span><span class="c ${f.missing ? "warn" : ""}">${f.missing ? f.missing + " missing" : f.count}</span></li>`;
+}).join("");
+
+// Lanes are what you do next, not the pipeline's stages: the run empties the left and fills the right.
+const LANES = [
+  { k: "muted", name: "Waiting", hint: "Queued for this run", has: st => st === "queued" },
+  { k: "live", name: "Working", hint: "Downloading and tagging", has: st => TONE[st] === "live" },
+  { k: "warn", name: "Check these", hint: "Nothing confirmed the tags", has: st => TONE[st] === "warn" },
+  { k: "error", name: "Failed", hint: "r retries all of them", has: st => st === "failed" },
+  { k: "good", name: "Done", hint: "Confirmed, chosen or already here", has: st => TONE[st] === "good" || st === "gone" },
+];
+const board = document.getElementById("board");
+board.innerHTML = LANES.map(l => `<div class="lane" data-k="${l.k}"><h2>${l.name}<span></span></h2><p class="hint">${l.hint}</p><div class="cards"></div></div>`).join("");
+
+function card(t, st) {
+  const art = !["queued", "fetching", "fetched", "failed"].includes(st);
+  const why = TONE[st] === "warn" ? `<div class="why"><span class="warn">${st}, ${esc(t.source)}</span><button>Search again</button></div>`
+    : st === "failed" ? `<div class="why"><span class="error">Video unavailable</span><button>Retry</button></div>`
+    : st === "gone" ? `<div class="why"><span>Left the playlist</span><button>Delete</button></div>`
+    : TONE[st] === "live" ? `<div class="why"><span style="color:var(--live)">${st}</span></div>` : "";
+  return `<div class="card ${TONE[st] === "live" ? "live" : ""}" data-i="${t.n}"><div class="s" style="${art ? `background:${sleeve(t.album)}` : ""}">${art || TONE[st] === "live" ? "" : t.n}</div>
+    <div style="min-width:0"><b>${esc(t.title)}</b><span>${esc(t.artist)}</span></div>${why}</div>`;
+}
+
+// FLIP: record where each card was, re-render, then animate it from there.
+function render(state) {
+  const before = new Map([...board.querySelectorAll(".card")].map(c => [c.dataset.i, c.getBoundingClientRect()]));
+  board.querySelectorAll(".lane").forEach((el, li) => {
+    const l = LANES[li], items = TRACKS.filter((t, i) => l.has(state[i]));
+    el.querySelector("h2 span").textContent = items.length;
+    el.querySelector(".cards").innerHTML = items.length ? items.map(t => card(t, state[t.n - 1])).join("") : `<div class="empty">${l.k === "error" ? "Nothing failed" : l.k === "warn" ? "Nothing to check" : "Empty"}</div>`;
+  });
+  if (matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  board.querySelectorAll(".card").forEach(c => {
+    const b = before.get(c.dataset.i); if (!b) return;
+    const a = c.getBoundingClientRect(), dx = b.left - a.left, dy = b.top - a.top;
+    if (dx || dy) c.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }], { duration: 380, easing: "cubic-bezier(.2,.8,.2,1)" });
+  });
+}
+
+startRun((state, done, total, active) => {
+  render(state);
+  document.getElementById("bar").style.width = `${done / total * 100}%`;
+  document.getElementById("count").textContent = `${done}/${total}`;
+  document.getElementById("stage").textContent = active < 0 ? (done === total ? "Finished. 2 to check, 1 failed." : "Reading the playlist") : `${state[active]} ${TRACKS[active].title}`;
+}, { step: 520 });
+</script>
+</body>
+</html>

@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Library</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css"><link rel="stylesheet" href="base.css">
+<style>
+.mosaic { display: grid; grid-template: 1fr 1fr / 1fr 1fr; gap: 1px; aspect-ratio: 1; max-width: 200px; border: 1px solid var(--rule); margin-bottom: 12px; background: var(--rule); }
+.mosaic img { width: 100%; height: 100%; image-rendering: pixelated; display: block; }
+.files { list-style: none; padding: 0; margin-top: 12px; font-size: var(--s-12); }
+.files li { display: flex; gap: 1ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--muted); }
+.files li.miss { color: var(--warn); }
+.pill { font-size: var(--s-11); border: 1px solid currentColor; padding: 0 5px; margin-left: 1ch; }
+</style>
+</head>
+<body>
+<script src="directions/data.js"></script>
+<script src="shell.js"></script>
+<script>
+const AMBIENT = [
+  ["Discreet Music", "Brian Eno", "Discreet Music", 1975, "on disk"], ["Wind on Water", "Fripp & Eno", "Evening Star", 1975, "on disk"],
+  ["Monza", "Harmonia", "Deluxe", 1975, "missing"], ["Timewind", "Klaus Schulze", "Timewind", 1975, "on disk"],
+  ["Ricochet Part One", "Tangerine Dream", "Ricochet", 1975, "on disk"], ["Hosianna Mantra", "Popol Vuh", "Hosianna Mantra", 1972, "on disk"],
+  ["Rubato", "Cluster", "Zuckerzeit", 1974, "missing"], ["Evening Star", "Fripp & Eno", "Evening Star", 1975, "on disk"],
+  ["Rubycon Part One", "Tangerine Dream", "Rubycon", 1975, "on disk"], ["Sowiesoso", "Cluster", "Sowiesoso", 1976, "on disk"],
+  ["Heavenly Music Corporation", "Fripp & Eno", "No Pussyfooting", 1973, "missing"], ["Wellenspiele", "Harmonia", "Deluxe", 1975, "on disk"],
+].map(([title, artist, album, year, st], i) => ({ n: i + 1, title, artist, album, year, st, source: "on disk", file: `music/Ambient 1975/${pad(i + 1)} - ${artist} - ${title}.opus` }));
+
+const f = FOLDERS.find(x => x.name === "Ambient 1975");
+const side = `<div class="mosaic">${AMBIENT.slice(0, 4).map(t => `<img alt="" src="${pixelSleeve(t.album, 16)}">`).join("")}</div>
+  <h2>Ambient 1975</h2><p class="say">A playlist. Each track keeps its own sleeve.</p>
+  <dl class="kv"><dt>kind</dt><dd>▤ playlist</dd><dt>tracks</dt><dd>12, <span class="warn">3 missing</span></dd><dt>synced</dt><dd>2 days ago</dd>
+  <dt>url</dt><dd>youtube.com/playlist?list=PLx9…</dd><dt>folder</dt><dd>music/Ambient 1975</dd><dt>m3u8</dt><dd>Ambient 1975.m3u8</dd></dl>
+  <ul class="files">${AMBIENT.filter(t => t.st === "missing").map(t => `<li class="miss">! ${esc(pad(t.n) + " - " + t.artist + " - " + t.title)}.opus</li>`).join("")}</ul>
+  <div class="acts"><button><span class="kc">S</span>sync</button><button><span class="kc">p</span>play</button><button><span class="kc">O</span>show folder</button><button><span class="kc">e</span>rename</button><button><span class="kc">D</span>remove</button></div>`;
+
+mount({
+  head: { folder: "Ambient 1975", stage: "opened", count: "12 tracks", right: "7 folders · 1,204 tracks · 2 new releases" },
+  railOpts: { current: "Ambient 1975", sort: "name", kind: "all", folders: FOLDERS.map(x => x.name === "Ambient 1975" ? { ...x, count: 12 } : x) },
+  main: `<section class="view"><div class="bar"><span class="title" style="color:var(--text)">Ambient 1975</span><span>opened from disk, nothing fetched</span>
+    <span class="mode" role="group" aria-label="View, w"><button data-m="tiles" aria-pressed="true">tiles</button><button data-m="list">list</button></span></div>
+    <div class="sheet" id="body">${AMBIENT.map((t, i) => tile(t, t.st, { cur: i === 2 })).join("")}</div></section>`,
+  side,
+  foot: { tally: `<span class="good">9 on disk</span><span class="warn">3 missing</span>`, hints: [["enter", "open"], ["S", "sync"], ["R", "sync all"], ["n", "new link"], ["t", "search"], [",", "settings"], ["h", "keys"]] },
+});
+</script>
+</body>
+</html>
