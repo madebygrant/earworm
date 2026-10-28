@@ -4,7 +4,7 @@ mod ui;
 // The core's modules at this crate's root, so `crate::config` and friends read as they did before the split.
 use earworm_core::{
     achievements, artists, cheats, config, deps, export, icons, lookup, manifest, picker, protocol, tag, theme,
-    update, worker, ytdlp,
+    tools, update, worker, ytdlp,
 };
 
 use std::io::{IsTerminal, Write};
@@ -26,6 +26,8 @@ use config::{Cli, Config};
 fn main() -> Result<()> {
     let matches = Cli::command().get_matches();
     let cfg = Config::build(Cli::from_arg_matches(&matches)?, &matches)?;
+    // Before anything runs a tool, `--check` included, since checking where they are is its job.
+    tools::configure(&cfg.tools);
     if cfg.check {
         return check(&cfg);
     }

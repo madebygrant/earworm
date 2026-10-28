@@ -54,6 +54,9 @@ turns on.
   every frame) and the 256-colour quantiser. Colours are `ratatui_core`'s, the
   one ratatui crate the core depends on
 - `icons.rs` — the glyph sets behind `icons = "..."`
+- `tools.rs` — `command`, how every external tool is started: from where
+  `bin` finds it (the config's `[tools]` path, PATH, then Homebrew's and
+  `~/.local`'s bin folders) and with those folders on its PATH
 - `artists.rs` — the artist index read off the tags, `key` (one artist under
   any spelling), and the `.artists` and `.artists-seen` stores
 - `discover.rs` — Deezer's artists, releases, top tracks and related artists,

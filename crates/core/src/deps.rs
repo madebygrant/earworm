@@ -1,6 +1,6 @@
 use std::io::ErrorKind;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::time::Duration;
 
 use crate::lookup::run_bounded;
@@ -63,15 +63,20 @@ pub fn launch_error(bin: &str, err: &std::io::Error) -> String {
         return format!("could not run {bin}: {err}");
     }
     match dep(bin) {
-        Some(d) => format!("{bin} not found on PATH · brew install {}", d.formula),
-        None => format!("{bin} not found on PATH"),
+        Some(d) => format!("{bin} not found · brew install {}", d.formula),
+        None => format!("{bin} not found"),
     }
 }
 
 pub struct Found {
     pub dep: &'static Dep,
-    /// `None` when the tool is not on PATH or would not say.
+    /// `None` when `tools::bin` found no such tool or it would not say.
     pub version: Option<String>,
+    /// The path a config's `[tools]` table gave it, which a missing tool is then about rather than
+    /// the install: brew is the wrong advice for a path somebody typed.
+    pub configured: Option<String>,
+    /// Where it was found, when it is there: which copy runs is the question `--check` answers.
+    pub at: Option<String>,
 }
 
 /// ffmpeg opens with its whole build configuration, and three of the four
@@ -92,7 +97,7 @@ pub fn probe_all() -> Vec<Found> {
     DEPS.iter()
         .map(|dep| {
             let out = run_bounded(
-                Command::new(dep.bin)
+                crate::tools::command(dep.bin)
                     .arg(dep.flag)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::null()),
@@ -101,7 +106,9 @@ pub fn probe_all() -> Vec<Found> {
             let version = out
                 .filter(|o| o.status.success())
                 .and_then(|o| version_of(dep.bin, &String::from_utf8_lossy(&o.stdout)));
-            Found { dep, version }
+            let bin = crate::tools::bin(dep.bin);
+            let at = Path::new(&bin).is_file().then_some(bin);
+            Found { dep, version, configured: crate::tools::configured(dep.bin), at }
         })
         .collect()
 }
@@ -154,21 +161,23 @@ pub fn report(facts: &Facts) -> (String, bool) {
     let mut ready = true;
     for found in facts.tools {
         let dep = found.dep;
-        let note = match &found.version {
-            Some(version) => version.clone(),
-            None => {
-                // An optional tool says what you lose, or a bare cross
-                // reads as breakage rather than a feature switched off.
-                if dep.required {
-                    ready = false;
-                    format!("not found · brew install {}", dep.formula)
-                } else {
-                    format!(
-                        "not found · brew install {} · no {}",
-                        dep.formula, dep.what
-                    )
-                }
+        let note = match (&found.version, &found.configured, &found.at) {
+            (Some(version), _, Some(at)) => format!("{version} · {at}"),
+            (Some(version), _, None) => version.clone(),
+            // Present and silent is not a missing tool, whoever named it.
+            (None, _, Some(at)) => format!("at {at}, but it would not say its version"),
+            (None, Some(set), None) => format!("not at {set} · check [tools] in the config"),
+            (None, None, None) => format!("not found · brew install {}", dep.formula),
+        };
+        // An optional tool says what you lose, or a bare cross reads as breakage rather than a feature
+        // switched off.
+        let note = match (&found.version, dep.required) {
+            (Some(_), _) => note,
+            (None, true) => {
+                ready = false;
+                note
             }
+            (None, false) => format!("{note} · no {}", dep.what),
         };
         out.push_str(&row(found.version.is_some(), dep.bin, &note));
     }
@@ -297,7 +306,37 @@ mod tests {
         Found {
             dep: dep(bin).unwrap(),
             version: version.map(str::to_string),
+            configured: None,
+            at: None,
         }
+    }
+
+    // A tool named in `[tools]` and not there is a typo in the config, not a missing install.
+    #[test]
+    fn a_configured_tool_that_is_missing_points_at_the_config() {
+        let mut ffmpeg = found("ffmpeg", None);
+        ffmpeg.configured = Some("/opt/ffmpeg-7/ffmpeg".into());
+        let tools = vec![found("yt-dlp", Some("2024.08.06")), ffmpeg, found("fpcalc", Some("1.5.1")), found("cliamp", None)];
+        let dir = PathBuf::from("/tmp/music");
+        let (text, ready) = report(&facts(&tools, &dir));
+        assert!(!ready, "a required tool that is not where the config says is not a working install");
+        assert!(text.contains("✗ ffmpeg     not at /opt/ffmpeg-7/ffmpeg · check [tools] in the config"), "{text}");
+        assert!(!text.contains("brew install ffmpeg"), "{text}");
+
+        // Optional, so it still says what goes missing; and one that is there but silent is not a typo.
+        let mut fpcalc = found("fpcalc", None);
+        fpcalc.configured = Some("/bad/fpcalc".into());
+        let mut cliamp = found("cliamp", None);
+        cliamp.configured = Some("/opt/cliamp".into());
+        cliamp.at = Some("/opt/cliamp".into());
+        let mut ytdlp = found("yt-dlp", Some("2024.08.06"));
+        ytdlp.at = Some("/opt/homebrew/bin/yt-dlp".into());
+        let tools = vec![ytdlp, found("ffmpeg", Some("7.1")), fpcalc, cliamp];
+        let (text, ready) = report(&facts(&tools, &dir));
+        assert!(ready, "only optional tools are missing");
+        assert!(text.contains("✓ yt-dlp     2024.08.06 · /opt/homebrew/bin/yt-dlp"), "{text}");
+        assert!(text.contains("not at /bad/fpcalc · check [tools] in the config · no acoustic fingerprinting"), "{text}");
+        assert!(text.contains("✗ cliamp     at /opt/cliamp, but it would not say its version · no playback"), "{text}");
     }
 
     /* Hiding a folder takes it off every screen and out of `--resync`, and
@@ -472,7 +511,7 @@ mod tests {
         let gone = std::io::Error::new(ErrorKind::NotFound, "no such file");
         assert_eq!(
             launch_error("fpcalc", &gone),
-            "fpcalc not found on PATH · brew install chromaprint"
+            "fpcalc not found · brew install chromaprint"
         );
 
         let denied = std::io::Error::new(ErrorKind::PermissionDenied, "denied");

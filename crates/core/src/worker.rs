@@ -8662,6 +8662,7 @@ pub mod tests {
             folder: None,
             import: None,
             extra: Vec::new(),
+            tools: Default::default(),
             acoustid_key: None,
             unlocked: Default::default(),
             sources: Default::default(),

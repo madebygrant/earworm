@@ -106,7 +106,7 @@ Exit: `cargo test --workspace` passes; a test round-trips every `Msg` and
 `Cmd` variant through JSON from an exhaustive `match`, so a new variant that
 cannot serialise fails to compile or fails the test.
 
-## 4. Find tools without the shell's PATH
+## 4. Find tools without the shell's PATH [done 2026-10-28]
 
 - `core::tools::bin(name)`: an explicit override from the config, then
   `PATH`, then `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`. Every

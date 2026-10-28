@@ -2,7 +2,15 @@
 
 ## Tools
 
-Four binaries on PATH, two of them optional.
+Four binaries, two of them optional. earworm looks for each on PATH, then in
+`/opt/homebrew/bin`, `/usr/local/bin` and `~/.local/bin`, which is where a
+desktop app started from Finder finds them without your shell's PATH. One
+somewhere else can be named in the config:
+
+```toml
+[tools]
+ffmpeg = "~/bin/ffmpeg-7/ffmpeg"
+```
 
 ```sh
 brew install yt-dlp ffmpeg chromaprint

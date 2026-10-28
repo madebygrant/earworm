@@ -10,7 +10,11 @@ use serde_json::Value;
 use crate::protocol::{Playback, Player};
 use crate::lookup;
 
-const BIN: &str = "cliamp";
+// cliamp as `tools::bin` finds it. `installed` keeps its first answer, so a front end configures tools before
+// it asks.
+fn bin() -> String {
+    crate::tools::bin("cliamp")
+}
 
 /// `load` and `--version` reach the running instance over a socket, so they
 /// answer at once or never.
@@ -83,6 +87,7 @@ fn stored(folder: &Path) -> String {
 fn cliamp(bin: &str, limit: Duration, args: &[&str]) -> Option<(bool, String)> {
     let out = lookup::run_bounded(
         Command::new(bin)
+            .env("PATH", crate::tools::path())
             .args(args)
             // Or the child takes keystrokes out from under the event loop.
             .stdin(Stdio::null())
@@ -99,12 +104,12 @@ fn cliamp(bin: &str, limit: Duration, args: &[&str]) -> Option<(bool, String)> {
     Some((out.status.success(), text.trim().to_string()))
 }
 
-/// Whether `cliamp` is on PATH, which decides if the key and the finish-menu
+/// Whether `cliamp` can be found, which decides if the key and the finish-menu
 /// row are offered. Resolved once: `finish` asks on every pass of its loop and
 /// the answer cannot change within a session.
 pub fn installed() -> bool {
     static FOUND: OnceLock<bool> = OnceLock::new();
-    *FOUND.get_or_init(|| cliamp(BIN, IPC, &["--version"]).is_some_and(|(ok, _)| ok))
+    *FOUND.get_or_init(|| cliamp(&bin(), IPC, &["--version"]).is_some_and(|(ok, _)| ok))
 }
 
 /// What cliamp is doing. About 11ms, so cheap enough for the poll behind it.
@@ -112,7 +117,7 @@ pub fn probe() -> Playback {
     if !installed() {
         return Playback::default();
     }
-    read_status(&cliamp(BIN, IPC, &["status", "--json"]).map_or_else(String::new, |(_, s)| s))
+    read_status(&cliamp(&bin(), IPC, &["status", "--json"]).map_or_else(String::new, |(_, s)| s))
 }
 
 /* Kept apart from the process so the shape cliamp actually emits can be
@@ -198,7 +203,7 @@ fn reveal_with(bin: &str, folder: &Path) -> Result<String> {
 }
 
 pub fn toggle() -> Result<()> {
-    toggle_with(BIN, IPC)
+    toggle_with(&bin(), IPC)
 }
 
 fn toggle_with(bin: &str, limit: Duration) -> Result<()> {
@@ -223,11 +228,11 @@ pub fn forget(folder: &Path) {
     if !installed() {
         return;
     }
-    let _ = cliamp(BIN, STORE, &["playlist", "delete", &stored(folder)]);
+    let _ = cliamp(&bin(), STORE, &["playlist", "delete", &stored(folder)]);
 }
 
 pub fn load(folder: &Path) -> Result<String> {
-    load_with(BIN, STORE, IPC, folder)
+    load_with(&bin(), STORE, IPC, folder)
 }
 
 /* `import` refuses a name it already holds rather than replacing it, so a
@@ -248,13 +253,13 @@ fn load_with(bin: &str, store: Duration, ipc: Duration, folder: &Path) -> Result
 // A custom playlist lives beside the others in one store, so `playlist_of` has no single answer for it.
 // `key` is any path whose last component is the list's name, which is what `stored` reads.
 pub fn load_list(m3u8: &Path, key: &Path) -> Result<String> {
-    play_with(BIN, STORE, IPC, m3u8, &stored(key))
+    play_with(&bin(), STORE, IPC, m3u8, &stored(key))
 }
 
 /// The counterpart of `forget` for a custom playlist, after it is renamed or deleted.
 pub fn forget_list(key: &Path) {
     if installed() {
-        let _ = cliamp(BIN, STORE, &["playlist", "delete", &stored(key)]);
+        let _ = cliamp(&bin(), STORE, &["playlist", "delete", &stored(key)]);
     }
 }
 

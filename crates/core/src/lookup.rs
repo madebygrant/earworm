@@ -216,7 +216,7 @@ pub fn run_bounded(cmd: &mut Command, limit: Duration) -> Option<std::process::O
 
 fn fingerprint(path: &Path) -> Option<(i64, String)> {
     let out = run_bounded(
-        Command::new("fpcalc")
+        crate::tools::command("fpcalc")
             .arg("-json")
             .arg(path)
             .stdout(Stdio::piped())

@@ -23,7 +23,7 @@
   at once or never; importing reads the tags off every file and is genuinely
   slow, and killing it part-way would leave cliamp's store torn.
 - **`player::installed()` is cached and `player::running()` must not be.** What
-  is on PATH cannot change within a session; whether cliamp is up changes from
+  is installed cannot change within a session; whether cliamp is up changes from
   another window while earworm watches, including while the finish menu sits
   open, which is why that menu re-probes on every pass.
 - **The finish row and the `p` key answer the same question.** Both require

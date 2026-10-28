@@ -165,6 +165,9 @@ pub struct FileConfig {
     /// names. Ordered by the map, so the `^t` walk is alphabetical after the
     /// ones that ship and does not move when the file is reordered.
     pub themes: Option<BTreeMap<String, FileTheme>>,
+    /// A tool's name to the program to run for it, for one that is not on PATH or in the folders
+    /// `tools::bin` searches after it.
+    pub tools: Option<BTreeMap<String, String>>,
 }
 
 /// One `[themes.<name>]` table.
@@ -757,6 +760,8 @@ pub struct Config {
     /// Announce achievements and keep a file of the ones earned.
     pub achievements: bool,
     pub extra: Vec<String>,
+    /// The `[tools]` table with `~` expanded, for a front end to hand `tools::configure`.
+    pub tools: BTreeMap<String, String>,
     pub acoustid_key: Option<String>,
     /// The palette every draw reads. Resolved here so a bad name or a bad
     /// colour stops the start rather than reaching a frame.
@@ -853,6 +858,22 @@ impl Config {
         let mut extra = file.extra.unwrap_or_default();
         extra.extend(cli.extra);
 
+        // Refused by name at the start, like an unknown format: a misspelt tool would otherwise be a
+        // setting that quietly does nothing.
+        let mut tools = BTreeMap::new();
+        for (name, path) in file.tools.unwrap_or_default() {
+            if !crate::deps::DEPS.iter().any(|d| d.bin == name) {
+                let known: Vec<&str> = crate::deps::DEPS.iter().map(|d| d.bin).collect();
+                anyhow::bail!("unknown tool \"{name}\" in [tools], expected one of {}", known.join(", "));
+            }
+            // A relative one would depend on the folder the app started in, which under Finder is `/`.
+            let at = expand(&path);
+            if !at.is_absolute() {
+                anyhow::bail!("[tools] {name} = \"{path}\" has to be a full path, like \"/opt/homebrew/bin/{name}\"");
+            }
+            tools.insert(name, at.to_string_lossy().into_owned());
+        }
+
         let format = cli
             .format
             .or(file.format)
@@ -907,6 +928,7 @@ impl Config {
             update_check: off("no_update_check", file.update_check),
             achievements: off("no_achievements", file.achievements),
             extra,
+            tools,
             theme: palette,
             icons,
             theme_name,
@@ -1159,6 +1181,27 @@ mod tests {
         match Config::build(Cli::from_arg_matches(&matches).unwrap(), &matches) {
             Ok(_) => panic!("it was accepted"),
             Err(err) => format!("{err:#}"),
+        }
+    }
+
+    // A tool somewhere earworm does not look is named in `[tools]`, `~` and all; a name it does not run is
+    // refused, since a misspelt one would be a setting that quietly does nothing.
+    #[test]
+    fn a_tool_can_be_named_and_a_misspelt_one_stops_the_start() {
+        let cfg = build("[tools]\nffmpeg = \"~/bin/ffmpeg\"\n", &[]);
+        let home = std::env::var("HOME").unwrap_or_default();
+        assert_eq!(cfg.tools.get("ffmpeg").map(String::as_str), Some(format!("{home}/bin/ffmpeg").as_str()));
+        assert!(build("", &[]).tools.is_empty(), "no table should override nothing");
+
+        for bad in ["\"\"", "\"ffmpeg-7\"", "\"bin/ffmpeg\""] {
+            let err = refuse(&format!("[tools]\nffmpeg = {bad}\n"), &[]);
+            assert!(err.contains("has to be a full path"), "{bad} was taken: {err}");
+        }
+
+        let err = refuse("[tools]\nffmpge = \"/x\"\n", &[]);
+        assert!(err.contains("unknown tool \"ffmpge\""), "{err}");
+        for dep in crate::deps::DEPS {
+            assert!(err.contains(dep.bin), "{} went unlisted: {err}", dep.bin);
         }
     }
 

@@ -317,7 +317,7 @@ pub fn measure(path: &Path) -> Result<Loudness> {
         std::thread::current().id()
     ));
     let errors = std::fs::File::create(&log).context("cannot write a scratch log")?;
-    let mut cmd = std::process::Command::new("ffmpeg");
+    let mut cmd = crate::tools::command("ffmpeg");
     cmd.args(["-nostats", "-hide_banner", "-i"])
         .arg(path)
         .args(["-vn", "-af", "ebur128=peak=true:framelog=quiet", "-f", "null", "-"])
@@ -552,7 +552,7 @@ pub fn cover_rgb(path: &Path, width: u32, height: u32) -> Option<Vec<u8>> {
         "scale={width}:{height}:force_original_aspect_ratio=increase:flags=lanczos,crop={width}:{height}"
     );
     let ran = lookup::run_bounded(
-        std::process::Command::new("ffmpeg")
+        crate::tools::command("ffmpeg")
             .args(["-v", "error", "-y", "-i"])
             .arg(path)
             // The audio stream is not wanted and is the expensive half.
@@ -619,7 +619,7 @@ fn shrink(image: &[u8], max: u16) -> Option<Vec<u8>> {
     std::fs::write(&from, image).ok()?;
 
     let out = lookup::run_bounded(
-        std::process::Command::new("ffmpeg")
+        crate::tools::command("ffmpeg")
             .args(["-v", "error", "-y", "-i"])
             .arg(&from)
             // Never upscales, and keeps whatever aspect the art came with.
@@ -688,7 +688,7 @@ pub fn transcode(from: &Path, to: &Path, format: &str, source: Option<&str>) -> 
     for encoder in crate::config::encoders(format) {
         let _ = std::fs::remove_file(to);
         let errors = std::fs::File::create(&log).ok();
-        let mut cmd = std::process::Command::new("ffmpeg");
+        let mut cmd = crate::tools::command("ffmpeg");
         cmd.args(["-v", "error", "-y", "-i"])
             .arg(from)
             .args(["-vn", "-c:a", encoder]);
@@ -767,7 +767,7 @@ pub fn cut(from: &Path, to: &Path, start: f64, end: f64, format: &str) -> Result
     for encoder in encoders {
         let _ = std::fs::remove_file(to);
         let errors = std::fs::File::create(&log).ok();
-        let mut cmd = std::process::Command::new("ffmpeg");
+        let mut cmd = crate::tools::command("ffmpeg");
         cmd.args(["-v", "error", "-y"])
             .args(["-ss", &format!("{start:.3}"), "-to", &format!("{end:.3}")])
             .arg("-i")

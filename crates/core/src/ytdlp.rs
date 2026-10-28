@@ -132,7 +132,7 @@ const ALBUM_LOOKUP: std::time::Duration = std::time::Duration::from_secs(30);
 const ALBUM_CANDIDATES: &str = "3";
 
 pub fn find_album(artist: &str, title: &str, cancel: &std::sync::atomic::AtomicBool) -> Result<Option<AlbumHit>, String> {
-    find_album_with("yt-dlp", artist, title, cancel)
+    find_album_with(&crate::tools::bin("yt-dlp"), artist, title, cancel)
 }
 
 /// Searches YouTube Music's albums for the release: the first by the same artist whose title is the same
@@ -157,7 +157,7 @@ pub(crate) fn find_album_with(bin: &str, artist: &str, title: &str, cancel: &std
 }
 
 pub fn find_song(artist: &str, title: &str) -> Result<Option<String>, String> {
-    find_song_with("yt-dlp", artist, title)
+    find_song_with(&crate::tools::bin("yt-dlp"), artist, title)
 }
 
 /// The video id of the artist's song by that title on YouTube Music.
@@ -203,6 +203,7 @@ fn flat(bin: &str, args: &[&str]) -> Result<String, String> {
 
 fn read(bin: &str, args: &[&str]) -> Result<String, String> {
     let mut cmd = Command::new(bin);
+    cmd.env("PATH", crate::tools::path());
     cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let out = crate::lookup::run_bounded(&mut cmd, ALBUM_LOOKUP).ok_or("yt-dlp did not answer in time")?;
     if !out.status.success() {
@@ -237,7 +238,7 @@ fn album_line(line: &str, artist: &str, want: &str) -> Option<AlbumHit> {
 /// One request instead of one per video, which is a second rather than half a
 /// minute; the paths match what the real download computes.
 pub fn scan(cfg: &Config) -> Result<Listing> {
-    scan_with("yt-dlp", cfg)
+    scan_with(&crate::tools::bin("yt-dlp"), cfg)
 }
 
 /// Takes the binary so a test can hand it a stub and read back the arguments
@@ -248,6 +249,7 @@ pub fn scan(cfg: &Config) -> Result<Listing> {
 /// the call site chooses to do with it.
 pub(crate) fn scan_with(bin: &str, cfg: &Config) -> Result<Listing> {
     let out = Command::new(bin)
+        .env("PATH", crate::tools::path())
         .args([
             "--skip-download",
             "--quiet",
@@ -425,7 +427,7 @@ pub fn run(
     tx: &Sender<Msg>,
     refetch: &HashSet<usize>,
 ) -> Result<()> {
-    run_with("yt-dlp", cfg, tracks, tx, refetch)
+    run_with(&crate::tools::bin("yt-dlp"), cfg, tracks, tx, refetch)
 }
 
 const NATIVE_M4A: &str = "bestaudio[ext=m4a]/bestaudio";
@@ -462,6 +464,12 @@ fn run_with(
     }
 
     let mut cmd = Command::new(bin);
+    cmd.env("PATH", crate::tools::path());
+    // Named outright as well as on PATH, since converting the audio is the step that needs it.
+    let ffmpeg = crate::tools::bin("ffmpeg");
+    if Path::new(&ffmpeg).is_absolute() {
+        cmd.arg("--ffmpeg-location").arg(&ffmpeg);
+    }
     cmd.args([
         "--yes-playlist",
         "--extract-audio",
@@ -752,6 +760,45 @@ mod tests {
         assert_eq!(args[ours - 1], "-f");
         let theirs = args.iter().rposition(|a| a == "140").unwrap();
         assert!(theirs > ours, "the user's own -f came first and lost: {args:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // yt-dlp runs ffmpeg itself to convert the audio, so it has to find the copy earworm found: under Finder
+    // the PATH it inherits has no Homebrew. It gets the folders earworm searched, and ffmpeg by name.
+    #[cfg(unix)]
+    #[test]
+    fn yt_dlp_is_told_where_ffmpeg_is() {
+        let dir = std::env::temp_dir().join(format!("earworm-ffloc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (bin, log, path_seen) = (dir.join("yt-dlp"), dir.join("log"), dir.join("path"));
+        std::fs::write(
+            &bin,
+            format!(
+                "#!/bin/sh\necho \"$PATH\" > \"{}\"\nfor a in \"$@\"; do echo \"$a\" >> \"{}\"; done\nexit 0\n",
+                path_seen.display(),
+                log.display()
+            ),
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut cfg = crate::worker::tests::config(true);
+        cfg.dir = dir.join("music");
+        let mut tracks = vec![Track::new(1, "id".into(), "n".into(), dir.join("a.opus"))];
+        let (tx, _rx) = std::sync::mpsc::channel();
+        run_with(&bin.display().to_string(), &cfg, &mut tracks, &tx, &HashSet::new()).unwrap();
+
+        let seen: Vec<std::path::PathBuf> = std::env::split_paths(&std::fs::read_to_string(&path_seen).unwrap().trim().to_string()).collect();
+        for dir in ["/opt/homebrew/bin", "/usr/local/bin"] {
+            assert!(seen.contains(&std::path::PathBuf::from(dir)), "{dir} missing from yt-dlp's PATH: {seen:?}");
+        }
+        let args: Vec<String> = std::fs::read_to_string(&log).unwrap().lines().map(String::from).collect();
+        let ffmpeg = crate::tools::bin("ffmpeg");
+        if std::path::Path::new(&ffmpeg).is_absolute() {
+            let at = args.iter().position(|a| a == "--ffmpeg-location").expect("ffmpeg's location went unsaid");
+            assert_eq!(args[at + 1], ffmpeg);
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 

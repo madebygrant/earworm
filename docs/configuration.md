@@ -37,6 +37,9 @@ cursor = "#00ff88"
 
 extra = ["--sleep-requests", "1"]   # always passed to yt-dlp
 acoustid_key = "..."                # or use ACOUSTID_API_KEY
+
+[tools]            # a tool earworm cannot find on its own; see docs/install.md
+ffmpeg = "~/bin/ffmpeg"
 ```
 
 ## Flags
