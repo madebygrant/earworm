@@ -1,6 +1,7 @@
 # earworm
 
-Rust/ratatui TUI that downloads a YouTube playlist as tagged opus files. See
+Rust/ratatui TUI that downloads a YouTube playlist as tagged opus files, built
+on a core library a desktop front end will share. See
 README.md for user-facing behaviour.
 
 ## Architecture
@@ -11,16 +12,22 @@ call and file write. Nothing that blocks touches the render loop. The one
 exception is `^t` writing the theme to the config, and the reason it is one is
 in docs/rules/themes-and-colour.md.
 
-- `main.rs` — terminal setup, event loop, key handling, shutdown
+A Cargo workspace. `crates/core` (`earworm-core`, a library) holds everything
+that is not drawing; `crates/tui` (package and binary `earworm`) is the
+terminal front end on top of it. The core never depends on the TUI, and
+`main.rs` re-exports the core's modules at the TUI's root so `crate::config`
+and friends resolve there too. Test helpers the TUI's tests need from the core
+sit behind core's `test-support` feature, which only the TUI's dev-dependency
+turns on.
+
+`crates/core/src`:
+
 - `protocol.rs` — what the worker and a front end exchange: `Msg` (worker to
   UI), `Cmd` (UI to worker), `Track`, `Status`, `Shelf` (one library row),
   `Prompt`, `Reply`, `Asker` (worker asks the UI a question and blocks on the
   reply), `Escape` (what Esc on a prompt does), the row structs and
   `Playback`. Non-UI modules import these from here, never from `app`, and
   `app` keeps its imports private so the compiler holds that line
-- `app.rs` — `App` state, `View` (which screen has the keys), `picking` (the
-  reply channel for the pick gate), the `marked` set behind `targets()`, and
-  the `filter` behind `rows()`
 - `config.rs` — `Cli`, the TOML `FileConfig`, and `Config::build`, which merges
   them; `SWITCHES` and `Config::rows`, what the settings screen lists
 - `worker.rs` — `ask_start` (library, resync or the URL prompt, which loops
@@ -36,19 +43,27 @@ in docs/rules/themes-and-colour.md.
 - `lookup.rs` — AcoustID, Deezer, Cover Art Archive, all through one `ureq`
   agent
 - `player.rs` — the optional cliamp handoff: import the `.m3u8`, then `load`
-- `ui.rs` — every draw function
 - `cheats.rs` — the cheat console's codes and `Unlocked`, the session's
   unlocks, shared by the UI and the worker
 - `achievements.rs` — the `Achievement` table, a pure `earned(Facts)`, and the
   state file that remembers which were announced
-- `theme.rs` — `Palette` and the four themes it ships, the WCAG measurements
+- `theme.rs` — `Palette` and the five themes it ships, the WCAG measurements
   that keep them legible, `background()` (the diagonal gradient painted behind
-  every frame) and the 256-colour quantiser
+  every frame) and the 256-colour quantiser. Colours are `ratatui_core`'s, the
+  one ratatui crate the core depends on
+- `icons.rs` — the glyph sets behind `icons = "..."`
 - `artists.rs` — the artist index read off the tags, `key` (one artist under
   any spelling), and the `.artists` and `.artists-seen` stores
 - `discover.rs` — Deezer's artists, releases, top tracks and related artists,
   `album_key`/`song_key`, the owned/partial match and the new-release check
 
+`crates/tui/src`:
+
+- `main.rs` — terminal setup, event loop, key handling, shutdown
+- `app.rs` — `App` state, `View` (which screen has the keys), `picking` (the
+  reply channel for the pick gate), the `marked` set behind `targets()`, and
+  the `filter` behind `rows()`
+- `ui.rs` — every draw function
 
 ## Rules
 
@@ -115,9 +130,9 @@ different data and reports something else. Two runs that disagree are the
 harness, not the code, until proven otherwise.
 
 **Check the binary is newer than the source.** `cargo build` has reported
-`Finished` here without recompiling while `src/` was newer, which means
-verifying a fix against a binary that predates it. `cargo clean -p earworm`
-forces it.
+`Finished` here without recompiling while the source was newer, which means
+verifying a fix against a binary that predates it.
+`cargo clean -p earworm -p earworm-core` forces it.
 
 **Break the fix and watch the test fail.** Three tests written this way passed
 against the bug they described. Two specific traps: `ListState::select` with an

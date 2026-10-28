@@ -1323,8 +1323,8 @@ fn draw_found(frame: &mut Frame, app: &mut App, area: Rect) {
 
    `ink` on `accent` is the one filled pair the palettes are measured on, and
    reversed without colour, exactly as `draw_band` does: a fill is the only
-   thing that reads as a pill, and this is the one fill that is legible on all
-   four themes. It punches through the gradient like the band does, which for
+   thing that reads as a pill, and this is the one fill that is legible on every
+   theme. It punches through the gradient like the band does, which for
    seven columns is the point rather than a cost. The word is what carries it,
    so nothing here is told apart by colour alone. */
 fn kind_pill(
@@ -2963,7 +2963,7 @@ mod tests {
                 .join("\n")
         };
 
-        for name in ["warm", "light", "cool", "neon"] {
+        for (name, _) in crate::theme::BUILT_INS {
             let screen = overlay(&mut app);
             assert_eq!(app.theme_name, name, "the walk went somewhere else");
             /* The run row alone, not the whole screen: the header carries the
@@ -3243,7 +3243,7 @@ mod tests {
     }
 
     /* A theme changes colour and nothing else. Every glyph in every cell is
-       compared across all four, because the palette is threaded through a
+       compared across every theme, because the palette is threaded through a
        hundred call sites by hand and the way that goes wrong is a slot whose
        colour also decides a width — a status word styled from one palette and
        padded from another, say. Colour is asserted to actually differ in the

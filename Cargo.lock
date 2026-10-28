@@ -533,11 +533,22 @@ version = "0.6.0"
 dependencies = [
  "anyhow",
  "clap",
+ "earworm-core",
  "image",
- "lofty",
- "nucleo-matcher",
  "ratatui",
  "ratatui-image",
+ "unicode-width",
+]
+
+[[package]]
+name = "earworm-core"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "lofty",
+ "nucleo-matcher",
+ "ratatui-core",
  "serde",
  "serde_json",
  "toml",

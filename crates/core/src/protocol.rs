@@ -42,7 +42,7 @@ pub enum Status {
    it. `counts()` used to, which made forgetting one drop a whole column from
    the tally with nothing saying why, and it now builds itself from the
    tracks instead. */
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub const TALLY: [Status; 15] = [
     Status::Pending,
     Status::Have,
@@ -763,8 +763,9 @@ impl Asker {
 }
 
 #[cfg(test)]
-pub(crate) mod tests {
+mod tests {
     use super::*;
+    use super::test_support::at;
 
     /* The header said `downloading` while the row said `getting`, and
        `reading` on a row was tag reading while `reading playlist` in the
@@ -814,14 +815,6 @@ pub(crate) mod tests {
         assert!(asker.input_noted("h", "", "", Escape::Quit).is_none());
     }
 
-    pub(crate) fn at(player: Player, folder: Option<&str>, playing: bool) -> Playback {
-        Playback {
-            player,
-            folder: folder.map(PathBuf::from),
-            track: None,
-            playing,
-        }
-    }
 
     /* The guard inside `Watch` is the only thing between a three-second poll
        and a message every three seconds for the life of the session, and
@@ -931,6 +924,22 @@ pub(crate) mod tests {
                 | Status::Local => false,
             };
             assert_eq!(status.settled(), !in_flight, "{status:?}");
+        }
+    }
+}
+
+// For the front ends' tests too, which is why it is not inside `tests`.
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
+    use super::{Playback, Player};
+    use std::path::PathBuf;
+
+    pub fn at(player: Player, folder: Option<&str>, playing: bool) -> Playback {
+        Playback {
+            player,
+            folder: folder.map(PathBuf::from),
+            track: None,
+            playing,
         }
     }
 }

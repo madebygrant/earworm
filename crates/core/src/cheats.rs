@@ -68,13 +68,13 @@ pub const CHEATS: &[Cheat] = &[
 ];
 
 /// What the tests type instead of a real code, one per feature.
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub const TEST_CODE: &str = "opensesame";
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub const TEST_THEME_CODE: &str = "hocuspocus";
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub const TEST_GAMEBOY_CODE: &str = "shazam";
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 const TEST_CHEATS: &[Cheat] = &[
     Cheat {
         hash: 0x7a92_14a9_c2bf_1ce7,
@@ -105,7 +105,7 @@ fn digest(text: &str) -> u64 {
 pub fn find(typed: &str) -> Option<&'static Cheat> {
     let hash = digest(&typed.trim().to_ascii_lowercase());
     let table = CHEATS.iter();
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     let table = table.chain(TEST_CHEATS);
     table.into_iter().find(|c| c.hash == hash)
 }

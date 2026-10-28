@@ -7030,14 +7030,9 @@ pub mod tests {
             "a file the playlist does not have was written into it: {body}"
         );
 
-        // And `D` is not even drawn: it reads `Gone` plus a proven departure,
-        // and a local row is neither.
-        let (ui_tx, _ui_rx) = std::sync::mpsc::channel();
-        let mut app = crate::app::App::new(ui_tx, String::new());
-        app.tracks = tracks.clone();
-        app.done = Some(Ok(String::new()));
-        assert!(!app.can_purge(), "D was offered somebody's own music");
-        assert_eq!(app.purgeable(), 0);
+        // And `D` never reaches it: the key needs `Gone` plus a proven departure, and a local row is
+        // neither. The UI's side of that is `a_local_row_is_never_offered_to_d` in the TUI.
+        assert!(!tracks[1].departure_proven, "a local file was marked as departed");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -11022,6 +11017,26 @@ mod duplicate_tests {
     use crate::worker::tests::{config, tiny_opus};
     use std::sync::mpsc::channel;
 
+    // The twin each track ends up with, folded from the messages the way `App::apply` does. The UI's
+    // tests draw the marker from these; here it is enough that the worker said the right thing.
+    fn twins_said(rx: &std::sync::mpsc::Receiver<Msg>) -> std::collections::BTreeMap<usize, Option<String>> {
+        let mut twins = std::collections::BTreeMap::new();
+        for msg in rx.try_iter() {
+            match msg {
+                Msg::Tracks(tracks) => {
+                    twins = tracks.into_iter().map(|t| (t.index, t.twin)).collect();
+                }
+                Msg::Twin { index, twin } => {
+                    if let Some(held) = twins.get_mut(&index) {
+                        *held = twin;
+                    }
+                }
+                _ => {}
+            }
+        }
+        twins
+    }
+
     fn library_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("earworm-dup-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
@@ -11479,7 +11494,6 @@ mod duplicate_tests {
     // The whole reopen path on real files: tag, sidecar, `open_shelf`, then the screen.
     #[test]
     fn a_reopened_folder_shows_the_twin_marker_on_screen() {
-        use ratatui::{Terminal, backend::TestBackend};
         let dir = library_dir("screen");
         let (tx, rx) = channel();
         let asker = Asker { tx: tx.clone(), enabled: false };
@@ -11518,26 +11532,13 @@ mod duplicate_tests {
         let mut tracks = Vec::new();
         open_shelf(&mut cfg, &tx, &mut tracks, &shelf).unwrap();
 
-        let (ui_tx, _ui_rx) = channel();
-        let mut app = crate::app::App::new(ui_tx, "settings".into());
-        app.intro_done = true;
-        for msg in rx.try_iter() {
-            app.apply(msg);
-        }
-        let mut terminal = Terminal::new(TestBackend::new(120, 10)).unwrap();
-        terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
-        let buffer = terminal.backend().buffer().clone();
-        let screen: String = (0..10)
-            .map(|y| (0..120).map(|x| buffer[(x, y)].symbol().to_string()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(screen.contains("≈ same recording in A"), "{screen}");
+        let twins = twins_said(&rx);
+        assert!(twins.values().any(|t| t.as_deref() == Some("same recording in A")), "{twins:?}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
     // Two folders holding one video are what a copy makes, so reopening either shows no marker.
     #[test]
     fn a_reopened_folder_whose_video_is_also_elsewhere_shows_no_marker() {
-        use ratatui::{Terminal, backend::TestBackend};
         let dir = library_dir("screen-control");
         let (tx, rx) = channel();
         let asker = Asker { tx: tx.clone(), enabled: false };
@@ -11569,20 +11570,8 @@ mod duplicate_tests {
         let shelf = library(&dir).into_iter().find(|s| s.name == "A").unwrap();
         let mut tracks = Vec::new();
         open_shelf(&mut cfg, &tx, &mut tracks, &shelf).unwrap();
-        let (ui_tx, _ui_rx) = channel();
-        let mut app = crate::app::App::new(ui_tx, "settings".into());
-        app.intro_done = true;
-        for msg in rx.try_iter() {
-            app.apply(msg);
-        }
-        let mut terminal = Terminal::new(TestBackend::new(120, 10)).unwrap();
-        terminal.draw(|f| crate::ui::draw(f, &mut app)).unwrap();
-        let buffer = terminal.backend().buffer().clone();
-        let screen: String = (0..10)
-            .map(|y| (0..120).map(|x| buffer[(x, y)].symbol().to_string()).collect::<String>())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(screen.contains("Creep") && !screen.contains('≈'), "{screen}");
+        let twins = twins_said(&rx);
+        assert!(!twins.is_empty() && twins.values().all(Option::is_none), "{twins:?}");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

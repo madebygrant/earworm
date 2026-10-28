@@ -2,16 +2,17 @@
 
 [Back to the README](../README.md)
 
-Four palettes ship. `^t` walks them with the screen in front of you, which is how anyone picks a
+Five palettes ship. `^t` walks them with the screen in front of you, which is how anyone picks a
 theme, and writes the one you stop on back to the config. `theme` in the config and `--theme` on the
 command line name one directly.
 
 | Theme   | For                                                                     |
 | ------- | ----------------------------------------------------------------------- |
 | `warm`  | the default. Cream and gold on a warm near-black gradient               |
-| `light` | terminals with a light background, where the other three are unreadable |
+| `light` | terminals with a light background, where the others are unreadable       |
 | `cool`  | slate and steel. Warm's structure with the warmth taken out             |
 | `neon`  | magenta and cyan over violet-to-black                                   |
+| `graphite` | neutral grey with periwinkle chrome, the desktop app's default         |
 
 Or define your own, below.
 
@@ -21,8 +22,12 @@ library's track search, and rather than `T`, which searches again for one track.
 
 ## Themes of your own
 
-A `[themes.<name>]` table defines a palette under its own name. It joins the four that ship: `theme`
-and `--theme` select it, and `^t` walks onto it after `neon`.
+A `[themes.<name>]` table defines a palette under its own name, which can't be one earworm ships.
+`graphite` is newer than the other four, so a theme of your own by that name needs renaming: earworm
+stops at startup and says so rather than letting yours hide the built-in.
+
+A defined theme joins the five that ship: `theme`
+and `--theme` select it, and `^t` walks onto it after `graphite`.
 
 ```toml
 theme = "midnight"
@@ -48,7 +53,7 @@ A few rules the errors will tell you about anyway:
   name a peer could name a cycle.
 - A theme may not take a name earworm ships. Shadowing `warm` would make it unreachable with nothing
   saying so.
-- Defined themes walk in name order, after the four built-ins, so reordering the file does not
+- Defined themes walk in name order, after the five built-ins, so reordering the file does not
   reorder `^t`. Name order is by character code, which is alphabetical for the lowercase names
   anyone actually writes; `Zulu` sorts before `aurora`.
 - A name is written back into the config by `^t`, so it cannot contain a quote, a backslash or a
@@ -91,7 +96,7 @@ next start, which is why the flash mentions it while a table is there.
 
 ## Measured, not eyeballed
 
-Every readable colour in the four that ship clears WCAG 4.5:1 against both ends of its own gradient
+Every readable colour in the five that ship clears WCAG 4.5:1 against both ends of its own gradient
 and against the tone popups are raised with, and still clears 3:1 after a 256-colour terminal has
 quantised it. `ink` is
 measured against `accent` instead, because the band is the only thing it is ever drawn on. The tests

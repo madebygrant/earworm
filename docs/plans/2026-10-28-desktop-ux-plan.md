@@ -70,7 +70,7 @@ gradient ends. `graphite` is new; the other four are the TUI's own values.
 | error | `#FF8F87` | `failed`, log errors |
 | muted | `#A0A6B2` | sources, notes, `queued` `gone` `skipped` |
 | unsure | `#B9BEC8` | "we looked and found nothing" |
-| rule | `#343842` | borders, dividers, empty tile outlines |
+| rule | `#4E525C` | borders, dividers, empty tile outlines |
 | surface | `#262A31` | dialogs, tinted rows |
 | ink | `#16181D` | text on an accent fill |
 | near, far | `#1D2026`, `#121418` | the window gradient, 160°, stop 0.76 |

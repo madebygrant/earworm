@@ -36,7 +36,7 @@ fn hint_for(from_git: bool) -> &'static str {
     if from_git {
         "cargo install --git https://github.com/madebygrant/earworm"
     } else {
-        "git pull && cargo install --path ."
+        "git pull && cargo install --path crates/tui"
     }
 }
 
@@ -192,7 +192,7 @@ mod tests {
        running it was built, and says nothing about the other. */
     #[test]
     fn each_build_is_told_how_to_update_itself() {
-        assert!(hint_for(false).contains("cargo install --path"));
+        assert!(hint_for(false).contains("cargo install --path crates/tui"));
         assert!(hint_for(true).contains("--git"));
         // Whichever this binary is, it has something to say.
         assert!(hint().contains("cargo install"));

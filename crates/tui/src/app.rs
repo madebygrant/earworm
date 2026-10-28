@@ -2639,7 +2639,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::tests::at;
+    use crate::protocol::test_support::at;
     use crate::protocol::{Escape, Player, TALLY};
 
     /// An `App` with nothing in it, for the keys that answer by themselves.
@@ -2706,7 +2706,7 @@ mod tests {
             app.cycle_theme();
             seen.push(app.theme_name.clone());
         }
-        assert_eq!(seen, ["warm", "light", "cool", "neon"]);
+        assert_eq!(seen, ["warm", "light", "cool", "neon", "graphite"]);
 
         app.cycle_theme();
         assert_eq!(app.theme, crate::theme::WARM, "the walk did not come back");
@@ -2748,8 +2748,8 @@ mod tests {
         mine.accent = ratatui::style::Color::Rgb(255, 92, 213);
         app.themes.add("midnight".into(), mine);
         // Parked on the last shipped theme, so one press steps off the end.
-        app.theme_name = "neon".into();
-        app.theme = crate::theme::NEON;
+        app.theme_name = "graphite".into();
+        app.theme = crate::theme::GRAPHITE;
 
         app.cycle_theme();
         assert_eq!(app.theme_name, "midnight", "the walk stopped at the built-ins");
@@ -3998,6 +3998,18 @@ mod tests {
         // Never while the worker is busy or the run is still going.
         app.busy = true;
         assert!(!app.can_purge());
+    }
+
+    // A file of the user's own that a sync could not match is never a departure, whatever else is set.
+    #[test]
+    fn a_local_row_is_never_offered_to_d() {
+        let mut app = named(&["Mine", "Theirs"]);
+        app.done = Some(Ok(String::new()));
+        app.tracks[1].status = Status::Local;
+        // Proven, so the status is the only thing between this row and `D`.
+        app.tracks[1].departure_proven = true;
+        assert!(!app.can_purge(), "D was offered somebody's own music");
+        assert_eq!(app.purgeable(), 0);
     }
 
     /* Narrowing the filter under the cursor must move it, or the highlighted

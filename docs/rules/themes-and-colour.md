@@ -3,7 +3,7 @@
 ## Themes and colour depth
 
 - **The theme registry is runtime state; `BUILT_INS` is only its seed.**
-  `Themes` holds the four that ship plus every `[themes.<name>]`, and the four
+  `Themes` holds the ones that ship plus every `[themes.<name>]`, and the four
   functions that used to scan the const — `named`, `name`, `next`, `names` —
   are methods on it. The reason is that a user theme's name is a runtime
   `String` where `Palette::name()` returned `&'static str`. Keeping the
@@ -59,7 +59,7 @@
 - **Every palette is measured, not only the repainted ones.** `unreadable()`
   runs on whatever comes out of `theme()`, because a `[themes.*]` palette is
   as unmeasurable by the suite as a `[colors]` one. It once ran on only the
-  second, which docs/history.md records. The four that ship cost nothing
+  second, which docs/history.md records. The ones that ship cost nothing
   there, because their ratios are a test.
 - **`set_field` takes twelve names, `slots()` lists ten.** The gradient's two
   ends are colours a theme names like any other, but nothing is ever read *in*
@@ -105,14 +105,14 @@
   every palette's.** `the_default_palette_survives_the_256_colour_cube` is a
   claim about hue, and a saturated red or violet has no near neighbour in a
   cube whose steps are 40 apart: `light`'s error moves 40 and `neon`'s rule
-  47, and no shade of either does better. Holding all four to it would mean
-  shipping only near-greys. What must survive on all four is legibility, which
+  47, and no shade of either does better. Holding every built-in to it would mean
+  shipping only near-greys. What must survive on every one is legibility, which
   `every_palette_stays_legible_after_quantising` measures after the same trip.
 - **A theme changes colour, never layout.** The palette is threaded through
   about a hundred call sites by hand, and the way that goes wrong is a slot
   whose colour also decides a width.
   `a_theme_changes_the_colours_and_never_the_layout` compares every cell's
-  glyph across all four and asserts the colours differ in the same pass, or a
+  glyph across every built-in and asserts the colours differ in the same pass, or a
   bug that painted every theme warm would pass it.
 - **An unknown theme, base, colour or field stops the start; one that merely
   measures badly does not.** Both errors name what it should have been, because a theme that

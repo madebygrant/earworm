@@ -4,7 +4,7 @@
 words grouped by what to do about them.
 
 `^t` is the one key that works everywhere, the help overlay and prompts
-included: it walks the four [colour themes](themes.md) and remembers the one
+included: it walks the five [colour themes](themes.md) and remembers the one
 you stop on.
 
 ![The keys overlay: keys grouped by what they do, then the status words

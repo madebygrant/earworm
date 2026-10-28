@@ -1,27 +1,11 @@
-mod achievements;
 mod app;
-mod artists;
-mod cheats;
-mod config;
-mod custom;
-mod deps;
-mod discover;
-mod export;
-mod icons;
-mod import;
-mod lookup;
-mod manifest;
-mod player;
-mod playlists;
-mod picker;
-mod portable;
-mod protocol;
-mod tag;
-mod theme;
 mod ui;
-mod update;
-mod worker;
-mod ytdlp;
+
+// The core's modules at this crate's root, so `crate::config` and friends read as they did before the split.
+use earworm_core::{
+    achievements, artists, cheats, config, deps, export, icons, lookup, manifest, picker, protocol, tag, theme,
+    update, worker, ytdlp,
+};
 
 use std::io::{IsTerminal, Write};
 use std::path::Path;

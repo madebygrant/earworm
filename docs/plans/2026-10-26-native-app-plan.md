@@ -49,7 +49,7 @@ it is a pure move with the suite as its check.
 
 Exit: `cargo test` passes and `grep -n "crate::app" src/{worker,tag,lookup,custom,export,discover,artists,picker,player,playlists}.rs` finds nothing.
 
-## 2. Split into a workspace
+## 2. Split into a workspace [done 2026-10-28]
 
 - `crates/core` (lib): worker, config, tag, lookup, ytdlp, manifest, artists,
   discover, custom, playlists, export, deps, update, cheats, achievements,
@@ -78,7 +78,7 @@ Exit: `cargo test` passes and `grep -n "crate::app" src/{worker,tag,lookup,custo
 - Update CLAUDE.md's module list and the rules table paths.
 
 Exit: `cargo test --workspace` passes with the same count as before the
-split, and `cargo build -p earworm-tui` produces `earworm`.
+split, and `cargo build -p earworm` produces `earworm`.
 
 ## 3. A serialisable protocol with question ids
 

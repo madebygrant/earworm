@@ -8,14 +8,15 @@ use clap::{ArgMatches, Parser, parser::ValueSource};
 use unicode_normalization::UnicodeNormalization;
 use serde::Deserialize;
 
-/* `about` with no value reads Cargo.toml's `description`, so that is what
-   `--help` actually prints and editing the line below changes nothing there.
-   Kept saying the same thing, since two answers to "what is this" is how they
-   drift. */
-/// Playlist in, library out. Turns a YouTube playlist into audio files with
-/// verified tags, cover art and an .m3u8.
+// `about` is spelled out because a bare one reads the Cargo description of the crate this compiles
+// in, which is earworm-core's. Keep it in step with crates/tui/Cargo.toml's `description`.
 #[derive(Parser, Debug)]
-#[command(name = "earworm", version, about, long_about = None)]
+#[command(
+    name = "earworm",
+    version,
+    about = "Playlist in, library out. Turns a YouTube playlist into audio files with verified tags, cover art and an .m3u8",
+    long_about = None
+)]
 pub struct Cli {
     /// Playlist or video URL. Omit it and earworm asks for one.
     pub url: Option<String>,
@@ -28,7 +29,7 @@ pub struct Cli {
     #[arg(short, long, value_name = "NAME")]
     pub format: Option<String>,
 
-    /// Colour theme: warm, light, cool or neon
+    /// Colour theme: warm, light, cool, neon or graphite
     #[arg(long, value_name = "NAME")]
     pub theme: Option<String>,
 
@@ -162,7 +163,7 @@ pub struct FileConfig {
     pub colors: Option<BTreeMap<String, String>>,
     /// Palettes of the user's own, joining the built-ins under their own
     /// names. Ordered by the map, so the `^t` walk is alphabetical after the
-    /// four that ship and does not move when the file is reordered.
+    /// ones that ship and does not move when the file is reordered.
     pub themes: Option<BTreeMap<String, FileTheme>>,
 }
 
@@ -370,7 +371,7 @@ pub fn save_format(path: &std::path::Path, format: &str) -> Result<()> {
     save_key(path, "format", &format!("\"{format}\""))
 }
 
-/* The four that ship plus every `[themes.<name>]`, resolved once. A name that
+/* The ones that ship plus every `[themes.<name>]`, resolved once. A name that
    is already taken is refused rather than shadowing: a `[themes.warm]` that
    silently won would make the built-in unreachable with nothing saying so,
    and a config that redefines `warm` is far more likely to be a mistake than
@@ -495,7 +496,7 @@ fn theme(
     /* Measured whatever it is, not only when a `[colors]` table repainted it:
        a `[themes.*]` palette is just as unmeasurable by the suite, and the
        first version of this only looked at the override path, so a theme
-       somebody defined could be illegible with nothing said. The four that
+       somebody defined could be illegible with nothing said. The ones that
        ship cost nothing here — their ratios are a test, so they come back
        with nothing to report. */
     let warnings = palette.unreadable();
@@ -1168,7 +1169,7 @@ mod tests {
     fn an_unknown_theme_stops_the_start_and_names_the_ones_that_exist() {
         let err = refuse("theme = \"midnight\"\n", &[]);
         assert!(err.contains("unknown theme \"midnight\""), "{err}");
-        for shipped in ["warm", "light", "cool", "neon"] {
+        for (shipped, _) in crate::theme::BUILT_INS {
             assert!(err.contains(shipped), "{shipped} went unlisted: {err}");
         }
         // And the same name off the command line, which is the other route in.
@@ -1189,7 +1190,7 @@ mod tests {
     #[test]
     fn colors_repaint_one_slot_of_the_named_theme() {
         let cfg = build("theme = \"neon\"\n[colors]\ncursor = \"#00ff88\"\n", &[]);
-        assert_eq!(cfg.theme.cursor, ratatui::style::Color::Rgb(0, 255, 136));
+        assert_eq!(cfg.theme.cursor, ratatui_core::style::Color::Rgb(0, 255, 136));
         // Everything it did not name is still neon's.
         assert_eq!(cfg.theme.text, crate::theme::NEON.text);
         assert_eq!(cfg.theme.accent, crate::theme::NEON.accent);
@@ -1230,7 +1231,7 @@ mod tests {
     }
 
     /* The point of the feature: a palette of your own, under its own name, in
-       the same list as the four that ship. With a base it is a diff, so
+       the same list as the ones that ship. With a base it is a diff, so
        changing two colours means writing two. */
     #[test]
     fn a_defined_theme_can_be_named_and_is_a_diff_on_its_base() {
@@ -1239,7 +1240,7 @@ mod tests {
             &[],
         );
         assert_eq!(cfg.theme_name, "midnight");
-        assert_eq!(cfg.theme.accent, ratatui::style::Color::Rgb(255, 92, 213));
+        assert_eq!(cfg.theme.accent, ratatui_core::style::Color::Rgb(255, 92, 213));
         // The gradient is nameable like any other colour.
         assert_eq!(cfg.theme.near, (26, 10, 44));
         // Everything it did not name is still cool's, including the far end.
@@ -1252,7 +1253,7 @@ mod tests {
         );
     }
 
-    /* A defined theme joins the walk after the four that ship, so `^t` can
+    /* A defined theme joins the walk after the ones that ship, so `^t` can
        reach it: a theme only `--theme` could select would be half a feature. */
     #[test]
     fn a_defined_theme_joins_the_walk_after_the_shipped_ones() {
@@ -1261,7 +1262,7 @@ mod tests {
             &[],
         );
         // Alphabetical after the built-ins, which is what a BTreeMap yields.
-        assert_eq!(cfg.themes.after("neon").0, "aurora");
+        assert_eq!(cfg.themes.after("graphite").0, "aurora");
         assert_eq!(cfg.themes.after("aurora").0, "midnight");
         assert_eq!(cfg.themes.after("midnight").0, "warm", "the walk did not wrap");
     }
@@ -1272,7 +1273,7 @@ mod tests {
     #[test]
     fn a_theme_with_no_base_must_give_every_colour() {
         let whole = build(&format!("theme = \"flat\"\n{}", whole_palette("flat")), &[]);
-        assert_eq!(whole.theme.text, ratatui::style::Color::Rgb(16, 16, 16));
+        assert_eq!(whole.theme.text, ratatui_core::style::Color::Rgb(16, 16, 16));
         assert_eq!(whole.theme.near, (16, 16, 16));
 
         let err = refuse("[themes.flat]\ntext = \"#101010\"\n", &[]);
@@ -1300,7 +1301,7 @@ mod tests {
         let err = refuse("[themes.mine]\nbase = \"midnight\"\n", &[]);
         assert!(err.contains("unknown base \"midnight\""), "{err}");
         assert!(err.contains("mine"), "it did not say whose base: {err}");
-        for shipped in ["warm", "light", "cool", "neon"] {
+        for (shipped, _) in crate::theme::BUILT_INS {
             assert!(err.contains(shipped), "{shipped} went unlisted: {err}");
         }
         // And a peer is not a base, however real its name is.
@@ -1319,7 +1320,7 @@ mod tests {
             "theme = \"midnight\"\n[themes.midnight]\nbase = \"cool\"\naccent = \"#ff5cd5\"\n[colors]\naccent = \"#00ff88\"\n",
             &[],
         );
-        assert_eq!(cfg.theme.accent, ratatui::style::Color::Rgb(0, 255, 136));
+        assert_eq!(cfg.theme.accent, ratatui_core::style::Color::Rgb(0, 255, 136));
         // The name is still the theme's: that is what `^t` walks on from.
         assert_eq!(cfg.theme_name, "midnight");
         assert!(cfg.theme_overridden);
@@ -1327,7 +1328,7 @@ mod tests {
 
     /* A defined theme cannot be measured by the suite, so it is measured at
        startup instead and the reader is told. Never refused: it is their
-       screen, and the four that ship are the ones earworm vouches for. */
+       screen, and the ones that ship are the ones earworm vouches for. */
     #[test]
     fn a_defined_theme_that_measures_badly_starts_and_says_so() {
         let cfg = build(
@@ -1365,7 +1366,7 @@ mod tests {
         // The only thing that proves it: read it back through the real parser.
         let cfg = build_at(&file.path);
         assert_eq!(cfg.format, "flac");
-        assert_eq!(cfg.theme.cursor, ratatui::style::Color::Rgb(0, 255, 136));
+        assert_eq!(cfg.theme.cursor, ratatui_core::style::Color::Rgb(0, 255, 136));
         assert_eq!(cfg.dir, PathBuf::from("/tmp/m"), "another setting was lost");
     }
 
@@ -1417,7 +1418,7 @@ mod tests {
         let cfg = build_at(&tricky.path);
         assert_eq!(cfg.format, "flac");
         assert_eq!(cfg.extra, vec!["[colors]\n".to_string()], "the string was written into");
-        assert_eq!(cfg.theme.cursor, ratatui::style::Color::Rgb(0, 255, 136));
+        assert_eq!(cfg.theme.cursor, ratatui_core::style::Color::Rgb(0, 255, 136));
     }
 
     /// A file with no tables at all still appends, which is what it always did.
@@ -1466,12 +1467,12 @@ mod tests {
 
         let cfg = build_at(&file.path);
         assert_eq!(cfg.theme_name, "midnight");
-        assert_eq!(cfg.theme.accent, ratatui::style::Color::Rgb(255, 92, 213));
+        assert_eq!(cfg.theme.accent, ratatui_core::style::Color::Rgb(255, 92, 213));
         // Still a diff on cool, so the table came back whole and not just its name.
         assert_eq!(cfg.theme.cursor, crate::theme::COOL.cursor);
         assert_eq!(cfg.format, "flac", "another setting was lost");
         // And it is still in the walk it was written out of.
-        assert_eq!(cfg.themes.after("neon").0, "midnight");
+        assert_eq!(cfg.themes.after("graphite").0, "midnight");
     }
 
     /* A colour that merely measures badly starts anyway and says so: it is
@@ -1481,7 +1482,7 @@ mod tests {
     fn an_unreadable_override_warns_rather_than_refusing() {
         // Near-black text on the warm theme's near-black ground.
         let cfg = build("[colors]\ntext = \"#1a1a1a\"\n", &[]);
-        assert_eq!(cfg.theme.text, ratatui::style::Color::Rgb(26, 26, 26));
+        assert_eq!(cfg.theme.text, ratatui_core::style::Color::Rgb(26, 26, 26));
         assert!(
             cfg.theme_warnings.iter().any(|w| w.contains("text")),
             "it started without a word: {:?}",

@@ -1,0 +1,27 @@
+[package]
+name = "earworm"
+description = "Playlist in, library out. Turns a YouTube playlist into audio files with verified tags, cover art and an .m3u8"
+readme = "../../README.md"
+keywords = ["youtube", "music", "tui", "tagging", "yt-dlp"]
+categories = ["command-line-utilities", "multimedia::audio"]
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[[bin]]
+name = "earworm"
+path = "src/main.rs"
+
+[dependencies]
+earworm-core.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+image.workspace = true
+ratatui.workspace = true
+ratatui-image.workspace = true
+unicode-width.workspace = true
+
+[dev-dependencies]
+earworm-core = { workspace = true, features = ["test-support"] }

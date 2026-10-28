@@ -1,6 +1,6 @@
 use std::sync::OnceLock;
 
-use ratatui::style::Color;
+use ratatui_core::style::Color;
 
 /* A palette is a set of roles, not a set of pigments. The names used to be
    the colours themselves — CREAM, GOLD — which reads fine on one warm dark
@@ -158,6 +158,24 @@ pub const NEON: Palette = Palette {
     stop: 0.76,
 };
 
+// The desktop app's default: a neutral grey ground with no hue of its own, so cover art carries the
+// colour. Periwinkle chrome keeps it apart from cool's steel blue.
+pub const GRAPHITE: Palette = Palette {
+    text: Color::Rgb(241, 242, 244),
+    accent: Color::Rgb(157, 183, 255),
+    cursor: Color::Rgb(124, 221, 178),
+    warn: Color::Rgb(245, 184, 103),
+    error: Color::Rgb(255, 143, 135),
+    muted: Color::Rgb(160, 166, 178),
+    rule: Color::Rgb(78, 82, 92),
+    surface: Color::Rgb(38, 42, 49),
+    unsure: Color::Rgb(185, 190, 200),
+    ink: Color::Rgb(22, 24, 29),
+    near: (29, 32, 38),
+    far: (18, 20, 24),
+    stop: 0.76,
+};
+
 // Hot pink and cyan over a purple-to-teal ground; the teal is what keeps it apart from neon.
 pub const VAPORWAVE: Palette = Palette {
     text: Color::Rgb(255, 236, 250),
@@ -202,11 +220,12 @@ pub const SECRETS: [(&str, Palette); 2] = [("vaporwave", VAPORWAVE), ("gameboy",
 /* Every palette earworm ships. The list is what the contrast, quantise and
    NO_COLOR checks iterate, so a new theme is covered the moment it is added
    here and cannot be shipped unmeasured. */
-pub const BUILT_INS: [(&str, Palette); 4] = [
+pub const BUILT_INS: [(&str, Palette); 5] = [
     ("warm", WARM),
     ("light", LIGHT),
     ("cool", COOL),
     ("neon", NEON),
+    ("graphite", GRAPHITE),
 ];
 
 /* WCAG 2.1 relative luminance and contrast ratio. A palette is a claim about
@@ -228,7 +247,7 @@ pub fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
     (x.max(y) + 0.05) / (x.min(y) + 0.05)
 }
 
-/* Every palette this run can reach: the four built-ins, then whatever
+/* Every palette this run can reach: the built-ins, then whatever
    `[themes.<name>]` defined, resolved once at startup.
 
    A registry rather than four functions over `BUILT_INS`, because a user
@@ -238,7 +257,7 @@ pub fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
    theme was found in, not to the colours. */
 #[derive(Clone, Debug)]
 /* Never empty, which is what makes the index in `after` safe: `Default` seeds
-   it with the four that ship and `add` only ever appends. Nothing removes,
+   it with the ones that ship and `add` only ever appends. Nothing removes,
    and there is no constructor that starts it bare. */
 pub struct Themes(Vec<(String, Palette)>);
 
@@ -423,7 +442,7 @@ impl Default for Palette {
 }
 
 impl Palette {
-    /* One of the four that ship, by name. Kept apart from `Themes::named`
+    /* One of the ones that ship, by name. Kept apart from `Themes::named`
        because a `[themes.*]` base may only be a built-in: one that could name
        a peer could name a cycle, and resolving that is more machinery than
        starting from `cool` is worth. */
@@ -665,7 +684,7 @@ mod tests {
        whose steps are 40 apart — `light`'s error moves 40 and `neon`'s rule
        47, and there is no shade of either that does not — so holding every
        palette to this would mean shipping only near-greys. What must survive
-       on all four is the contrast, which the test below measures after the
+       on every one is the contrast, which the test below measures after the
        same trip. */
     #[test]
     fn the_default_palette_survives_the_256_colour_cube() {
@@ -772,7 +791,7 @@ mod tests {
             at = themes.after(&at).0.to_string();
             seen.push(at.clone());
         }
-        assert_eq!(seen, ["warm", "light", "cool", "neon"]);
+        assert_eq!(seen, ["warm", "light", "cool", "neon", "graphite"]);
         assert_eq!(themes.after(&at).0, "warm", "the walk did not come back");
 
         // A name nothing holds starts over rather than panicking on an index.
@@ -781,7 +800,7 @@ mod tests {
 
     /* The index in `after` rests on the list never being empty, and nothing
        in the type says so. This is what says it: the only way to build one
-       starts with the four that ship, and the only way to change one adds. */
+       starts with the ones that ship, and the only way to change one adds. */
     #[test]
     fn a_registry_always_holds_the_shipped_themes() {
         let themes = Themes::default();
@@ -810,7 +829,7 @@ mod tests {
 
         assert!(themes.has("midnight"));
         assert_eq!(themes.named("midnight"), Some(mine));
-        assert_eq!(themes.after("neon").0, "midnight", "it was left out of the walk");
+        assert_eq!(themes.after("graphite").0, "midnight", "it was left out of the walk");
         assert_eq!(themes.after("midnight").0, "warm", "the walk did not wrap past it");
         assert!(themes.names().contains("midnight"), "{}", themes.names());
     }
