@@ -1309,8 +1309,8 @@ fn handle_prompt_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     };
 
     if let Some(reply) = reply {
-        if let Some((_, tx)) = app.prompt.take() {
-            let _ = tx.send(reply);
+        if let Some((_, id)) = app.prompt.take() {
+            crate::protocol::answer(id, reply);
         }
         app.close_fields();
         app.choice = 0;
@@ -1572,16 +1572,13 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(tx, String::new());
         app.intro_done = true;
-        let (reply, answered) = std::sync::mpsc::channel();
-        app.apply(crate::protocol::Msg::Ask(
-            Prompt::Input {
+        let (reply, answered) = crate::protocol::open_question();
+        app.apply(crate::protocol::Msg::Ask { id: reply, prompt: Prompt::Input {
                 header: cheats::LOCKED.into(),
                 note: String::new(),
                 value: "music.youtube.com/playlist?list=PL1".into(),
                 escape: crate::protocol::Escape::Quit,
-            },
-            reply,
-        ));
+            } });
 
         open_console(&mut app);
         type_keys(&mut app, "nope");
@@ -2226,7 +2223,7 @@ mod tests {
             "name".into(),
             std::path::PathBuf::new(),
         )];
-        let (reply, answers) = mpsc::channel();
+        let (reply, answers) = crate::protocol::open_question();
         app.picking = Some(reply);
 
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -2480,7 +2477,7 @@ mod tests {
         let asked = |options: usize| {
             let (tx, _rx) = std::sync::mpsc::channel();
             let mut app = App::new(tx, String::new());
-            let (reply, answers) = mpsc::channel();
+            let (reply, answers) = crate::protocol::open_question();
             app.prompt = Some((
                 Prompt::Choice {
                     header: "finished".into(),
@@ -2512,7 +2509,7 @@ mod tests {
                 value: String::new(),
                 escape: crate::protocol::Escape::Skip,
             },
-            mpsc::channel().0,
+            crate::protocol::open_question().0,
         ));
         drop(answers);
         handle_prompt_key(&mut app, KeyCode::Char('3'), KeyModifiers::NONE);
@@ -2794,9 +2791,9 @@ mod tests {
         let (tx, _cmds) = mpsc::channel();
         let mut app = App::new(tx, String::new());
         app.tracks = (1..=3).map(|i| crate::protocol::Track::new(i, format!("v{i}"), format!("T{i}"), format!("/m/{i}.opus").into())).collect();
-        let (reply, _rx) = mpsc::channel();
+        let (reply, _rx) = crate::protocol::open_question();
         app.apply(crate::protocol::Msg::PickHeld(vec![2]));
-        app.apply(crate::protocol::Msg::Pick(reply));
+        app.apply(crate::protocol::Msg::Pick { id: reply });
         let mut marked: Vec<usize> = app.marked.iter().copied().collect();
         marked.sort_unstable();
         assert_eq!(marked, [1, 3]);
@@ -2891,9 +2888,9 @@ mod tests {
 
     fn with_settings(app: &mut App) {
         let rows = vec![
-            crate::config::Row { key: "cover", value: crate::config::Value::Switch(true), source: crate::config::Source::Default, what: "", when: crate::config::When::NextRun },
-            crate::config::Row { key: "pick", value: crate::config::Value::Switch(false), source: crate::config::Source::Flag, what: "", when: crate::config::When::NextRun },
-            crate::config::Row { key: "dir", value: crate::config::Value::Fixed("/music".into()), source: crate::config::Source::File, what: "", when: crate::config::When::NextStart },
+            crate::config::Row { key: "cover".into(), value: crate::config::Value::Switch(true), source: crate::config::Source::Default, what: String::new(), when: crate::config::When::NextRun },
+            crate::config::Row { key: "pick".into(), value: crate::config::Value::Switch(false), source: crate::config::Source::Flag, what: String::new(), when: crate::config::When::NextRun },
+            crate::config::Row { key: "dir".into(), value: crate::config::Value::Fixed("/music".into()), source: crate::config::Source::File, what: String::new(), when: crate::config::When::NextStart },
         ];
         app.apply(crate::protocol::Msg::Settings { text: String::new(), format: "m4a".into(), rows });
     }
@@ -2921,7 +2918,7 @@ mod tests {
         handle_key(&mut app, KeyCode::Char(','), KeyModifiers::NONE);
         let _ = cmds.try_iter().count();
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
-        assert!(matches!(cmds.try_recv(), Ok(Cmd::Switch("cover", false))));
+        assert!(matches!(cmds.try_recv(), Ok(Cmd::Switch(k, false)) if k == "cover"));
         app.apply(crate::protocol::Msg::Idle);
         handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
@@ -2969,8 +2966,8 @@ mod tests {
         use crate::config::{Row, Source, Value, When};
         let (mut app, cmds) = on_artists(vec![], vec![]);
         let rows = |icons, bell| vec![
-            Row { key: "icons", value: Value::Icons(icons), source: Source::Default, what: "", when: When::Now },
-            Row { key: "notify", value: Value::Switch(bell), source: Source::Default, what: "", when: When::Now },
+            Row { key: "icons".into(), value: Value::Icons(icons), source: Source::Default, what: String::new(), when: When::Now },
+            Row { key: "notify".into(), value: Value::Switch(bell), source: Source::Default, what: String::new(), when: When::Now },
         ];
         app.apply(crate::protocol::Msg::Settings { text: String::new(), format: "m4a".into(), rows: rows(crate::icons::Icons::Text, true) });
         assert!(app.notify());

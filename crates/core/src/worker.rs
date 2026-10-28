@@ -307,7 +307,7 @@ fn finish(
             .filter(|_| player::running());
         let _ = tx.send(Msg::Done {
             result: result.clone(),
-            stage: "finished",
+            stage: "finished".into(),
         });
         if cancel.load(Ordering::SeqCst) {
             return false;
@@ -2464,21 +2464,24 @@ fn adopt_refetched(
 /// `None` is a gate that never got an answer, which is not the same as one
 /// that came back empty.
 fn ask_which(tx: &Sender<Msg>, tracks: &mut [Track], owned: &[String]) -> Option<HashSet<usize>> {
-    let (reply_tx, reply_rx) = mpsc::channel();
+    let (id, reply_rx) = crate::protocol::open_question();
     let _ = tx.send(Msg::Stage("choose tracks".into()));
     // Ahead of `Pick`, so the gate is never open, even for a frame, with what the library holds still marked.
     let held = owned_indices(tracks, owned);
     if !held.is_empty() {
         let _ = tx.send(Msg::PickHeld(held));
     }
-    if tx.send(Msg::Pick(reply_tx)).is_err() {
+    if tx.send(Msg::Pick { id }).is_err() {
+        crate::protocol::forget(id);
         return None;
     }
     let picked: HashSet<usize> = match reply_rx.recv() {
         Ok(Reply::Picked(picked)) => picked.into_iter().collect(),
-        // The UI is gone, and skipping the whole playlist on the way out is
-        // worse than the download the shutdown is about to kill anyway.
-        _ => return None,
+        // A front end abandoning the gate takes none, as Esc does: `None` would mean no gate at all, and
+        // the run would download the whole playlist behind a question nobody answered.
+        Ok(_) => HashSet::new(),
+        // Forgotten, so nothing can answer it: the session is ending and the download goes with it.
+        Err(_) => return None,
     };
     for track in tracks.iter_mut() {
         // Already on disk or already departed: nothing was going to fetch it.
@@ -3042,9 +3045,14 @@ pub(crate) fn settings(cfg: &Config) -> Msg {
 
 /// A switch from the settings screen. Saved before it is adopted, as the format is, so the session never
 /// runs on a setting the flash says was not remembered.
-fn set_switch(cfg: &mut Config, tx: &Sender<Msg>, key: &'static str, on: bool) -> Result<()> {
+fn set_switch(cfg: &mut Config, tx: &Sender<Msg>, key: &str, on: bool) -> Result<()> {
+    // The key may have come in over JSON, so it is only trusted once found in the table.
+    let Some(switch) = config::SWITCHES.iter().find(|s| s.key == key) else {
+        anyhow::bail!("there is no setting called {key}");
+    };
+    let key = switch.key;
     let said = if on { "on" } else { "off" };
-    let at_start = config::SWITCHES.iter().any(|s| s.key == key && s.when == config::When::NextStart);
+    let at_start = switch.when == config::When::NextStart;
     let later = if at_start { "  ·  from the next start" } else { "" };
     match cfg.config_file.clone() {
         Some(path) => {
@@ -3292,6 +3300,18 @@ fn serve(
                 report(tx, undo(cfg, tx, tracks, &mut held));
                 None
             }
+            Cmd::Thumbs(files) => {
+                // One ffmpeg run per new cover, so a long batch stops where it is rather than holding up
+                // the next command.
+                for file in files {
+                    if halted() {
+                        break;
+                    }
+                    let thumb = tag::thumbnail(&file);
+                    let _ = tx.send(Msg::Thumb { file, thumb });
+                }
+                None
+            }
             Cmd::Cover(index) => {
                 report(tx, cover(tx, tracks, &asker, cancel, index, cfg.apple));
                 None
@@ -3321,7 +3341,7 @@ fn serve(
                 None
             }
             Cmd::Switch(key, on) => {
-                report(tx, set_switch(cfg, tx, key, on));
+                report(tx, set_switch(cfg, tx, &key, on));
                 None
             }
             Cmd::Icons(icons) => {
@@ -3494,7 +3514,7 @@ fn open_row(
     }
     let _ = tx.send(Msg::Done {
         result: Ok(summary),
-        stage: "opened",
+        stage: "opened".into(),
     });
     Ok(())
 }
@@ -3536,7 +3556,8 @@ enum IndexUse {
 /// and deletes all change tags, and a list of the ones that do is a list a new command would be left out of.
 fn index_use(cmd: &Cmd) -> IndexUse {
     match cmd {
-        Cmd::Artists | Cmd::Star(_) | Cmd::Discography(_) | Cmd::Top(_) | Cmd::Related(_) => IndexUse::Keep,
+        // Thumbnails read covers and change no tags, so the index they would drop is still right.
+        Cmd::Artists | Cmd::Star(_) | Cmd::Discography(_) | Cmd::Top(_) | Cmd::Related(_) | Cmd::Thumbs(_) => IndexUse::Keep,
         Cmd::GetAlbum { .. } | Cmd::GetTop { .. } => IndexUse::DropAfter,
         _ => IndexUse::Drop,
     }
@@ -3887,7 +3908,7 @@ fn retry(
     }
     let _ = tx.send(Msg::Done {
         result: Ok(summary),
-        stage: "finished",
+        stage: "finished".into(),
     });
     Ok(())
 }
@@ -5145,10 +5166,10 @@ pub mod tests {
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
                 match msg {
                     Msg::Stage(s) => staged = s == "waiting for a playlist URL",
-                    Msg::Ask(crate::protocol::Prompt::Input { header, value, .. }, reply) => {
+                    Msg::Ask { id: reply, prompt: crate::protocol::Prompt::Input { header, value, .. } } => {
                         assert!(staged, "the header never said it was waiting");
                         assert_eq!((header.as_str(), value.as_str()), (LOCKED, link));
-                        reply.send(Reply::Cancel).unwrap();
+                        assert!(crate::protocol::answer(reply, Reply::Cancel));
                         break;
                     }
                     _ => {}
@@ -5190,9 +5211,9 @@ pub mod tests {
             let mut headers = Vec::new();
             for answer in ["~/no/such/mix.md", dragged.as_str()] {
                 while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
-                    if let Msg::Ask(crate::protocol::Prompt::Input { header, .. }, reply) = msg {
+                    if let Msg::Ask { id: reply, prompt: crate::protocol::Prompt::Input { header, .. } } = msg {
                         headers.push(header);
-                        reply.send(Reply::Text(answer.into())).unwrap();
+                        assert!(crate::protocol::answer(reply, Reply::Text(answer.into())));
                         break;
                     }
                 }
@@ -5224,7 +5245,7 @@ pub mod tests {
         cfg.import = Some(file.display().to_string());
         let (tx, rx) = mpsc::channel();
         assert!(matches!(ask_start(&mut cfg, &tx), Start::Playlist));
-        assert!(!rx.try_iter().any(|msg| matches!(msg, Msg::Ask(..))), "an importable file was asked about");
+        assert!(!rx.try_iter().any(|msg| matches!(msg, Msg::Ask { .. })), "an importable file was asked about");
         assert_eq!(cfg.url, "https://www.youtube.com/watch_videos?video_ids=UEZ-apKKDKQ");
         assert_eq!(cfg.folder.as_deref(), Some("Night drive (2)"));
         let _ = std::fs::remove_dir_all(file.parent().unwrap());
@@ -5277,14 +5298,14 @@ pub mod tests {
             let worker = scope.spawn(|| prompt_url(&tx, Escape::Quit, &unlocked, link));
             let mut asked = Vec::new();
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
-                let Msg::Ask(crate::protocol::Prompt::Input { header, value, .. }, reply) = msg else {
+                let Msg::Ask { id: reply, prompt: crate::protocol::Prompt::Input { header, value, .. } } = msg else {
                     continue;
                 };
                 asked.push((header, value));
                 if asked.len() == 2 {
                     unlocked.grant(Feature::Music);
                 }
-                reply.send(Reply::Text(link.into())).unwrap();
+                assert!(crate::protocol::answer(reply, Reply::Text(link.into())));
                 if asked.len() == 2 {
                     break;
                 }
@@ -5342,10 +5363,10 @@ pub mod tests {
         std::thread::scope(|scope| {
             let worker = scope.spawn(|| rename_shelf(&mut cfg, &tx, &asker, &tracks, &from));
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
-                if let Msg::Ask(crate::protocol::Prompt::Input { value, .. }, reply) = msg {
+                if let Msg::Ask { id: reply, prompt: crate::protocol::Prompt::Input { value, .. } } = msg {
                     // Prefilled with the name it has, which is what an edit is.
                     assert_eq!(value, "Chill Evenings");
-                    reply.send(Reply::Text("Evenings".into())).unwrap();
+                    assert!(crate::protocol::answer(reply, Reply::Text("Evenings".into())));
                     break;
                 }
             }
@@ -5417,8 +5438,8 @@ pub mod tests {
             std::thread::scope(|scope| {
                 let worker = scope.spawn(|| rename_shelf(&mut cfg, &tx, &asker, &tracks, folder));
                 while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
-                    if let Msg::Ask(_, reply) = msg {
-                        reply.send(Reply::Text("Evenings".into())).unwrap();
+                    if let Msg::Ask { id: reply, .. } = msg {
+                        assert!(crate::protocol::answer(reply, Reply::Text("Evenings".into())));
                         break;
                     }
                 }
@@ -5505,8 +5526,8 @@ pub mod tests {
             std::thread::scope(|scope| {
                 let worker = scope.spawn(|| rename_shelf(&mut cfg, &tx, &asker, &tracks, &from));
                 while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
-                    if let Msg::Ask(_, reply) = msg {
-                        reply.send(Reply::Text(answer.into())).unwrap();
+                    if let Msg::Ask { id: reply, .. } = msg {
+                        assert!(crate::protocol::answer(reply, Reply::Text(answer.into())));
                         break;
                     }
                 }
@@ -5606,10 +5627,10 @@ pub mod tests {
                     scope.spawn(|| finish(&mut cfg, &tx, &cancel, &mut tracks, Ok("done".into())));
                 let mut asked = Vec::new();
                 while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
-                    if let Msg::Ask(crate::protocol::Prompt::Choice { options, .. }, reply) = msg {
+                    if let Msg::Ask { id: reply, prompt: crate::protocol::Prompt::Choice { options, .. } } = msg {
                         asked = options;
                         // Esc: keeps the menu open and ends the loop.
-                        reply.send(Reply::Cancel).unwrap();
+                        assert!(crate::protocol::answer(reply, Reply::Cancel));
                         break;
                     }
                 }
@@ -5655,10 +5676,10 @@ pub mod tests {
         let failed = std::thread::scope(|scope| {
             let worker = scope.spawn(|| set_format(&mut cfg, &tx, &asker));
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
-                if let Msg::Ask(_, reply) = msg {
+                if let Msg::Ask { id: reply, .. } = msg {
                     // flac, which is not what the run started on.
                     let flac = config::FORMATS.iter().position(|(n, _, _)| *n == "flac").unwrap();
-                    reply.send(Reply::Choice(flac)).unwrap();
+                    assert!(crate::protocol::answer(reply, Reply::Choice(flac)));
                     break;
                 }
             }
@@ -5696,10 +5717,10 @@ pub mod tests {
             // leave this waiting for a message nothing is going to send.
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
                 match msg {
-                    Msg::Ask(crate::protocol::Prompt::Choice { options, .. }, reply) => {
+                    Msg::Ask { id: reply, prompt: crate::protocol::Prompt::Choice { options, .. } } => {
                         asked = options;
                         // The first row, which is where the review has to be.
-                        reply.send(Reply::Choice(0)).unwrap();
+                        assert!(crate::protocol::answer(reply, Reply::Choice(0)));
                     }
                     Msg::Review => reviewed = true,
                     _ => {}
@@ -5741,8 +5762,8 @@ pub mod tests {
             while sent < replies.len() {
                 match rx.recv().unwrap() {
                     Msg::Done { result, .. } => dones.push(result),
-                    Msg::Ask(_, reply) => {
-                        reply.send(replies[sent].clone()).unwrap();
+                    Msg::Ask { id: reply, .. } => {
+                        assert!(crate::protocol::answer(reply, replies[sent].clone()));
                         sent += 1;
                     }
                     _ => {}
@@ -5960,8 +5981,8 @@ pub mod tests {
             // waiting for a message nothing is going to send.
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
                 match msg {
-                    Msg::Ask(prompt, reply) => {
-                        reply.send(pick(&prompt, "forget")).unwrap();
+                    Msg::Ask { id: reply, prompt } => {
+                        assert!(crate::protocol::answer(reply, pick(&prompt, "forget")));
                         answered = true;
                     }
                     Msg::Flash(line) => flashes.push(line),
@@ -6009,12 +6030,12 @@ pub mod tests {
             let (mut rows, mut note, mut flashes) = (Vec::new(), String::new(), Vec::new());
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
                 match msg {
-                    Msg::Ask(prompt, reply) => {
+                    Msg::Ask { id: reply, prompt } => {
                         if let crate::protocol::Prompt::Choice { options, note: said, .. } = &prompt {
                             rows.clone_from(options);
                             note.clone_from(said);
                         }
-                        reply.send(pick(&prompt, answer)).unwrap();
+                        assert!(crate::protocol::answer(reply, pick(&prompt, answer)));
                     }
                     Msg::Flash(line) => flashes.push(line),
                     _ => {}
@@ -6147,8 +6168,8 @@ pub mod tests {
             });
             let mut answered = false;
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
-                if let Msg::Ask(prompt, reply) = msg {
-                    reply.send(pick(&prompt, "delete")).unwrap();
+                if let Msg::Ask { id: reply, prompt } = msg {
+                    assert!(crate::protocol::answer(reply, pick(&prompt, "delete")));
                     answered = true;
                     break;
                 }
@@ -6182,8 +6203,8 @@ pub mod tests {
             let mut flashes = Vec::new();
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
                 match msg {
-                    Msg::Ask(prompt, reply) => {
-                        reply.send(pick(&prompt, "keep")).unwrap();
+                    Msg::Ask { id: reply, prompt } => {
+                        assert!(crate::protocol::answer(reply, pick(&prompt, "keep")));
                         break;
                     }
                     Msg::Flash(line) => flashes.push(line),
@@ -6226,8 +6247,8 @@ pub mod tests {
             let (mut restarted, mut back, mut empty) = (false, false, Vec::new());
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
                 match msg {
-                    Msg::Ask(prompt, reply) => {
-                        reply.send(pick(&prompt, "forget")).unwrap();
+                    Msg::Ask { id: reply, prompt } => {
+                        assert!(crate::protocol::answer(reply, pick(&prompt, "forget")));
                     }
                     Msg::Restart => restarted = true,
                     Msg::Library { shelves, show } => {
@@ -6296,14 +6317,12 @@ pub mod tests {
             // Bounded: a prompt that stopped asking would otherwise leave this
             // waiting for a message nothing is going to send.
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
-                let Msg::Ask(_, reply) = msg else { continue };
+                let Msg::Ask { id: reply, .. } = msg else { continue };
                 asked += 1;
                 if asked == 1 {
-                    reply
-                        .send(Reply::Text("https://www.youtube.com/playlist?list=PL1".into()))
-                        .unwrap();
+                    assert!(crate::protocol::answer(reply, Reply::Text("https://www.youtube.com/playlist?list=PL1".into())));
                 } else {
-                    reply.send(Reply::Choice(flac)).unwrap();
+                    assert!(crate::protocol::answer(reply, Reply::Choice(flac)));
                     break;
                 }
             }
@@ -6330,14 +6349,12 @@ pub mod tests {
             let worker = scope.spawn(|| ask_start(&mut cfg, &tx));
             let mut asked = 0;
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
-                let Msg::Ask(_, reply) = msg else { continue };
+                let Msg::Ask { id: reply, .. } = msg else { continue };
                 asked += 1;
                 if asked == 1 {
-                    reply
-                        .send(Reply::Text("https://www.youtube.com/playlist?list=PL1".into()))
-                        .unwrap();
+                    assert!(crate::protocol::answer(reply, Reply::Text("https://www.youtube.com/playlist?list=PL1".into())));
                 } else {
-                    reply.send(Reply::Cancel).unwrap();
+                    assert!(crate::protocol::answer(reply, Reply::Cancel));
                     break;
                 }
             }
@@ -6452,8 +6469,8 @@ pub mod tests {
         // Answer before asking: the worker blocks on recv, and this is one thread.
         let answer = std::thread::spawn(move || {
             for msg in rx {
-                if let Msg::Pick(reply) = msg {
-                    let _ = reply.send(Reply::Picked(vec![1]));
+                if let Msg::Pick { id: reply } = msg {
+                    let _ = crate::protocol::answer(reply, Reply::Picked(vec![1]));
                     break;
                 }
             }
@@ -6470,32 +6487,35 @@ pub mod tests {
         );
     }
 
-    /* The UI going away mid-question must not turn the whole playlist into a
-       deliberate skip on the way out, and it can go away on either side of the
-       question: before the ask lands, or after it with the answer never sent. */
+    // A UI gone before the ask lands must not turn the whole playlist into a deliberate skip on the way
+    // out: the session is ending and its download goes with it.
     #[test]
     fn a_pick_nobody_answers_leaves_every_track_alone() {
-        let track = || vec![Track::new(1, "a".into(), "A".into(), PathBuf::from("/tmp/a"))];
-
         let (tx, rx) = channel();
         drop(rx);
-        let mut gone_before = track();
-        ask_which(&tx, &mut gone_before, &[]);
-        assert_eq!(gone_before[0].status, Status::Pending, "the ask never landed");
+        let mut tracks = vec![Track::new(1, "a".into(), "A".into(), PathBuf::from("/tmp/a"))];
+        assert_eq!(ask_which(&tx, &mut tracks, &[]), None);
+        assert_eq!(tracks[0].status, Status::Pending, "the ask never landed");
+    }
 
+    // A front end abandoning the gate, by Cancel or `cancel_open_questions`, takes none as Esc does. The
+    // gate's `None` means "no gate", which downloads the whole playlist.
+    #[test]
+    fn abandoning_the_pick_gate_downloads_nothing() {
         let (tx, rx) = channel();
-        // Takes the question and drops the reply channel without answering.
-        let hangs_up = std::thread::spawn(move || {
+        let abandons = std::thread::spawn(move || {
             for msg in rx {
-                if matches!(msg, Msg::Pick(_)) {
+                if let Msg::Pick { id } = msg {
+                    assert!(crate::protocol::answer(id, Reply::Cancel));
                     break;
                 }
             }
         });
-        let mut gone_after = track();
-        ask_which(&tx, &mut gone_after, &[]);
-        hangs_up.join().unwrap();
-        assert_eq!(gone_after[0].status, Status::Pending, "the answer never came");
+        let mut tracks = vec![Track::new(1, "a".into(), "A".into(), PathBuf::from("/tmp/a"))];
+        let picked = ask_which(&tx, &mut tracks, &[]);
+        abandons.join().unwrap();
+        assert_eq!(picked, Some(HashSet::new()), "an abandoned gate was read as no gate");
+        assert_eq!(tracks[0].status, Status::Skipped);
     }
 
     fn playlist_of(dir: &Path, ids: &[(&str, &str)]) -> Vec<Track> {
@@ -7351,8 +7371,8 @@ pub mod tests {
                 rename_shelf(&mut own, &tx, &asker, &tracks, &dir)
             });
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
-                if let Msg::Ask(_, reply) = msg {
-                    reply.send(Reply::Text("Neon Venom".into())).unwrap();
+                if let Msg::Ask { id: reply, .. } = msg {
+                    assert!(crate::protocol::answer(reply, Reply::Text("Neon Venom".into())));
                     break;
                 }
             }
@@ -7873,9 +7893,9 @@ pub mod tests {
                     scope.spawn(|| edit(&cfg, &tx, &mut tracks, &asker, &mut held, 1));
                 let mut boxes = Vec::new();
                 while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
-                    if let Msg::Ask(crate::protocol::Prompt::Form { fields, .. }, back) = msg {
+                    if let Msg::Ask { id: back, prompt: crate::protocol::Prompt::Form { fields, .. } } = msg {
                         boxes = fields;
-                        back.send(Reply::Fields(values.clone())).unwrap();
+                        assert!(crate::protocol::answer(back, Reply::Fields(values.clone())));
                         break;
                     }
                 }
@@ -8871,10 +8891,10 @@ pub mod tests {
                means waiting out the timeout on every green run. */
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
                 match msg {
-                    Msg::Ask(_, reply) => {
+                    Msg::Ask { id: reply, .. } => {
                         // The row itself, then the confirmation behind it.
                         let answer = if asked == 0 { at } else { 1 };
-                        reply.send(Reply::Choice(answer)).unwrap();
+                        assert!(crate::protocol::answer(reply, Reply::Choice(answer)));
                         asked += 1;
                     }
                     Msg::Artwork => break,
@@ -8916,7 +8936,7 @@ pub mod tests {
             });
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
                 match msg {
-                    Msg::Ask(_, reply) => reply.send(Reply::Choice(0)).unwrap(),
+                    Msg::Ask { id: reply, .. } => assert!(crate::protocol::answer(reply, Reply::Choice(0))),
                     Msg::Flash(_) => break,
                     _ => {}
                 }
@@ -9007,10 +9027,10 @@ mod format_tests {
         let mut seen = Vec::new();
         let mut next = replies.iter();
         for msg in rx {
-            let asked = matches!(msg, Msg::Ask(..));
-            if let Msg::Ask(_, back) = &msg {
+            let asked = matches!(msg, Msg::Ask { .. });
+            if let Msg::Ask { id: back, .. } = &msg {
                 let reply = next.next().expect("asked more questions than expected");
-                back.send(reply.clone()).unwrap();
+                assert!(crate::protocol::answer(*back, reply.clone()));
             }
             seen.push(msg);
             if asked && next.len() == 0 {
@@ -9903,9 +9923,9 @@ mod purge_tests {
     fn answer(rx: &Receiver<Msg>, reply: Reply) -> Vec<Msg> {
         let mut seen = Vec::new();
         for msg in rx {
-            let asked = matches!(msg, Msg::Ask(..));
-            if let Msg::Ask(_, back) = &msg {
-                back.send(reply.clone()).unwrap();
+            let asked = matches!(msg, Msg::Ask { .. });
+            if let Msg::Ask { id: back, .. } = &msg {
+                assert!(crate::protocol::answer(*back, reply.clone()));
             }
             seen.push(msg);
             if asked {
@@ -10033,7 +10053,7 @@ mod purge_tests {
         assert_eq!(left.len(), 3, "{left:?}");
         // The question named the file it was about.
         let asked = seen.iter().find_map(|m| match m {
-            Msg::Ask(crate::protocol::Prompt::Choice { header, note, .. }, _) => Some((header.clone(), note.clone())),
+            Msg::Ask { prompt: crate::protocol::Prompt::Choice { header, note, .. }, .. } => Some((header.clone(), note.clone())),
             _ => None,
         }).expect("nothing was asked");
         assert!(asked.0.contains("1 departed file"), "{}", asked.0);
@@ -10271,9 +10291,9 @@ mod chapter_tests {
         let split = std::thread::scope(|scope| {
             let worker = scope.spawn(|| settle_split(&cfg, &asker, &pass, three(), tracks));
             while !worker.is_finished() {
-                if let Ok(Msg::Ask(_, back)) = rx.recv_timeout(Duration::from_millis(50)) {
+                if let Ok(Msg::Ask { id: back, .. }) = rx.recv_timeout(Duration::from_millis(50)) {
                     asked = true;
-                    back.send(reply.clone()).unwrap();
+                    assert!(crate::protocol::answer(back, reply.clone()));
                 }
             }
             worker.join().unwrap()
@@ -10367,8 +10387,8 @@ mod chapter_tests {
             let mut answer = Some(answer);
             while !worker.is_finished() || seen.is_empty() {
                 match rx.recv_timeout(std::time::Duration::from_millis(500)) {
-                    Ok(Msg::Ask(_, reply)) => {
-                        let _ = reply.send(answer.take().unwrap_or(Reply::Cancel));
+                    Ok(Msg::Ask { id: reply, .. }) => {
+                        let _ = crate::protocol::answer(reply, answer.take().unwrap_or(Reply::Cancel));
                     }
                     Ok(other) => seen.push(other),
                     Err(_) if worker.is_finished() => break,
@@ -10470,8 +10490,8 @@ mod chapter_tests {
             let worker = scope.spawn(|| top_link(&cfg, &tx, &asker, find, || false, "Can", &titles));
             loop {
                 match rx.recv_timeout(std::time::Duration::from_millis(500)) {
-                    Ok(Msg::Ask(_, reply)) => {
-                        let _ = reply.send(Reply::Choice(1));
+                    Ok(Msg::Ask { id: reply, .. }) => {
+                        let _ = crate::protocol::answer(reply, Reply::Choice(1));
                     }
                     Ok(_) => {}
                     Err(_) if worker.is_finished() => break,
@@ -10555,8 +10575,8 @@ mod chapter_tests {
         let titles = vec!["T.N.T.".to_string()];
         let answer = |rx: &mpsc::Receiver<Msg>, done: &dyn Fn() -> bool| loop {
             match rx.recv_timeout(std::time::Duration::from_millis(200)) {
-                Ok(Msg::Ask(_, reply)) => {
-                    let _ = reply.send(Reply::Choice(1));
+                Ok(Msg::Ask { id: reply, .. }) => {
+                    let _ = crate::protocol::answer(reply, Reply::Choice(1));
                 }
                 Ok(_) => {}
                 Err(_) if done() => break,
@@ -10628,8 +10648,8 @@ mod chapter_tests {
             let worker = scope.spawn(|| top_link(&cfg, &tx, &asker, find, || false, "Can", &titles));
             loop {
                 match rx.recv_timeout(std::time::Duration::from_millis(500)) {
-                    Ok(Msg::Ask(_, reply)) => {
-                        let _ = reply.send(Reply::Choice(1));
+                    Ok(Msg::Ask { id: reply, .. }) => {
+                        let _ = crate::protocol::answer(reply, Reply::Choice(1));
                     }
                     Ok(_) => {}
                     Err(_) if worker.is_finished() => break,

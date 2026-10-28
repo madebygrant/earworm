@@ -26,8 +26,10 @@ turns on.
   UI), `Cmd` (UI to worker), `Track`, `Status`, `Shelf` (one library row),
   `Prompt`, `Reply`, `Asker` (worker asks the UI a question and blocks on the
   reply), `Escape` (what Esc on a prompt does), the row structs and
-  `Playback`. Non-UI modules import these from here, never from `app`, and
-  `app` keeps its imports private so the compiler holds that line
+  `Playback`, all serde so a front end can speak JSON. A question is an id:
+  `open_question` registers it, `answer(id, reply)` is the way back. Non-UI
+  modules import these from here, never from `app`, and `app` keeps its
+  imports private so the compiler holds that line
 - `config.rs` — `Cli`, the TOML `FileConfig`, and `Config::build`, which merges
   them; `SWITCHES` and `Config::rows`, what the settings screen lists
 - `worker.rs` — `ask_start` (library, resync or the URL prompt, which loops

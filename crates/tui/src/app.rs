@@ -468,7 +468,8 @@ pub struct App {
     /// What `u` would put back, as the worker described it. `None` when there
     /// is nothing, which is what keeps the key off the bar.
     pub undoable: Option<String>,
-    pub prompt: Option<(Prompt, Sender<Reply>)>,
+    /// The question on screen and the id `protocol::answer` takes for it.
+    pub prompt: Option<(Prompt, u64)>,
     pub choice: usize,
     /// One box per field, so a form and a single question are the same state
     /// and every editing key works the same on both.
@@ -498,9 +499,10 @@ pub struct App {
     pub viewport: usize,
     pub done: Option<Result<String, String>>,
     /// The worker is blocked waiting for the tracks to download. Holding the
-    /// reply channel here is what makes the keys mean "choose" for as long as
-    /// the question is open, and dropping it answers `Cancel`.
-    pub picking: Option<Sender<Reply>>,
+    /// question's id here is what makes the keys mean "choose" for as long as
+    /// the question is open. Only `confirm_pick` and `cancel_pick` take it, and
+    /// both answer: an id dropped unanswered leaves the worker waiting.
+    pub picking: Option<u64>,
     /// Wall clock, not `tick`: the intro has to run at the same speed on a
     /// terminal that redraws on every message and one that sits idle.
     pub started: Instant,
@@ -848,6 +850,8 @@ impl App {
                 }
             }
             Msg::Artwork => self.art = None,
+            // The terminal draws no tiles and never asks for these.
+            Msg::Thumb { .. } => {}
             Msg::Twin { index, twin } => {
                 if let Some(t) = self.track_mut(index) {
                     t.twin = twin;
@@ -985,7 +989,7 @@ impl App {
                Enter is the whole playlist and the work is unmarking what you
                do not want. Starting empty would make "download all" the
                laborious answer and the accidental one a silent no-op. */
-            Msg::Pick(reply) => {
+            Msg::Pick { id } => {
                 self.marked = self
                     .tracks
                     .iter()
@@ -997,9 +1001,9 @@ impl App {
                     .collect();
                 self.pick_held.clear();
                 self.follow = false;
-                self.picking = Some(reply);
+                self.picking = Some(id);
             }
-            Msg::Ask(prompt, reply) => {
+            Msg::Ask { id, prompt } => {
                 match &prompt {
                     Prompt::Input { value, .. } => self.open_fields(vec![value.clone()]),
                     Prompt::Form { fields, .. } => {
@@ -1008,11 +1012,11 @@ impl App {
                     Prompt::Choice { .. } => {}
                 }
                 self.choice = 0;
-                self.prompt = Some((prompt, reply));
+                self.prompt = Some((prompt, id));
             }
             Msg::Done { result, stage } => {
                 self.recheck = true;
-                self.stage = if result.is_ok() { stage } else { "failed" }.into();
+                self.stage = if result.is_ok() { stage } else { "failed".into() };
                 self.resting = self.stage.clone();
                 self.flash_until = None;
                 self.done = Some(result);
@@ -1223,12 +1227,12 @@ impl App {
     /// falling back to the cursor would turn "I unmarked everything" into
     /// "download the row I happen to be on".
     pub fn confirm_pick(&mut self) {
-        let Some(reply) = self.picking.take() else {
+        let Some(id) = self.picking.take() else {
             return;
         };
         let mut picked: Vec<usize> = self.marked.iter().copied().collect();
         picked.sort_unstable();
-        let _ = reply.send(Reply::Picked(picked));
+        crate::protocol::answer(id, Reply::Picked(picked));
         self.marked.clear();
         self.follow = true;
     }
@@ -1236,8 +1240,8 @@ impl App {
     /// Esc: download nothing and tag what is already there. Not a quit, since
     /// a folder of existing files is still worth the rest of the run.
     pub fn cancel_pick(&mut self) {
-        if let Some(reply) = self.picking.take() {
-            let _ = reply.send(Reply::Picked(Vec::new()));
+        if let Some(id) = self.picking.take() {
+            crate::protocol::answer(id, Reply::Picked(Vec::new()));
             self.marked.clear();
             self.follow = true;
         }
@@ -1348,7 +1352,7 @@ impl App {
             return;
         }
         if row.source == Source::Flag {
-            let flag = crate::config::SWITCHES.iter().find(|s| s.key == row.key).map_or(row.key, |s| s.flag);
+            let flag = crate::config::SWITCHES.iter().find(|s| s.key == row.key).map_or(row.key.as_str(), |s| s.flag);
             self.say(format!("--{} was given  ·  start without it to change {}", flag.replace('_', "-"), row.key));
             return;
         }
@@ -3541,7 +3545,7 @@ mod tests {
         app.apply(Msg::Stage("identifying".into()));
         app.apply(Msg::Done {
             result: Ok("12 tracks".into()),
-            stage: "finished",
+            stage: "finished".into(),
         });
         assert_eq!(app.stage, "finished");
 
@@ -3563,7 +3567,7 @@ mod tests {
         let mut app = App::new(tx, String::new());
         app.apply(Msg::Done {
             result: Ok("12 tracks".into()),
-            stage: "finished",
+            stage: "finished".into(),
         });
         app.apply(Msg::Stage("looking for artwork".into()));
         app.apply(Msg::Flash("cancelled".into()));
@@ -3624,16 +3628,13 @@ mod tests {
     }
 
     fn asking(app: &mut App) -> std::sync::mpsc::Receiver<Reply> {
-        let (reply, answers) = std::sync::mpsc::channel();
-        app.apply(Msg::Ask(
-            Prompt::Input {
+        let (reply, answers) = crate::protocol::open_question();
+        app.apply(Msg::Ask { id: reply, prompt: Prompt::Input {
                 header: "q".into(),
                 note: String::new(),
                 value: String::new(),
                 escape: Escape::Keep,
-            },
-            reply,
-        ));
+            } });
         answers
     }
 
@@ -3712,7 +3713,7 @@ mod tests {
         for (name, set) in [
             ("help", (|a: &mut App, on| a.show_help = on) as fn(&mut App, bool)),
             ("filter", |a, on| a.typing_filter = on),
-            ("pick", |a, on| a.picking = on.then(|| std::sync::mpsc::channel().0)),
+            ("pick", |a, on| a.picking = on.then_some(0)),
             ("console", |a, on| a.console = on.then(Console::default)),
         ] {
             set(&mut app, true);
@@ -4172,8 +4173,7 @@ mod tests {
     #[test]
     fn a_form_edits_both_fields_and_answers_once() {
         let mut app = App::new(std::sync::mpsc::channel().0, String::new());
-        app.apply(Msg::Ask(
-            Prompt::Form {
+        app.apply(Msg::Ask { id: crate::protocol::open_question().0, prompt: Prompt::Form {
                 header: "track 4".into(),
                 note: "Roygbiv - Boards Of Canada (Official)".into(),
                 fields: vec![
@@ -4181,9 +4181,7 @@ mod tests {
                     ("title".into(), "Boards Of Canada".into()),
                 ],
                 escape: Escape::Skip,
-            },
-            std::sync::mpsc::channel().0,
-        ));
+            } });
         assert_eq!(app.field, 0);
         assert_eq!(app.input(), "Roygbiv");
         assert_eq!(app.caret, 7, "the caret starts behind the value");
@@ -4220,8 +4218,7 @@ mod tests {
     fn the_swap_key_finds_its_two_boxes_by_name() {
         let form = |fields: Vec<(&str, &str)>| {
             let mut app = App::new(std::sync::mpsc::channel().0, String::new());
-            app.apply(Msg::Ask(
-                Prompt::Form {
+            app.apply(Msg::Ask { id: crate::protocol::open_question().0, prompt: Prompt::Form {
                     header: "track 4".into(),
                     note: String::new(),
                     fields: fields
@@ -4229,9 +4226,7 @@ mod tests {
                         .map(|(l, v)| (l.to_string(), v.to_string()))
                         .collect(),
                     escape: Escape::Skip,
-                },
-                std::sync::mpsc::channel().0,
-            ));
+                } });
             app
         };
 
@@ -4434,15 +4429,12 @@ mod tests {
     #[test]
     fn the_prompt_edits_where_the_caret_is() {
         let mut app = App::new(std::sync::mpsc::channel().0, String::new());
-        app.apply(Msg::Ask(
-            Prompt::Input {
+        app.apply(Msg::Ask { id: crate::protocol::open_question().0, prompt: Prompt::Input {
                 note: String::new(),
                 header: "Title".into(),
                 value: "Café del Mar".into(),
                 escape: Escape::Skip,
-            },
-            std::sync::mpsc::channel().0,
-        ));
+            } });
         assert_eq!(app.caret, 12, "the caret starts behind the prefilled text");
 
         for _ in 0..3 {
@@ -4598,8 +4590,8 @@ mod tests {
 
     fn picking_app(statuses: &[Status]) -> (App, std::sync::mpsc::Receiver<Reply>) {
         let mut app = app_with(statuses);
-        let (tx, rx) = std::sync::mpsc::channel();
-        app.apply(Msg::Pick(tx));
+        let (tx, rx) = crate::protocol::open_question();
+        app.apply(Msg::Pick { id: tx });
         (app, rx)
     }
 

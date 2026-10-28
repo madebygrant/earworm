@@ -80,7 +80,7 @@ Exit: `cargo test` passes and `grep -n "crate::app" src/{worker,tag,lookup,custo
 Exit: `cargo test --workspace` passes with the same count as before the
 split, and `cargo build -p earworm` produces `earworm`.
 
-## 3. A serialisable protocol with question ids
+## 3. A serialisable protocol with question ids [done 2026-10-28]
 
 Why here: the GUI cannot exist without it, and the TUI moving onto the same
 path is what keeps one protocol.

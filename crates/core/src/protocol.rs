@@ -5,7 +5,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Status {
     Pending,
     Have,
@@ -144,12 +146,13 @@ impl Status {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Track {
     pub index: usize,
     pub id: String,
     pub name: String,
     pub was: String,
+    #[serde(serialize_with = "lossy::opt_path")]
     pub path: Option<PathBuf>,
     pub status: Status,
     pub source: String,
@@ -215,8 +218,9 @@ impl Track {
 /* `Default` is for the tests, which build a row to ask one question of it and
    would otherwise restate every field each time a new one is added. Nothing
    in the running tool builds a shelf that way: `library` fills all of them. */
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Shelf {
+    #[serde(serialize_with = "lossy::path")]
     pub path: PathBuf,
     pub name: String,
     /// `None` for a folder earworm did not download: one somebody copied in,
@@ -239,6 +243,7 @@ pub struct Shelf {
     /// cliamp a path earworm invented would refuse a folder that has one.
     /// `None` when the folder has no playlist file, or more than one and so
     /// no single answer.
+    #[serde(serialize_with = "lossy::opt_path")]
     pub playlist: Option<PathBuf>,
     /// What `manifest::kind_of` makes of the folder, from its name or from
     /// what a sync recorded. `None` is the answer for almost every folder and
@@ -249,7 +254,7 @@ pub struct Shelf {
 
 /// What earworm knows about cliamp. `Missing` is also the starting guess, so
 /// nothing about the player is claimed before it has been looked for.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub enum Player {
     #[default]
     Missing,
@@ -258,12 +263,13 @@ pub enum Player {
 }
 
 /// What cliamp is doing, as one value so the poll behind it emits one message.
-#[derive(Clone, PartialEq, Eq, Debug, Default)]
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct Playback {
     pub player: Player,
     /// Folder of the track cliamp has loaded, when it is a local file. cliamp
     /// reports the track and never the playlist, so this is what says which
     /// library row is the one on air; a radio stream has no folder.
+    #[serde(serialize_with = "lossy::opt_path")]
     pub folder: Option<PathBuf>,
     /// What cliamp calls the loaded track. The folder says which playlist is
     /// on air and never which song, which is the question people actually
@@ -310,7 +316,7 @@ impl Watch {
 }
 
 /// One track of a custom playlist as the screen shows it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlaylistRow {
     /// What every command on the row carries, never its position: the order changes under a move.
     pub id: String,
@@ -319,22 +325,24 @@ pub struct PlaylistRow {
     pub folder: String,
     pub file: String,
     /// `None` when no folder holds it now, which the row shows as `!`.
+    #[serde(serialize_with = "lossy::opt_path")]
     pub path: Option<PathBuf>,
 }
 
 /// One artist on the artists screen, as the worker counted them.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtistRow {
     pub name: String,
     pub tracks: usize,
     pub albums: usize,
     pub starred: bool,
     /// Where their tracks are, for Enter to narrow the library to.
+    #[serde(serialize_with = "lossy::paths")]
     pub folders: Vec<PathBuf>,
 }
 
 /// One release on an artist's page, marked with how much of it the library holds.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AlbumRow {
     pub id: u64,
     pub title: String,
@@ -357,7 +365,7 @@ impl AlbumRow {
 }
 
 /// One of the artist's top tracks, and whether a track of that title is here.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TopRow {
     pub title: String,
     pub album: String,
@@ -365,7 +373,7 @@ pub struct TopRow {
 }
 
 /// An artist Deezer calls related, with how much of them the library holds.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RelatedRow {
     pub name: String,
     pub fans: u64,
@@ -373,6 +381,7 @@ pub struct RelatedRow {
 }
 
 /// Work the UI asks of the worker once the run itself has finished.
+#[derive(Serialize, Deserialize)]
 pub enum Cmd {
     Edit(usize),
     Cover(usize),
@@ -411,7 +420,7 @@ pub enum Cmd {
     /// Choose the audio format new downloads arrive in, and remember it.
     Format,
     /// Turn one of `config::SWITCHES` on or off, and remember it.
-    Switch(&'static str, bool),
+    Switch(String, bool),
     Icons(crate::icons::Icons),
     /// Put the last tag write back. One level: the point is the edit you
     /// have just seen land on the row, not a history to walk.
@@ -462,8 +471,12 @@ pub enum Cmd {
     Related(String),
     /// Find the artist's missing top tracks on YouTube Music and download them as one playlist.
     GetTop { artist: String, titles: Vec<String> },
+    /// Thumbnails of these audio files' covers, for a front end that draws them. By path, since a track's
+    /// index moves under a renumbering and its file does not. The terminal never sends it.
+    Thumbs(Vec<PathBuf>),
 }
 
+#[derive(Serialize, Deserialize)]
 pub enum Prompt {
     Choice {
         header: String,
@@ -497,7 +510,7 @@ pub enum Prompt {
     },
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub enum Escape {
     /// Leave this track as it was.
     Skip,
@@ -517,7 +530,7 @@ impl Escape {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Reply {
     Choice(usize),
     /// Every box of a form, in the order they were asked for.
@@ -529,6 +542,7 @@ pub enum Reply {
     Cancel,
 }
 
+#[derive(Serialize, Deserialize)]
 pub enum Msg {
     Stage(String),
     /// A stage message that undoes itself. What a command just did is worth
@@ -536,11 +550,11 @@ pub enum Msg {
     Flash(String),
     Playlist(String),
     /// The folder the run is writing into, once one is known.
-    Folder(PathBuf),
+    Folder(#[serde(serialize_with = "lossy::path")] PathBuf),
     /// Sent only when it changes, since the worker re-checks on a timer.
     Player(Playback),
     /// The custom list just handed to cliamp, or `None` when a folder was.
-    OnAir(Option<(String, Vec<PathBuf>)>),
+    OnAir(#[serde(serialize_with = "lossy::on_air")] Option<(String, Vec<PathBuf>)>),
     Tracks(Vec<Track>),
     Progress {
         index: usize,
@@ -568,6 +582,7 @@ pub enum Msg {
     },
     Path {
         index: usize,
+        #[serde(serialize_with = "lossy::path")]
         path: PathBuf,
     },
     Log(String),
@@ -582,7 +597,7 @@ pub enum Msg {
     /// is read from disk; an id it does not hold means the list changed behind its back and is ignored.
     Order { name: String, ids: Vec<String>, focus: Option<String> },
     /// Puts the library cursor on this row, for a list just made or renamed: the sort moves it to a new place.
-    Select(PathBuf),
+    Select(#[serde(serialize_with = "lossy::path")] PathBuf),
     /// A search's marked tracks were added to a list, so they are not marks any more.
     FoundUnmark,
     /// The artists screen's rows. `focus` is the artist to land on, since starring moves a row.
@@ -603,17 +618,18 @@ pub enum Msg {
     PickTracks(String),
     /// A list changed its name, so the one cliamp is on keeps its marker.
     Renamed { old: String, new: String },
-    Ask(Prompt, Sender<Reply>),
+    /// A question the worker is blocked on. The front end answers it with `answer(id, ..)`.
+    Ask { id: u64, prompt: Prompt },
     /// Hand the track list to the user to choose from before downloading.
     /// Not a `Prompt`: the answer is made with the list's own cursor, marks
-    /// and filter, which a popup would cover up.
-    Pick(Sender<Reply>),
+    /// and filter, which a popup would cover up. Answered with `answer(id, Reply::Picked(..))`.
+    Pick { id: u64 },
     /// A run has settled. `stage` is the header word for a success, since not
     /// everything that settles has run: opening a folder from the library
     /// downloads nothing and "finished" would be a claim about work.
     Done {
         result: Result<String, String>,
-        stage: &'static str,
+        stage: String,
     },
     /// Sent once a bulk action has finished, so a cancelled one leaves the
     /// selection intact rather than making the user rebuild it.
@@ -656,6 +672,87 @@ pub enum Msg {
     Artwork,
     /// Nothing to report and nothing to look at, so close the UI outright.
     Quit,
+    /// The answer to `Cmd::Thumbs` for one file: a cached JPEG's path, or `None` when the file has no art.
+    Thumb {
+        #[serde(serialize_with = "lossy::path")]
+        file: PathBuf,
+        #[serde(serialize_with = "lossy::opt_path")]
+        thumb: Option<PathBuf>,
+    },
+}
+
+// Paths in a message go out as text, lossily: serde_json refuses a path that is not UTF-8, which on
+// Linux one oddly named file would turn into a whole library that never arrives. A replaced character
+// costs that one row; a command naming it back fails for that row alone.
+mod lossy {
+    use serde::Serializer;
+    use serde::ser::SerializeSeq;
+    use std::path::PathBuf;
+
+    pub fn path<S: Serializer>(p: &PathBuf, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&p.to_string_lossy())
+    }
+
+    pub fn opt_path<S: Serializer>(p: &Option<PathBuf>, s: S) -> Result<S::Ok, S::Error> {
+        match p {
+            Some(p) => s.serialize_some(&p.to_string_lossy()),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn paths<S: Serializer>(ps: &[PathBuf], s: S) -> Result<S::Ok, S::Error> {
+        let mut seq = s.serialize_seq(Some(ps.len()))?;
+        for p in ps {
+            seq.serialize_element(&p.to_string_lossy())?;
+        }
+        seq.end()
+    }
+
+    pub fn on_air<S: Serializer>(on: &Option<(String, Vec<PathBuf>)>, s: S) -> Result<S::Ok, S::Error> {
+        let Some((name, folders)) = on else {
+            return s.serialize_none();
+        };
+        let folders: Vec<_> = folders.iter().map(|p| p.to_string_lossy()).collect();
+        s.serialize_some(&(name, folders))
+    }
+}
+
+// Questions the worker is waiting on, by id. A channel cannot cross into a webview, so a message
+// carries the id and the front end answers through `answer`. One per process: both front ends run
+// the worker in-process, and ids come from a counter, so parallel tests never share one.
+static QUESTIONS: std::sync::Mutex<Option<std::collections::HashMap<u64, Sender<Reply>>>> =
+    std::sync::Mutex::new(None);
+static NEXT_QUESTION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Registers a question before it is sent, so an answer can never arrive for an id not yet known.
+pub fn open_question() -> (u64, std::sync::mpsc::Receiver<Reply>) {
+    let id = NEXT_QUESTION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let (tx, rx) = std::sync::mpsc::channel();
+    QUESTIONS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_default().insert(id, tx);
+    (id, rx)
+}
+
+/// Delivers a front end's answer. False when nothing is waiting on that id: already answered,
+/// never asked, or the worker gave up on it.
+pub fn answer(id: u64, reply: Reply) -> bool {
+    let waiting = QUESTIONS.lock().unwrap_or_else(|e| e.into_inner()).as_mut().and_then(|open| open.remove(&id));
+    waiting.is_some_and(|tx| tx.send(reply).is_ok())
+}
+
+/// Answers Cancel to every open question, for a front end that reloaded or is closing and has lost
+/// the ids it was shown. Without it the worker would wait on them for the rest of the session.
+pub fn cancel_open_questions() {
+    let open = QUESTIONS.lock().unwrap_or_else(|e| e.into_inner()).take().unwrap_or_default();
+    for (_, tx) in open {
+        let _ = tx.send(Reply::Cancel);
+    }
+}
+
+/// Drops a question nobody will answer, so the registry does not keep its channel for the session.
+pub fn forget(id: u64) {
+    if let Some(open) = QUESTIONS.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        open.remove(&id);
+    }
 }
 
 pub struct Asker {
@@ -665,8 +762,9 @@ pub struct Asker {
 
 impl Asker {
     fn ask(&self, prompt: Prompt) -> Reply {
-        let (tx, rx) = std::sync::mpsc::channel();
-        if self.tx.send(Msg::Ask(prompt, tx)).is_err() {
+        let (id, rx) = open_question();
+        if self.tx.send(Msg::Ask { id, prompt }).is_err() {
+            forget(id);
             return Reply::Cancel;
         }
         rx.recv().unwrap_or(Reply::Cancel)
@@ -766,6 +864,197 @@ impl Asker {
 mod tests {
     use super::*;
     use super::test_support::at;
+
+    // Every variant serde knows, read off its own error for a variant that does not exist, so the list is
+    // the derive's and nobody keeps it by hand. The derive is also what refuses to compile a variant whose
+    // contents cannot serialise.
+    fn variants<T: serde::de::DeserializeOwned>() -> std::collections::BTreeSet<String> {
+        let err = serde_json::from_str::<T>(r#"{"no such variant":null}"#).err().expect("an unknown variant parsed").to_string();
+        let listed = err.split("expected one of ").nth(1).expect(&err);
+        let listed = listed.split(" at line").next().unwrap();
+        listed.split(", ").map(|v| v.trim_matches('`').to_string()).collect()
+    }
+
+    // The variant a value is, as serde tags it: a bare string for a unit variant, else the one key.
+    fn variant_of<T: Serialize>(value: &T) -> String {
+        match serde_json::to_value(value).unwrap() {
+            serde_json::Value::String(name) => name,
+            serde_json::Value::Object(map) => map.keys().next().unwrap().clone(),
+            other => panic!("not an externally tagged variant: {other}"),
+        }
+    }
+
+    fn every_msg() -> Vec<Msg> {
+        let p = || PathBuf::from("/music/Krautrock/01 - Neu! - Hallogallo.opus");
+        let mut track = Track::new(1, "vid1".into(), "Hallogallo".into(), p());
+        track.year = Some(1972);
+        track.twin = Some("same recording in A".into());
+        let shelf = Shelf { path: p(), name: "Krautrock".into(), url: Some("u".into()), kind: Some(crate::manifest::Kind::Album), files: vec![("a.opus".into(), false)], ..Shelf::default() };
+        let row = crate::config::Row {
+            key: "cover".into(),
+            value: crate::config::Value::Icons(crate::icons::Icons::Nerd),
+            source: crate::config::Source::Flag,
+            what: "fetch and embed cover art".into(),
+            when: crate::config::When::NextStart,
+        };
+        let album = AlbumRow { id: 7, title: "Zuckerzeit".into(), year: Some(1974), kind: "album".into(), have: 2, of: Some(10), new: true };
+        vec![
+            Msg::Stage("fetching".into()),
+            Msg::Flash("saved".into()),
+            Msg::Playlist("Krautrock".into()),
+            Msg::Folder(p()),
+            Msg::Player(at(Player::Running, Some("/music/Focus"), true)),
+            Msg::OnAir(Some(("Mix".into(), vec![p()]))),
+            Msg::Tracks(vec![track]),
+            Msg::Progress { index: 1, percent: 40 },
+            Msg::Twin { index: 1, twin: None },
+            Msg::Update { index: 1, status: Status::Weak, source: Some("Deezer".into()), note: None, name: Some("n".into()) },
+            Msg::Meta { index: 1, album: "Neu!".into(), year: None },
+            Msg::Path { index: 1, path: p() },
+            Msg::Log("ERROR: x".into()),
+            Msg::Library { shelves: vec![shelf], show: true },
+            Msg::Custom { name: "Mix".into(), rows: vec![PlaylistRow { id: "a".into(), label: "l".into(), folder: "f".into(), file: "x".into(), path: None }], show: false, focus: Some("a".into()) },
+            Msg::Order { name: "Mix".into(), ids: vec!["a".into()], focus: None },
+            Msg::Select(p()),
+            Msg::FoundUnmark,
+            Msg::Artists { rows: vec![ArtistRow { name: "Can".into(), tracks: 3, albums: 1, starred: true, folders: vec![p()] }], focus: None },
+            Msg::Discography { name: "Cluster".into(), found: Some(("Cluster".into(), 48210)), rows: Ok(vec![album]) },
+            Msg::PickHeld(vec![2, 3]),
+            Msg::Top { name: "Can".into(), rows: Ok(vec![TopRow { title: "Vitamin C".into(), album: "Ege Bamyasi".into(), have: true }]) },
+            Msg::Related { name: "Can".into(), rows: Err("offline".into()) },
+            Msg::NewReleases(vec![("Can".into(), 9, "New".into())]),
+            Msg::Counted { name: "Can".into(), id: 9, of: 11 },
+            Msg::PickTracks("Mix".into()),
+            Msg::Renamed { old: "a".into(), new: "b".into() },
+            Msg::Ask { id: 3, prompt: Prompt::Form { header: "track 4".into(), note: "was".into(), fields: vec![("artist".into(), "Neu!".into())], escape: Escape::Skip } },
+            Msg::Pick { id: 4 },
+            Msg::Done { result: Err("no network".into()), stage: "finished".into() },
+            Msg::Unmark,
+            Msg::Idle,
+            Msg::Restart,
+            Msg::Settings { text: "format opus".into(), format: "opus".into(), rows: vec![row] },
+            Msg::Undoable(Some("the swap".into())),
+            Msg::Dropped(vec![5]),
+            Msg::Review,
+            Msg::Focus(2),
+            Msg::Artwork,
+            Msg::Quit,
+            Msg::Thumb { file: p(), thumb: None },
+        ]
+    }
+
+    fn every_cmd() -> Vec<Cmd> {
+        let p = || PathBuf::from("/music/Krautrock");
+        vec![
+            Cmd::Edit(1),
+            Cmd::Cover(1),
+            Cmd::Search(1),
+            Cmd::Open(p(), Some("01 - a.opus".into())),
+            Cmd::SyncOne,
+            Cmd::Sync(p()),
+            Cmd::ResyncAll,
+            Cmd::Url,
+            Cmd::Retry,
+            Cmd::Swap(vec![1, 2]),
+            Cmd::Artist(vec![3]),
+            Cmd::Play(p()),
+            Cmd::Toggle,
+            Cmd::Format,
+            Cmd::Switch("cover".into(), false),
+            Cmd::Icons(crate::icons::Icons::Symbols),
+            Cmd::Undo,
+            Cmd::Rename(p()),
+            Cmd::Purge,
+            Cmd::Reveal(p()),
+            Cmd::Remove(p()),
+            Cmd::NewPlaylist,
+            Cmd::EditPlaylist { name: "Mix".into(), add: vec![(p(), "a.opus".into())], remove: vec![] },
+            Cmd::AddToPlaylist(vec![(p(), "a.opus".into())], None),
+            Cmd::OpenPlaylist("Mix".into()),
+            Cmd::MoveEntry { name: "Mix".into(), id: "a".into(), up: true },
+            Cmd::RemoveEntry { name: "Mix".into(), id: "a".into() },
+            Cmd::RenamePlaylist("Mix".into()),
+            Cmd::DeletePlaylist("Mix".into()),
+            Cmd::PlayPlaylist("Mix".into()),
+            Cmd::Export(crate::export::Target::List("Mix".into())),
+            Cmd::Artists,
+            Cmd::Star("Can".into()),
+            Cmd::Discography("Can".into()),
+            Cmd::GetAlbum { artist: "Can".into(), title: "Tago Mago".into() },
+            Cmd::Top("Can".into()),
+            Cmd::Related("Can".into()),
+            Cmd::GetTop { artist: "Can".into(), titles: vec!["Vitamin C".into()] },
+            Cmd::Thumbs(vec![p()]),
+        ]
+    }
+
+    // A front end in another process or a webview sees only JSON, so every message and command has to come
+    // back from it unchanged. Compared as JSON twice over, since neither enum is `PartialEq`.
+    #[test]
+    fn every_message_and_command_survives_json() {
+        let msgs = every_msg();
+        let sampled: std::collections::BTreeSet<_> = msgs.iter().map(variant_of).collect();
+        assert_eq!(sampled.len(), msgs.len(), "two samples of one message");
+        assert_eq!(sampled, variants::<Msg>(), "a message has no sample in every_msg");
+        for msg in &msgs {
+            let json = serde_json::to_string(msg).unwrap();
+            let back: Msg = serde_json::from_str(&json).unwrap_or_else(|e| panic!("{}: {e}", variant_of(msg)));
+            assert_eq!(serde_json::to_string(&back).unwrap(), json, "{} changed on the way", variant_of(msg));
+        }
+
+        let cmds = every_cmd();
+        let sampled: std::collections::BTreeSet<_> = cmds.iter().map(variant_of).collect();
+        assert_eq!(sampled.len(), cmds.len(), "two samples of one command");
+        assert_eq!(sampled, variants::<Cmd>(), "a command has no sample in every_cmd");
+        for cmd in &cmds {
+            let json = serde_json::to_string(cmd).unwrap();
+            let back: Cmd = serde_json::from_str(&json).unwrap_or_else(|e| panic!("{}: {e}", variant_of(cmd)));
+            assert_eq!(serde_json::to_string(&back).unwrap(), json, "{} changed on the way", variant_of(cmd));
+        }
+
+        for reply in [Reply::Choice(2), Reply::Fields(vec!["a".into()]), Reply::Text("t".into()), Reply::Picked(vec![1]), Reply::Cancel] {
+            let json = serde_json::to_string(&reply).unwrap();
+            let back: Reply = serde_json::from_str(&json).unwrap();
+            assert_eq!(serde_json::to_string(&back).unwrap(), json);
+        }
+    }
+
+    // A name that is not UTF-8, possible on Linux, has to cost its own row and not the whole message.
+    #[cfg(unix)]
+    #[test]
+    fn a_path_that_is_not_utf8_still_goes_out() {
+        use std::os::unix::ffi::OsStrExt;
+        let odd = PathBuf::from(std::ffi::OsStr::from_bytes(b"/music/Caf\xe9/01 - a.opus"));
+        let shelf = Shelf { path: odd.clone(), playlist: Some(odd.clone()), ..Shelf::default() };
+        let track = Track::new(1, "v".into(), "a".into(), odd.clone());
+        let row = ArtistRow { name: "a".into(), tracks: 1, albums: 0, starred: false, folders: vec![odd.clone()] };
+        for msg in [
+            Msg::Library { shelves: vec![shelf], show: true },
+            Msg::Tracks(vec![track]),
+            Msg::Artists { rows: vec![row], focus: None },
+            Msg::Folder(odd.clone()),
+            Msg::OnAir(Some(("Mix".into(), vec![odd.clone()]))),
+            Msg::Thumb { file: odd.clone(), thumb: Some(odd.clone()) },
+        ] {
+            let json = serde_json::to_string(&msg).unwrap_or_else(|e| panic!("{}: {e}", variant_of(&msg)));
+            assert!(json.contains("Caf\u{fffd}"), "{json}");
+        }
+    }
+
+    // Registered before it is sent, answered once, and an id nobody holds is refused rather than lost.
+    #[test]
+    fn a_question_is_answered_once_by_its_id() {
+        let (id, rx) = open_question();
+        assert!(answer(id, Reply::Choice(1)));
+        assert!(matches!(rx.recv(), Ok(Reply::Choice(1))));
+        assert!(!answer(id, Reply::Choice(2)), "answered twice");
+        assert!(!answer(u64::MAX, Reply::Cancel), "an id nobody asked was taken");
+
+        let (other, rx) = open_question();
+        forget(other);
+        assert!(!answer(other, Reply::Cancel), "a forgotten question was still open");
+        assert!(rx.recv().is_err(), "the worker was left waiting on a forgotten question");
+    }
 
     /* The header said `downloading` while the row said `getting`, and
        `reading` on a row was tag reading while `reading playlist` in the

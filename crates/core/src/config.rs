@@ -225,7 +225,7 @@ pub const FORMATS: [(&str, &str, &[&str]); 6] = [
 pub const DEFAULT_FORMAT: &str = "m4a";
 
 /// When a changed setting takes effect.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum When {
     /// The next download or sync, which reads the config the worker holds.
     NextRun,
@@ -235,7 +235,7 @@ pub enum When {
 }
 
 /// Where a setting's value came from, so the settings screen can say why it is what it is.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Source {
     Default,
     File,
@@ -307,7 +307,7 @@ macro_rules! switches {
 switches!(convert, loudness, lyrics, parse, m3u8, cover, lookup, apple, fix, rename, album, pick, intro, notify, update_check, achievements);
 
 /// What the settings screen lists and what Enter does to it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Value {
     Switch(bool),
     Format(String),
@@ -318,12 +318,12 @@ pub enum Value {
     Fixed(String),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Row {
-    pub key: &'static str,
+    pub key: String,
     pub value: Value,
     pub source: Source,
-    pub what: &'static str,
+    pub what: String,
     pub when: When,
 }
 
@@ -927,7 +927,7 @@ impl Config {
     /// Every setting, as the settings screen lists it.
     pub fn rows(&self) -> Vec<Row> {
         let source = |key: &str| self.sources.get(key).copied().unwrap_or(Source::Default);
-        let row = |key: &'static str, value: Value, what: &'static str, when: When| Row { key, value, source: source(key), what, when };
+        let row = |key: &'static str, value: Value, what: &'static str, when: When| Row { key: key.into(), value, source: source(key), what: what.into(), when };
         let mut rows = vec![
             row("format", Value::Format(self.format.clone()), "the format new downloads arrive in", When::NextRun),
             row("theme", Value::Theme, "the colours, which ^t also walks", When::Now),

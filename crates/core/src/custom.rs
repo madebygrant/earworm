@@ -382,7 +382,7 @@ mod tests {
             let worker = scope.spawn(|| work(&tx, &asker));
             while let Ok(msg) = rx.recv_timeout(Duration::from_millis(1500)) {
                 match msg {
-                    Msg::Ask(_, reply) => reply.send(answers.next().unwrap_or(Reply::Cancel)).unwrap(),
+                    Msg::Ask { id: reply, .. } => assert!(crate::protocol::answer(reply, answers.next().unwrap_or(Reply::Cancel))),
                     // Everything else is what the test goes on to read.
                     other => kept.push(other),
                 }
@@ -442,7 +442,7 @@ mod tests {
         result.unwrap();
         assert_eq!(playlists::load(&dir, "Mix").unwrap().entries.len(), 1);
         let msgs: Vec<Msg> = rx.try_iter().collect();
-        assert!(!msgs.iter().any(|m| matches!(m, Msg::Ask(..))));
+        assert!(!msgs.iter().any(|m| matches!(m, Msg::Ask { .. })));
         assert!(msgs.iter().any(|m| matches!(m, Msg::Custom { show: true, .. })), "the list should open");
     }
 

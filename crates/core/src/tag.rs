@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
@@ -488,6 +488,34 @@ pub fn image_extension(data: &[u8]) -> Option<&'static str> {
    audio it is attached to. */
 pub const COVER_MAX: u16 = 1000;
 
+/// Longest side of a front end's cover tile: twice the largest tile, for a high-density screen.
+pub const THUMB_MAX: u16 = 256;
+
+/// A small copy of a file's embedded cover for a front end to show, or `None` when it has no art.
+/// Only made when a front end asks, since the terminal draws none and each new one is an ffmpeg run.
+pub fn thumbnail(file: &Path) -> Option<PathBuf> {
+    let cache = crate::config::xdg_home("XDG_CACHE_HOME", ".cache")?.join("earworm").join("thumbs");
+    thumbnail_in(&cache, file)
+}
+
+// Named for the cover's own bytes, so a tag write that leaves the art alone reuses it and an album's
+// tracks share one. A cover already small enough and already a JPEG is kept as it is.
+pub fn thumbnail_in(cache: &Path, file: &Path) -> Option<PathBuf> {
+    let cover = read_cover(file)?;
+    let at = cache.join(format!("{:016x}.jpg", crate::cheats::digest_bytes(&cover)));
+    if at.is_file() {
+        return Some(at);
+    }
+    let (w, h) = lookup::jpeg_size(&cover);
+    let small = if w > 0 && w <= THUMB_MAX && h <= THUMB_MAX { cover } else { shrink(&cover, THUMB_MAX)? };
+    std::fs::create_dir_all(cache).ok()?;
+    // Written beside and renamed, so a front end never loads half a picture.
+    let partial = at.with_extension("part");
+    std::fs::write(&partial, &small).ok()?;
+    std::fs::rename(&partial, &at).ok()?;
+    Some(at)
+}
+
 /* A decode and a downscale with no encode on the end of it, measured at about
    40ms on a real track. The bound is for a machine under load rather than an
    expectation, and giving up costs nothing: the pane draws the words it
@@ -571,7 +599,7 @@ pub fn cap_cover(path: &Path) -> Result<bool> {
     if w == 0 || (w <= COVER_MAX && h <= COVER_MAX) {
         return Ok(false);
     }
-    let smaller = shrink(&image).context("could not resize the cover")?;
+    let smaller = shrink(&image, COVER_MAX).context("could not resize the cover")?;
     set_cover(path, &smaller)?;
     Ok(true)
 }
@@ -579,7 +607,7 @@ pub fn cap_cover(path: &Path) -> Result<bool> {
 /* Through files rather than pipes: `run_bounded` polls `try_wait` and never
    writes to the child, so a piped stdin nobody closes would leave ffmpeg
    waiting for input that is not coming. */
-fn shrink(image: &[u8]) -> Option<Vec<u8>> {
+fn shrink(image: &[u8], max: u16) -> Option<Vec<u8>> {
     let dir = std::env::temp_dir().join(format!(
         "earworm-cover-{}-{:?}",
         std::process::id(),
@@ -597,7 +625,7 @@ fn shrink(image: &[u8]) -> Option<Vec<u8>> {
             // Never upscales, and keeps whatever aspect the art came with.
             .args([
                 "-vf",
-                &format!("scale={COVER_MAX}:{COVER_MAX}:force_original_aspect_ratio=decrease"),
+                &format!("scale='min({max},iw)':'min({max},ih)':force_original_aspect_ratio=decrease"),
             ])
             .args(["-q:v", "3"])
             .arg(&to)
@@ -1759,6 +1787,57 @@ mod tests {
             .ok()
             .filter(|s| s.success())
             .map(|_| ())
+    }
+
+    // Small enough for a tile, made once per cover whatever happens to the tags around it, shared by files
+    // with the same art, never enlarged, and nothing at all for a file with no art.
+    #[test]
+    fn a_thumbnail_is_small_cached_and_follows_the_cover() {
+        let dir = std::env::temp_dir().join(format!("earworm-thumb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (track, twin, bare) = (dir.join("01 - A.opus"), dir.join("02 - A.opus"), dir.join("03 - B.opus"));
+        let (big, small, tiny, cache) = (dir.join("big.jpg"), dir.join("small.jpg"), dir.join("tiny.jpg"), dir.join("cache"));
+        let made = [&track, &twin, &bare].iter().all(|f| crate::worker::tests::tiny_opus(f).is_some())
+            && square_jpeg(&big, 1200).is_some()
+            && square_jpeg(&small, 300).is_some()
+            && square_jpeg(&tiny, 120).is_some();
+        if !made {
+            eprintln!("no ffmpeg, skipping");
+            let _ = std::fs::remove_dir_all(&dir);
+            return;
+        }
+        let art = std::fs::read(&big).unwrap();
+        set_cover(&track, &art).unwrap();
+        set_cover(&twin, &art).unwrap();
+
+        let thumb = thumbnail_in(&cache, &track).expect("no thumbnail for a file with art");
+        let (w, h) = lookup::jpeg_size(&std::fs::read(&thumb).unwrap());
+        assert!(w == THUMB_MAX && h == THUMB_MAX, "{w}x{h}");
+        assert!(thumb.starts_with(&cache), "written outside the cache: {}", thumb.display());
+        assert_eq!(thumbnail_in(&cache, &twin).as_ref(), Some(&thumb), "one cover made two thumbnails");
+
+        // A tag write that leaves the art alone is the same cover, so the same thumbnail, not made again.
+        let made_at = std::fs::metadata(&thumb).unwrap().modified().unwrap();
+        set_cover(&track, &art).unwrap();
+        assert_eq!(thumbnail_in(&cache, &track).as_ref(), Some(&thumb), "a tag write made a new thumbnail");
+        assert_eq!(std::fs::metadata(&thumb).unwrap().modified().unwrap(), made_at, "the cached one was rewritten");
+
+        // A new cover is a new thumbnail.
+        set_cover(&track, &std::fs::read(&small).unwrap()).unwrap();
+        let after = thumbnail_in(&cache, &track).unwrap();
+        assert_ne!(after, thumb, "a changed cover kept its old thumbnail");
+        assert_eq!(lookup::jpeg_size(&std::fs::read(&after).unwrap()).0, THUMB_MAX);
+
+        // One already smaller than a tile is kept as it was, never enlarged.
+        let tiny_art = std::fs::read(&tiny).unwrap();
+        set_cover(&track, &tiny_art).unwrap();
+        let kept = thumbnail_in(&cache, &track).unwrap();
+        assert_eq!(std::fs::read(&kept).unwrap(), tiny_art, "a 120px cover was redrawn");
+
+        assert_eq!(thumbnail_in(&cache, &bare), None, "a file with no art got a picture");
+        assert!(!cache.read_dir().unwrap().any(|e| e.unwrap().path().extension().is_some_and(|x| x == "part")), "a partial write was left");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /* YouTube serves an Art Track's thumbnail at 2048 square, and

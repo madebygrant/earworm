@@ -1,6 +1,6 @@
 use crate::manifest::Kind;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Icons {
     // The words and pills the library drew before icons existed.
     #[default]

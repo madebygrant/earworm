@@ -92,9 +92,13 @@ const TEST_CHEATS: &[Cheat] = &[
 
 /// FNV-1a, 64-bit. Written out because `DefaultHasher` is not stable between
 /// Rust releases, and a changed hash would silently kill every code.
-fn digest(text: &str) -> u64 {
+pub(crate) fn digest(text: &str) -> u64 {
+    digest_bytes(text.as_bytes())
+}
+
+pub(crate) fn digest_bytes(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in text.bytes() {
+    for &byte in bytes {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }

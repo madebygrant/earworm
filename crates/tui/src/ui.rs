@@ -1187,7 +1187,7 @@ fn draw_settings(frame: &mut Frame, app: &mut App, area: Rect) {
     let p = app.theme;
     app.viewport = area.height as usize;
     let cursor = app.settings_cursor;
-    let key_width = app.setting_rows.iter().map(|r| cols(r.key)).max().unwrap_or(0);
+    let key_width = app.setting_rows.iter().map(|r| cols(&r.key)).max().unwrap_or(0);
     let value_of = |value: &Value| match value {
         Value::Switch(on) => if *on { "on" } else { "off" }.to_string(),
         Value::Format(name) => name.clone(),
@@ -3632,16 +3632,13 @@ mod tests {
     fn the_url_prompt_says_what_an_answer_looks_like() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(tx, "settings".into());
-        let (reply, _answers) = std::sync::mpsc::channel();
-        app.apply(Msg::Ask(
-            crate::protocol::Prompt::Input {
+        let (reply, _answers) = crate::protocol::open_question();
+        app.apply(Msg::Ask { id: reply, prompt: crate::protocol::Prompt::Input {
                 header: "YouTube playlist URL".into(),
                 note: "a playlist, a video or a file of links  ·  esc quits".into(),
                 value: String::new(),
                 escape: crate::protocol::Escape::Quit,
-            },
-            reply,
-        ));
+            } });
         app.intro_done = true;
         let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
         terminal.draw(|f| super::draw(f, &mut app)).unwrap();
@@ -4861,8 +4858,7 @@ mod tests {
     fn a_choice_numbers_its_options() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(tx, "settings".into());
-        app.apply(Msg::Ask(
-            crate::protocol::Prompt::Choice {
+        app.apply(Msg::Ask { id: crate::protocol::open_question().0, prompt: crate::protocol::Prompt::Choice {
                 header: "finished".into(),
                 note: "12 tracks".into(),
                 options: vec![
@@ -4872,9 +4868,7 @@ mod tests {
                     "quit".into(),
                 ],
                 escape: crate::protocol::Escape::Keep,
-            },
-            std::sync::mpsc::channel().0,
-        ));
+            } });
 
         let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
         terminal.draw(|f| super::draw(f, &mut app)).unwrap();
@@ -4898,8 +4892,7 @@ mod tests {
     fn the_edit_form_shows_both_boxes_and_the_title_behind_them() {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(tx, "settings".into());
-        app.apply(Msg::Ask(
-            crate::protocol::Prompt::Form {
+        app.apply(Msg::Ask { id: crate::protocol::open_question().0, prompt: crate::protocol::Prompt::Form {
                 header: "track 4".into(),
                 note: "Roygbiv - Boards Of Canada (Official Audio)".into(),
                 fields: vec![
@@ -4907,9 +4900,7 @@ mod tests {
                     ("title".into(), "Boards Of Canada".into()),
                 ],
                 escape: crate::protocol::Escape::Skip,
-            },
-            std::sync::mpsc::channel().0,
-        ));
+            } });
 
         let render = |app: &mut App| {
             let mut terminal = Terminal::new(TestBackend::new(90, 16)).unwrap();
@@ -5090,15 +5081,12 @@ mod tests {
         let screen = |back: usize| {
             let (tx, _rx) = std::sync::mpsc::channel();
             let mut app = App::new(tx, "settings".into());
-            app.apply(Msg::Ask(
-                crate::protocol::Prompt::Input {
+            app.apply(Msg::Ask { id: crate::protocol::open_question().0, prompt: crate::protocol::Prompt::Input {
                     note: String::new(),
                     header: "Title".into(),
                     value: "Autobahn".into(),
                     escape: crate::protocol::Escape::Skip,
-                },
-                std::sync::mpsc::channel().0,
-            ));
+                } });
             for _ in 0..back {
                 app.input_move(false);
             }
@@ -5538,8 +5526,8 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(tx, "settings".into());
         app.tracks = spread();
-        let (reply, _back) = std::sync::mpsc::channel();
-        app.apply(Msg::Pick(reply));
+        let (reply, _back) = crate::protocol::open_question();
+        app.apply(Msg::Pick { id: reply });
 
         let mut terminal = Terminal::new(TestBackend::new(90, 10)).unwrap();
         terminal.draw(|f| super::draw(f, &mut app)).unwrap();
@@ -5572,8 +5560,8 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(tx, "settings".into());
         app.tracks = spread();
-        let (reply, _back) = std::sync::mpsc::channel();
-        app.apply(Msg::Pick(reply));
+        let (reply, _back) = crate::protocol::open_question();
+        app.apply(Msg::Pick { id: reply });
         app.filter = "one".into();
 
         let mut terminal = Terminal::new(TestBackend::new(90, 10)).unwrap();
@@ -5974,16 +5962,13 @@ mod tests {
         /* A prompt is the exception: the worker is blocked on an answer, and
            a question the user cannot see is not polish. */
         let mut asked = fresh();
-        let (reply, _back) = std::sync::mpsc::channel();
-        asked.apply(Msg::Ask(
-            crate::protocol::Prompt::Input {
+        let (reply, _back) = crate::protocol::open_question();
+        asked.apply(Msg::Ask { id: reply, prompt: crate::protocol::Prompt::Input {
                 note: String::new(),
                 header: "YouTube playlist URL".into(),
                 value: String::new(),
                 escape: crate::protocol::Escape::Quit,
-            },
-            reply,
-        ));
+            } });
         assert!(!asked.intro(), "it hid the question the worker is waiting on");
 
         let mut finished = fresh();
@@ -6015,7 +6000,7 @@ mod tests {
     fn a_setting_row_shows_its_value_and_where_it_came_from() {
         use crate::config::{Row, Source, Value, When};
         let mut app = artists_app();
-        let row = |key, value, source, when| Row { key, value, source, what: "what it does", when };
+        let row = |key: &str, value, source, when| Row { key: key.into(), value, source, what: "what it does".into(), when };
         let rows = vec![
             row("theme", Value::Theme, Source::Default, When::Now),
             row("cover", Value::Switch(false), Source::File, When::NextRun),

@@ -138,7 +138,7 @@ pub fn set_chapter(folder: &Path, id: &str, start: f64, end: f64) -> std::io::Re
 /* An album's tracks share a sleeve, so looking each one up separately returns
    whatever release that track matched and one record ends up holding three
    covers. See docs/album-or-playlist.md. */
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Kind {
     Album,
     Playlist,

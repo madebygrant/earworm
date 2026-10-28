@@ -15,7 +15,7 @@ use crate::portable::{self, Form};
 use crate::worker::{self, Others};
 
 /// What the export is of: a library folder by path, or a custom playlist by name.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Target {
     Folder(PathBuf),
     List(String),
