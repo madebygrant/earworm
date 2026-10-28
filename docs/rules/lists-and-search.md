@@ -25,6 +25,13 @@
 
 ## Narrowing, ordering and undoing
 
+- **What a list shows is decided in core, never in a front end.** `view.rs`
+  holds the narrowings, the library order, the search's hits and which tracks
+  a marking key takes, as functions over the state passed in, and the
+  terminal's `rows()`, `shelf_rows()`, `found_hits()` and marking keys only
+  call them. The desktop app calls the same functions, so a rule here cannot
+  hold in one front end and not the other. Cursors, scrolling and flashes are
+  each front end's own.
 - **The review is a predicate beside the filter, not a string in the box.**
   `kept`, `unsure`, `no match` and `failed` share no word to type, so
   `Status::wants_a_look` is what `v`, `n`/`N` and the finish menu's first row

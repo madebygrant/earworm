@@ -562,14 +562,7 @@ fn draw_filter_bar(frame: &mut Frame, app: &App, area: Rect) {
         View::Library => (app.shelf_rows().len(), app.library.len()),
         // Every track in the library is what a search was asked of, not the
         // tracks of whichever playlist happens to be open behind it.
-        View::Found => (
-            app.found_cache.len(),
-            app.library
-                .iter()
-                .filter(|s| app.kind_shows(s))
-                .map(|s| s.files.len())
-                .sum(),
-        ),
+        View::Found => (app.found_cache.len(), crate::view::found_total(&app.library, app.only)),
         View::Tracks => (app.shown(), app.tracks.len()),
         // No filter here: the list is the playlist's own order. The artists screen has a band of its own.
         View::Playlist | View::Pick | View::Artists | View::Artist | View::Settings => (0, 0),

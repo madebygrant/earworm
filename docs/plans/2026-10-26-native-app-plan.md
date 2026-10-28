@@ -121,7 +121,7 @@ cannot serialise fails to compile or fails the test.
 Exit: `env -i HOME=$HOME PATH=/usr/bin:/bin earworm --check` finds the
 Homebrew tools on a machine that has them.
 
-## 5. The view model both front ends share
+## 5. The view model both front ends share [done 2026-10-28]
 
 Why before the GUI: these rules have tests and were each learned the hard
 way; the GUI should call them, not reimplement them in TypeScript.

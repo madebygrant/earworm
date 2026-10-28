@@ -9,6 +9,7 @@ use ratatui::style::Color;
 use crate::achievements::{self, Achievement, Facts};
 use crate::cheats::{self, Cheat, Unlocked};
 use crate::theme::{Palette, Themes};
+use crate::view;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::Protocol;
 
@@ -213,10 +214,6 @@ pub fn log_color(line: &str, p: Palette) -> Color {
     }
 }
 
-fn matched(track: &Track, needle: &str) -> bool {
-    track.name.to_lowercase().contains(needle) || track.status.label().contains(needle)
-}
-
 /* Rows of context kept either side of the cursor. `ListState` is built
    fresh every frame, so with no offset of our own ratatui scrolls the
    least it can to make the selection visible: past the first screenful
@@ -262,13 +259,6 @@ pub fn off_format(shelf: &Shelf, format: &str) -> usize {
         .count()
 }
 
-/* A folder is on the list for its own name or for a track inside it. The
-   names come free, but the filenames are the only way to answer "which
-   playlist has that track" without opening folders one at a time, and
-   `Shelf.files` is already in memory from the stat pass `library` does.
-   Short-circuited on the name, and the filenames are lowercased per call
-   rather than kept twice: this runs over every folder on every frame, and a
-   second copy of every filename in the library is the costlier of the two. */
 /// The row a cursor at `at` should be on: itself when it shows, the closest that does when not, and
 /// unchanged when nothing shows.
 fn nearest(rows: &[usize], at: usize) -> usize {
@@ -291,14 +281,6 @@ fn end_of(rows: &[usize], last: bool, at: usize) -> usize {
     (if last { rows.last() } else { rows.first() }).copied().unwrap_or(at)
 }
 
-pub fn shelf_matches(shelf: &Shelf, needle: &str) -> bool {
-    shelf.name.to_lowercase().contains(needle)
-        || shelf
-            .files
-            .iter()
-            .any(|(name, _)| name.to_lowercase().contains(needle))
-}
-
 /* The two boxes `^s` swaps, by label rather than by position: the edit form
    grew album and year after these, and swapping 0 and 1 would only have gone
    on working by accident. Shared with the draw, so the key and the hint that
@@ -308,33 +290,7 @@ pub fn swappable(fields: &[(String, String)]) -> Option<(usize, usize)> {
     Some((at("artist")?, at("title")?))
 }
 
-/// Library order. Name is what the worker hands over, so it is the one that
-/// costs nothing; the other two answer "which of these needs a sync".
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
-pub enum Sort {
-    #[default]
-    Name,
-    Synced,
-    Missing,
-}
-
-impl Sort {
-    pub fn next(self) -> Sort {
-        match self {
-            Sort::Name => Sort::Synced,
-            Sort::Synced => Sort::Missing,
-            Sort::Missing => Sort::Name,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Sort::Name => "name",
-            Sort::Synced => "last synced",
-            Sort::Missing => "most missing",
-        }
-    }
-}
+pub use crate::view::Sort;
 
 pub struct App {
     pub cmds: Option<Sender<Cmd>>,
@@ -985,20 +941,9 @@ impl App {
                     self.view = View::Playlist;
                 }
             }
-            /* Opens with everything that needs fetching already marked, so
-               Enter is the whole playlist and the work is unmarking what you
-               do not want. Starting empty would make "download all" the
-               laborious answer and the accidental one a silent no-op. */
+            // Starting with nothing marked would make "download all" the laborious answer.
             Msg::Pick { id } => {
-                self.marked = self
-                    .tracks
-                    .iter()
-                    /* Nothing the pick gate could ask about: already on
-                       disk, departed, or a file the playlist never had. */
-                    .filter(|t| !matches!(t.status, Status::Have | Status::Gone | Status::Local))
-                    .filter(|t| !self.pick_held.contains(&t.index))
-                    .map(|t| t.index)
-                    .collect();
+                self.marked = view::gate_marks(&self.tracks, &self.pick_held);
                 self.pick_held.clear();
                 self.follow = false;
                 self.picking = Some(id);
@@ -1125,20 +1070,8 @@ impl App {
         let Some(status) = self.tracks.get(self.cursor).map(|t| t.status) else {
             return;
         };
-        /* Only what is on screen: `/` then `m` is how you mark one artist's
-           bad rows, and reaching past the filter would mark the whole run. */
-        let same: Vec<usize> = self
-            .tracks
-            .iter()
-            .filter(|t| t.status == status && self.shows(t))
-            .map(|t| t.index)
-            .collect();
-        // Already all marked, so the same key takes them back off again.
-        if same.iter().all(|i| self.marked.contains(i)) {
-            self.marked.retain(|i| !same.contains(i));
-        } else {
-            self.marked.extend(same);
-        }
+        let same = view::like_status(&self.tracks, &self.narrow(), status);
+        view::flip(&mut self.marked, &same);
     }
 
     /// What a bulk action applies to: the marked tracks, or the one under the
@@ -1147,9 +1080,7 @@ impl App {
         if self.marked.is_empty() {
             return self.selected().into_iter().collect();
         }
-        let mut targets: Vec<usize> = self.marked.iter().copied().collect();
-        targets.sort_unstable();
-        targets
+        view::picked(&self.marked)
     }
 
     /// The marked tracks, or the one under the cursor, as folder and filename for a custom playlist.
@@ -1167,60 +1098,27 @@ impl App {
     /// the filter for the same reason, so this is the only way to reach the
     /// whole playlist in one key once a filter is on.
     pub fn toggle_all(&mut self) {
-        let shown: Vec<usize> = self
-            .tracks
-            .iter()
-            .filter(|t| self.shows(t))
-            .map(|t| t.index)
-            .collect();
-        if shown.iter().all(|i| self.marked.contains(i)) {
-            self.marked.retain(|i| !shown.contains(i));
-        } else {
-            self.marked.extend(shown);
-        }
+        let shown = view::showing(&self.tracks, &self.narrow());
+        view::flip(&mut self.marked, &shown);
     }
 
-    /* "Everything except these three" is otherwise `a` and then marking the
-       rest back by hand. Over the rows the filter shows, like `a`, so the two
-       keys mean the same amount of list. */
+    // "Everything except these three", over the rows the filter shows like `a`.
     pub fn invert_marks(&mut self) {
-        for track in &self.tracks {
-            if !self.shows(track) {
-                continue;
-            }
-            if !self.marked.remove(&track.index) {
-                self.marked.insert(track.index);
-            }
-        }
+        let shown = view::showing(&self.tracks, &self.narrow());
+        view::invert(&mut self.marked, &shown);
     }
 
-    /* The other question people have about a run, after "which of these went
-       wrong": a compilation the lookup split across twenty artists, or one
-       artist's tracks to swap. `/` then `a` does it with typing; this is the
-       key for the artist already under the cursor. */
+    // A compilation the lookup split across twenty artists, or one artist's tracks to swap: `/` then `a`
+    // with typing, or this for the artist already under the cursor.
     pub fn mark_like_artist(&mut self) {
-        let Some(artist) = self
-            .tracks
-            .get(self.cursor)
-            .map(|t| t.artist.trim().to_lowercase())
-            .filter(|a| !a.is_empty())
-        else {
+        let Some(artist) = self.tracks.get(self.cursor).and_then(view::artist_of) else {
             // Before the tag pass there is no artist, and a key that quietly
             // does nothing reads as a broken key.
             self.say("no artist on this track yet");
             return;
         };
-        let same: Vec<usize> = self
-            .tracks
-            .iter()
-            .filter(|t| t.artist.trim().to_lowercase() == artist && self.shows(t))
-            .map(|t| t.index)
-            .collect();
-        if same.iter().all(|i| self.marked.contains(i)) {
-            self.marked.retain(|i| !same.contains(i));
-        } else {
-            self.marked.extend(same);
-        }
+        let same = view::like_artist(&self.tracks, &self.narrow(), &artist);
+        view::flip(&mut self.marked, &same);
     }
 
     /// Answers the pick with the marked set. The marks and not `targets()`:
@@ -1230,9 +1128,7 @@ impl App {
         let Some(id) = self.picking.take() else {
             return;
         };
-        let mut picked: Vec<usize> = self.marked.iter().copied().collect();
-        picked.sort_unstable();
-        crate::protocol::answer(id, Reply::Picked(picked));
+        crate::protocol::answer(id, Reply::Picked(view::picked(&self.marked)));
         self.marked.clear();
         self.follow = true;
     }
@@ -1380,13 +1276,12 @@ impl App {
 
     // On `artists::key`, so the query merges spellings the way the rows were merged: `bjork` finds "Björk".
     fn artist_keeps(&self, row: &ArtistRow) -> bool {
-        let query = crate::artists::key(&self.artists.query);
-        query.is_empty() || crate::artists::key(&row.name).contains(&query)
+        view::artist_keeps(&self.artists.query, row)
     }
 
     /// Positions in `artists.rows` the query keeps, in order.
     pub fn artist_rows(&self) -> Vec<usize> {
-        (0..self.artists.rows.len()).filter(|at| self.artist_keeps(&self.artists.rows[*at])).collect()
+        view::artist_rows(&self.artists.rows, &self.artists.query)
     }
 
     /// Filtered out means not selected, as on the track list.
@@ -1565,12 +1460,12 @@ impl App {
 
     // Albums and EPs unless `all_kinds`: a band's singles and compilations outnumber its records.
     fn page_keeps(&self, row: &AlbumRow) -> bool {
-        self.page.all_kinds || matches!(row.kind.as_str(), "album" | "ep")
+        view::release_shows(self.page.all_kinds, row)
     }
 
     /// Positions in `page.rows` the kind keeps.
     pub fn page_rows(&self) -> Vec<usize> {
-        (0..self.page.rows.len()).filter(|at| self.page_keeps(&self.page.rows[*at])).collect()
+        view::release_rows(&self.page.rows, self.page.all_kinds)
     }
 
     /// How many releases `a` would show that are hidden now.
@@ -1879,132 +1774,64 @@ impl App {
     pub fn filtering(&self) -> bool {
         self.typing_filter
             || !self.filter.is_empty()
-            || (self.view == View::Tracks && self.review)
-            || (self.view == View::Library && (self.only.is_some() || self.by_artist.is_some()))
+            || (self.view == View::Tracks && self.narrowed())
+            || (self.view == View::Library && self.shelf_narrowed())
     }
 
     /// Whether anything is narrowing the track list, for the keys that clear
     /// it and for the word the empty pane uses.
     pub fn narrowed(&self) -> bool {
-        !self.filter.is_empty() || self.review
+        self.narrow().narrows()
     }
 
     /// The same question asked of the library, where the second narrowing is
     /// the kind rather than the review.
     pub fn shelf_narrowed(&self) -> bool {
-        !self.filter.is_empty() || self.only.is_some() || self.by_artist.is_some()
-    }
-
-    pub fn artist_shows(&self, shelf: &Shelf) -> bool {
-        self.by_artist.as_ref().is_none_or(|(_, folders)| folders.contains(&shelf.path))
-    }
-
-    /* Silence is the playlist answer everywhere else in this feature, so a
-       folder with no kind is on the playlist list rather than on neither. */
-    pub fn kind_shows(&self, shelf: &Shelf) -> bool {
-        match self.only {
-            None => true,
-            Some(crate::manifest::Kind::Album) => shelf.kind == Some(crate::manifest::Kind::Album),
-            Some(crate::manifest::Kind::Playlist) => {
-                !matches!(shelf.kind, Some(crate::manifest::Kind::Album | crate::manifest::Kind::Custom))
-            }
-            Some(crate::manifest::Kind::Custom) => shelf.kind == Some(crate::manifest::Kind::Custom),
-        }
+        self.shelf_narrow().narrows()
     }
 
     /// Walks every folder, then albums, then playlists. Albums come first
     /// because they are the ones the pill already points at.
     pub fn cycle_kind(&mut self) -> &'static str {
-        use crate::manifest::Kind;
-        self.only = match self.only {
-            None => Some(Kind::Album),
-            Some(Kind::Album) => Some(Kind::Playlist),
-            Some(Kind::Playlist) => Some(Kind::Custom),
-            Some(Kind::Custom) => None,
-        };
+        self.only = view::next_kind(self.only);
         self.snap();
-        self.kind_label()
+        view::kind_label(self.only)
     }
 
-    fn kind_label(&self) -> &'static str {
-        match self.only {
-            None => "every folder",
-            Some(crate::manifest::Kind::Album) => "albums",
-            Some(crate::manifest::Kind::Playlist) => "playlists",
-            Some(crate::manifest::Kind::Custom) => "custom playlists",
+    fn narrow(&self) -> view::Narrow<'_> {
+        view::Narrow::new(&self.filter, self.review)
+    }
+
+    fn shelf_narrow(&self) -> view::ShelfNarrow<'_> {
+        view::ShelfNarrow {
+            filter: &self.filter,
+            only: self.only,
+            folders: self.by_artist.as_ref().map(|(_, folders)| folders.as_slice()),
         }
-    }
-
-    /// Both narrowings at once, with the needle already lowercased: review is
-    /// a predicate rather than a filter string, because the four statuses it
-    /// keeps share no word for the filter to match on.
-    fn keeps(&self, track: &Track, needle: &str) -> bool {
-        (!self.review || track.status.wants_a_look())
-            && (needle.is_empty() || matched(track, needle))
     }
 
     /// Whether a row survives the filter, matched against the name and the
     /// status word: the artist or title you are looking for, or `/failed`.
     pub fn shows(&self, track: &Track) -> bool {
-        self.keeps(track, &self.filter.to_lowercase())
+        self.narrow().keeps(track)
     }
 
     /// Positions in `tracks` the list is showing, in order.
     pub fn rows(&self) -> Vec<usize> {
-        if !self.narrowed() {
-            return (0..self.tracks.len()).collect();
-        }
-        // Lowercased once for the pass, not once per row.
-        let needle = self.filter.to_lowercase();
-        self.tracks
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| self.keeps(t, &needle))
-            .map(|(pos, _)| pos)
-            .collect()
+        view::rows(&self.tracks, &self.narrow())
     }
 
     /// How many rows are showing, for the header. Counted rather than
     /// collected, since the positions themselves are not wanted.
     pub fn shown(&self) -> usize {
-        if !self.narrowed() {
-            return self.tracks.len();
-        }
-        let needle = self.filter.to_lowercase();
-        self.tracks.iter().filter(|t| self.keeps(t, &needle)).count()
+        view::shown(&self.tracks, &self.narrow())
     }
 
     /// Library rows in the order and the narrowing the screen is showing.
     /// Positions in `library`, so `shelf` keeps meaning one folder however
     /// the order changes under it.
     pub fn shelf_rows(&self) -> Vec<usize> {
-        let needle = self.filter.to_lowercase();
-        let mut rows: Vec<usize> = self
-            .library
-            .iter()
-            .enumerate()
-            .filter(|(_, s)| self.kind_shows(s) && self.artist_shows(s) && (needle.is_empty() || shelf_matches(s, &needle)))
-            .map(|(pos, _)| pos)
-            .collect();
-        match self.sort {
-            // Already what the worker built, which is name order.
-            Sort::Name => {}
-            /* Never synced sorts first, which is where it belongs: it is the
-               folder furthest from matching the playlist upstream. */
-            // A list is built here and syncs from nothing, so it takes no part in either: it goes last by
-            // time, and its dead entries are not something a sync would fetch.
-            Sort::Synced => rows.sort_by_key(|pos| {
-                let s = &self.library[*pos];
-                (s.kind == Some(crate::manifest::Kind::Custom), s.synced.unwrap_or(0))
-            }),
-            Sort::Missing => {
-                rows.sort_by_key(|pos| {
-                    let s = &self.library[*pos];
-                    std::cmp::Reverse(if s.kind == Some(crate::manifest::Kind::Custom) { 0 } else { s.missing })
-                });
-            }
-        }
-        rows
+        view::shelf_rows(&self.library, &self.shelf_narrow(), self.sort)
     }
 
     /* Every matching track in the library, as the folder it is in and its
@@ -2021,10 +1848,7 @@ impl App {
     // Ranked by the picker's matcher, so the two screens answer one query the same way. The kind too, or `t`
     // answers a different question from the rows. A custom playlist's tracks are found in their own folders.
     pub fn found_hits(&self) -> Vec<crate::picker::Hit> {
-        if self.filter.trim().is_empty() {
-            return Vec::new();
-        }
-        crate::picker::find(&self.library, &self.filter, |s| self.kind_shows(s), crate::picker::Files::All)
+        view::found_hits(&self.library, &self.filter, self.only)
     }
 
     pub fn can_pick(&self) -> bool {
@@ -2059,20 +1883,9 @@ impl App {
         self.pick.hits = crate::picker::rows(&self.library, &self.pick.query);
         if self.pick.only_marked {
             let hits = std::mem::take(&mut self.pick.hits);
-            self.pick.hits = hits
-                .into_iter()
-                .filter(|h| {
-                    let (folder, file) = self.pick_target(h);
-                    self.pick.marks.has(folder, file)
-                })
-                .collect();
+            self.pick.hits = crate::picker::marked_only(&self.library, hits, &self.pick.marks);
         }
-        self.pick.total = self
-            .library
-            .iter()
-            .filter(|s| s.kind != Some(crate::manifest::Kind::Custom))
-            .map(|s| s.files.iter().filter(|(_, here)| *here).count())
-            .sum();
+        self.pick.total = crate::picker::addable(&self.library);
         self.pick.cursor = self.pick.cursor.min(self.pick.hits.len().saturating_sub(1));
     }
 
@@ -2116,8 +1929,7 @@ impl App {
 
     // The folder and file name of a hit.
     fn pick_target(&self, hit: &crate::picker::Hit) -> (&Path, &str) {
-        let shelf = &self.library[hit.shelf];
-        (&shelf.path, &shelf.files[hit.file].0)
+        crate::picker::target(&self.library, hit)
     }
 
     // Toggles the row under the cursor and leaves the cursor where it is.
@@ -2146,16 +1958,8 @@ impl App {
     // What Enter sends: tracks to add and tracks to take off. A new list adds the marks, or the cursor row when
     // nothing is marked. An open list starts with its own tracks marked, so only the difference counts.
     pub fn pick_changes(&self) -> (Vec<(PathBuf, String)>, Vec<(PathBuf, String)>) {
-        if self.pick.existing {
-            let add = self.pick.marks.picks().into_iter().filter(|(f, n)| !self.pick.held.has(f, n)).collect();
-            let remove = self.pick.held.picks().into_iter().filter(|(f, n)| !self.pick.marks.has(f, n)).collect();
-            return (add, remove);
-        }
-        if self.pick.marks.len() > 0 {
-            return (self.pick.marks.picks(), Vec::new());
-        }
-        let cursor = self.pick.hits.get(self.pick.cursor).map(|h| self.pick_target(h));
-        (cursor.map(|(f, n)| vec![(f.to_path_buf(), n.to_string())]).unwrap_or_default(), Vec::new())
+        let held = self.pick.existing.then_some(&self.pick.held);
+        crate::picker::changes(&self.library, self.pick.hits.get(self.pick.cursor), &self.pick.marks, held)
     }
 
     /// The result under the cursor, or `None` when the list is empty.
@@ -2614,25 +2418,8 @@ impl App {
         }
     }
 
-    /* Built from the tracks rather than from a list of every status, which
-       is the whole point: a list is hand-kept and adding a variant does not
-       fail to compile against it, so the first version of this still had the
-       bug it was meant to remove. `tally()` is exhaustive and decides both
-       whether a status is counted and where it sits, so a new one is either
-       given a column or deliberately left out, and neither can be forgotten. */
     pub fn counts(&self) -> Vec<(Status, usize)> {
-        let mut seen: Vec<(u8, Status, usize)> = Vec::new();
-        for track in &self.tracks {
-            let Some(rank) = track.status.tally() else {
-                continue;
-            };
-            match seen.iter_mut().find(|(_, s, _)| *s == track.status) {
-                Some((_, _, n)) => *n += 1,
-                None => seen.push((rank, track.status, 1)),
-            }
-        }
-        seen.sort_unstable_by_key(|(rank, _, _)| *rank);
-        seen.into_iter().map(|(_, s, n)| (s, n)).collect()
+        view::counts(&self.tracks)
     }
 
     pub fn settled(&self) -> usize {
@@ -2882,26 +2669,6 @@ mod tests {
         settled.stage = "finished".into();
         settled.step(true);
         assert_eq!(settled.stage, "finished", "it announced a mode nobody could see");
-    }
-
-    /* `a` then marking nineteen of twenty back by hand is the work this
-       removes, and it has to mean the same amount of list that `a` does. */
-    #[test]
-    fn inverting_marks_stops_at_the_filter_like_marking_all_does() {
-        let mut app = app_with(&[Status::Ok, Status::Failed, Status::Ok]);
-        app.tracks[0].name = "Neu! - Hallogallo".into();
-        app.tracks[1].name = "Can - Vitamin C".into();
-        app.tracks[2].name = "Neu! - Negativland".into();
-        app.marked.insert(1);
-
-        app.invert_marks();
-        // The one that was marked comes off, the two that were not go on.
-        assert_eq!(app.marked, [2, 3].into_iter().collect());
-
-        app.marked.clear();
-        app.filter = "neu".into();
-        app.invert_marks();
-        assert_eq!(app.marked, [1, 3].into_iter().collect(), "it reached past the filter");
     }
 
     /* A compilation the lookup split across twenty artists, or one artist's
@@ -3192,25 +2959,6 @@ mod tests {
         assert!(app.on_air.is_none(), "a deleted list is still on air");
     }
 
-    // Lists have no sync time and no missing downloads, so neither sort has anything to say about them.
-    #[test]
-    fn a_list_takes_no_part_in_the_sync_sorts() {
-        let (tx, _rx) = std::sync::mpsc::channel();
-        let mut app = App::new(tx, String::new());
-        let mut dead = list_row("Dead");
-        dead.missing = 9;
-        let mut synced = shelf("Old");
-        synced.synced = Some(5);
-        let mut gappy = shelf("Gappy");
-        gappy.missing = 2;
-        app.apply(Msg::Library { shelves: vec![dead, gappy, synced], show: false });
-        let order = |app: &App| app.shelf_rows().into_iter().map(|p| app.library[p].name.clone()).collect::<Vec<_>>();
-        app.sort = Sort::Synced;
-        assert_eq!(order(&app), ["Gappy", "Old", "Dead"], "a list ranked as never synced");
-        app.sort = Sort::Missing;
-        assert_eq!(order(&app)[0], "Gappy", "a list's dead entries outranked a folder's");
-    }
-
     #[test]
     fn an_order_message_reorders_the_rows_it_holds_and_ignores_an_id_it_does_not() {
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -3263,18 +3011,6 @@ mod tests {
         assert!(!app.can_pick());
     }
 
-    // Its tracks are found in the folders they came from, so listing them again would show each twice.
-    #[test]
-    fn the_search_never_lists_a_custom_playlists_tracks_a_second_time() {
-        use crate::manifest::Kind;
-        let mut app = library_app(vec![
-            Shelf { kind: None, ..stocked("Folder", &["01 - Creep.opus"]) },
-            Shelf { kind: Some(Kind::Custom), ..stocked("Mix", &["01 - Creep.opus"]) },
-        ]);
-        app.filter = "creep".into();
-        assert_eq!(app.found_rows(), vec![(0, 0)]);
-    }
-
     /// Both narrowings at once, and one Esc for the pair: half of it left on
     /// is a band saying the list is short with nothing to turn off.
     #[test]
@@ -3297,37 +3033,6 @@ mod tests {
         app.clear_filter();
         assert_eq!(app.only, None, "the kind survived the key that clears it");
         assert_eq!(app.shelf_rows(), vec![0, 1, 2]);
-    }
-
-    /* Sixty folders and no way to ask which one holds a track: the answer was
-       opening them one at a time. The filenames are already in memory from
-       the stat pass, so the box that narrows by folder name narrows by track
-       as well. */
-    #[test]
-    fn the_library_filter_finds_a_folder_by_a_track_inside_it() {
-        let mut app = library_app(vec![
-            stocked("Focus", &["01 Steve Reich - Music for 18.opus"]),
-            stocked("Road trip", &["01 Neu! - Hallogallo.opus", "02 Can - Spoon.opus"]),
-            stocked("Sleep", &["01 Eno - Ascent.opus"]),
-        ]);
-
-        // A track nobody would guess the folder of from its name.
-        app.filter = "hallogallo".into();
-        assert_eq!(app.shelf_rows(), vec![1]);
-
-        // Case is a tagging accident here as much as anywhere else.
-        app.filter = "NEU!".into();
-        assert_eq!(app.shelf_rows(), vec![1]);
-
-        // The folder's own name still matches, and matching both is one row.
-        app.filter = "o".into();
-        assert_eq!(app.shelf_rows(), vec![0, 1, 2]);
-        app.filter = "focus".into();
-        assert_eq!(app.shelf_rows(), vec![0]);
-
-        // And something in neither place narrows to nothing rather than all.
-        app.filter = "zzzz".into();
-        assert!(app.shelf_rows().is_empty());
     }
 
     /* The library screen answers which folders hold a match and its preview
@@ -3363,43 +3068,6 @@ mod tests {
         assert_eq!(app.found, Some((2, 0)));
         app.found_jump(false);
         assert_eq!(app.found, Some((0, 0)));
-    }
-
-    // The picker and `t` are one matcher, so one query answers the same way on both.
-    #[test]
-    fn the_search_screen_is_fuzzy_ranked_and_matches_the_folder_like_the_picker() {
-        let mut app = library_app(vec![
-            stocked("Focus", &["01 - Creep.opus", "02 - Karma.opus"]),
-            stocked("Other", &["01 - Autobahn.opus"]),
-        ]);
-        app.filter = "autbn".into();
-        assert_eq!(app.found_rows(), vec![(1, 0)], "gaps in the query match");
-        app.filter = "focus".into();
-        assert_eq!(app.found_rows(), vec![(0, 0), (0, 1)], "the folder is matched too");
-        app.filter = "krma".into();
-        assert_eq!(app.found_hits()[0].label, "Karma", "the number is not part of the label");
-        // The same query on the picker lists the same tracks.
-        app.filter = "creep".into();
-        let picker: Vec<(usize, usize)> = crate::picker::rows(&app.library, "creep").iter().map(|h| (h.shelf, h.file)).collect();
-        assert_eq!(app.found_rows(), picker);
-    }
-
-    /// Same box, same answer: with the kind on, `t` must not turn up tracks
-    /// from the folders the rows just hid.
-    #[test]
-    fn the_search_screen_honours_the_kind_the_rows_are_narrowed_to() {
-        use crate::manifest::Kind;
-        let mut app = library_app(vec![
-            Shelf { kind: Some(Kind::Album), ..stocked("Autobahn", &["01 Kraftwerk - Autobahn.opus"]) },
-            stocked("Road trip", &["01 Kraftwerk - Neonlicht.opus"]),
-        ]);
-        app.filter = "kraftwerk".into();
-        app.only = Some(Kind::Album);
-        assert_eq!(app.shelf_rows(), vec![0]);
-        assert_eq!(app.found_rows(), vec![(0, 0)]);
-
-        app.only = Some(Kind::Playlist);
-        assert_eq!(app.found_rows(), vec![(1, 0)]);
     }
 
     /* The cursor is the pair and not a row number, because a sync rebuilds
@@ -3486,6 +3154,38 @@ mod tests {
         app
     }
 
+    /* `a` then marking nineteen of twenty back by hand is the work this
+       removes, and it has to mean the same amount of list that `a` does. */
+    #[test]
+    fn inverting_marks_stops_at_the_filter_like_marking_all_does() {
+        let mut app = app_with(&[Status::Ok, Status::Failed, Status::Ok]);
+        app.tracks[0].name = "Neu! - Hallogallo".into();
+        app.tracks[1].name = "Can - Vitamin C".into();
+        app.tracks[2].name = "Neu! - Negativland".into();
+        app.marked.insert(1);
+
+        app.invert_marks();
+        // The one that was marked comes off, the two that were not go on.
+        assert_eq!(app.marked, [2, 3].into_iter().collect());
+
+        app.marked.clear();
+        app.filter = "neu".into();
+        app.invert_marks();
+        assert_eq!(app.marked, [1, 3].into_iter().collect(), "it reached past the filter");
+    }
+
+    /* `/` then `m` is how you mark one artist's bad rows. Reaching past the
+       filter would mark the whole run instead, which is the opposite. */
+    #[test]
+    fn marking_by_status_stops_at_the_filter() {
+        let mut app = named(&["Aphex Twin - Xtal", "Aphex Twin - Avril", "Boards - Olson"]);
+        app.tracks[2].status = Status::Ok;
+        app.filter = "aphex".into();
+        app.cursor = 0;
+        app.mark_like_cursor();
+        assert_eq!(app.targets(), [1], "the hidden Ok track was marked too");
+    }
+
     #[test]
     fn a_bulk_action_falls_back_to_the_cursor_when_nothing_is_marked() {
         let mut app = app_with(&[Status::Ok, Status::Kept, Status::Weak]);
@@ -3521,16 +3221,6 @@ mod tests {
         app.mark_like_cursor();
         assert!(app.marked.is_empty(), "the second press unmarked them");
         assert_eq!(app.targets(), [1], "back to the cursor track");
-    }
-
-    #[test]
-    fn marking_by_status_keeps_marks_made_by_hand() {
-        let mut app = app_with(&[Status::Kept, Status::Ok, Status::Kept]);
-        app.cursor = 1;
-        app.toggle_mark();
-        app.cursor = 0;
-        app.mark_like_cursor();
-        assert_eq!(app.targets(), [1, 2, 3]);
     }
 
     /* The gap between sending a command and the worker reporting it is long
@@ -4027,18 +3717,6 @@ mod tests {
         assert_eq!(app.selected(), Some(1));
     }
 
-    /* `/` then `m` is how you mark one artist's bad rows. Reaching past the
-       filter would mark the whole run instead, which is the opposite. */
-    #[test]
-    fn marking_by_status_stops_at_the_filter() {
-        let mut app = named(&["Aphex Twin - Xtal", "Aphex Twin - Avril", "Boards - Olson"]);
-        app.tracks[2].status = Status::Ok;
-        app.filter = "aphex".into();
-        app.cursor = 0;
-        app.mark_like_cursor();
-        assert_eq!(app.targets(), [1], "the hidden Ok track was marked too");
-    }
-
     /* A mark is an explicit choice and a filter is a view, so marks made
        before one still count: the bar's "N marked" is what says so. */
     #[test]
@@ -4049,15 +3727,6 @@ mod tests {
         app.filter = "aphex".into();
         app.snap();
         assert_eq!(app.targets(), [2]);
-    }
-
-    #[test]
-    fn a_filter_matches_the_status_word_as_well_as_the_name() {
-        let mut app = named(&["One", "Two", "Three"]);
-        app.filter = "failed".into();
-        assert_eq!(app.rows(), [1]);
-        app.filter = "APHEX".into();
-        assert!(app.rows().is_empty());
     }
 
     /* A filter left over from the last playlist hides most of the next one,

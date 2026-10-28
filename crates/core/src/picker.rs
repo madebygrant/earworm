@@ -167,6 +167,51 @@ impl Marks {
     }
 }
 
+// The folder and file name a hit points at.
+pub fn target<'a>(library: &'a [Shelf], hit: &Hit) -> (&'a Path, &'a str) {
+    let shelf = &library[hit.shelf];
+    (&shelf.path, &shelf.files[hit.file].0)
+}
+
+/// The hits already marked, for the picker's marked-only view.
+pub fn marked_only(library: &[Shelf], hits: Vec<Hit>, marks: &Marks) -> Vec<Hit> {
+    hits.into_iter()
+        .filter(|h| {
+            let (folder, file) = target(library, h);
+            marks.has(folder, file)
+        })
+        .collect()
+}
+
+/// How many tracks the picker could add: every file on disk outside a custom playlist.
+pub fn addable(library: &[Shelf]) -> usize {
+    library
+        .iter()
+        .filter(|s| s.kind != Some(Kind::Custom))
+        .map(|s| s.files.iter().filter(|(_, here)| *here).count())
+        .sum()
+}
+
+// What Enter sends: tracks to add and tracks to take off. A new list adds the marks, or the cursor row when
+// nothing is marked. An open list starts with its own tracks marked as `held`, so only the difference counts.
+pub fn changes(
+    library: &[Shelf],
+    under: Option<&Hit>,
+    marks: &Marks,
+    held: Option<&Marks>,
+) -> (Vec<(PathBuf, String)>, Vec<(PathBuf, String)>) {
+    if let Some(held) = held {
+        let add = marks.picks().into_iter().filter(|(f, n)| !held.has(f, n)).collect();
+        let remove = held.picks().into_iter().filter(|(f, n)| !marks.has(f, n)).collect();
+        return (add, remove);
+    }
+    if marks.len() > 0 {
+        return (marks.picks(), Vec::new());
+    }
+    let cursor = under.map(|h| target(library, h));
+    (cursor.map(|(f, n)| vec![(f.to_path_buf(), n.to_string())]).unwrap_or_default(), Vec::new())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

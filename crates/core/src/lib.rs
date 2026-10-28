@@ -22,5 +22,6 @@ pub mod tag;
 pub mod theme;
 pub mod tools;
 pub mod update;
+pub mod view;
 pub mod worker;
 pub mod ytdlp;

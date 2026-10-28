@@ -4,7 +4,7 @@ mod ui;
 // The core's modules at this crate's root, so `crate::config` and friends read as they did before the split.
 use earworm_core::{
     achievements, artists, cheats, config, deps, export, icons, lookup, manifest, picker, protocol, tag, theme,
-    tools, update, worker, ytdlp,
+    tools, update, view, worker, ytdlp,
 };
 
 use std::io::{IsTerminal, Write};

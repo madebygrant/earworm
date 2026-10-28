@@ -57,6 +57,10 @@ turns on.
 - `tools.rs` — `command`, how every external tool is started: from where
   `bin` finds it (the config's `[tools]` path, PATH, then Homebrew's and
   `~/.local`'s bin folders) and with those folders on its PATH
+- `view.rs` — the list rules both front ends share, as pure functions over
+  the state a front end holds: what the track filter and review keep, the
+  library's narrowings and `Sort`, the `t` search's hits, the artist query,
+  which tracks a marking key takes and what the pick gate opens with
 - `artists.rs` — the artist index read off the tags, `key` (one artist under
   any spelling), and the `.artists` and `.artists-seen` stores
 - `discover.rs` — Deezer's artists, releases, top tracks and related artists,
@@ -66,8 +70,8 @@ turns on.
 
 - `main.rs` — terminal setup, event loop, key handling, shutdown
 - `app.rs` — `App` state, `View` (which screen has the keys), `picking` (the
-  reply channel for the pick gate), the `marked` set behind `targets()`, and
-  the `filter` behind `rows()`
+  pick gate's question id), the `marked` set behind `targets()`, and the
+  `filter` behind `rows()`, which asks `view` and keeps only the cursors
 - `ui.rs` — every draw function
 
 ## Rules
@@ -98,7 +102,7 @@ which is read when somebody doubts a rule rather than at the start of a session.
 | Questions, forms and quitting: `App.confirm`, `App.fields`, `Confirm` and quit questions, the header and estimate | `docs/rules/questions-and-forms.md` | touching prompts, forms, `Confirm` or the quit flow |
 | Dependencies, `--check` and the update check: `DEPS`, `--check`, the GitHub probe | `docs/rules/dependencies-and-updates.md` | touching `deps.rs`, `update.rs` or `--check` |
 | Themes and colour depth: `Palette`, `[themes.*]`, `[colors]`, `^t`, truecolor vs 256, `NO_COLOR` | `docs/rules/themes-and-colour.md` | touching `theme.rs`, `recolour`, theme config or any colour in `ui.rs` |
-| Lists, narrowing and search: scrolling, flashes, the filter, review, the library order, `t` search, undo | `docs/rules/lists-and-search.md` | touching `rows()`, `shelf_rows()`, `found_hits`, the filter box or undo |
+| Lists, narrowing and search: scrolling, flashes, the filter, review, the library order, `t` search, undo | `docs/rules/lists-and-search.md` | touching `view.rs`, `rows()`, `shelf_rows()`, `found_hits`, the filter box or undo |
 | Artists and discovery: the artist index, stars, the artist page, getting albums and top tracks, new releases | `docs/rules/discovery.md` | touching `artists.rs`, `discover.rs`, `find_album`/`find_song`, `View::Artists`/`View::Artist` or `by_artist` |
 | Verbs, text, subprocesses and drawing: status verbs, the bell, column widths, `run_bounded`, the intro, the gradient | `docs/rules/ui-details.md` | touching text widths, subprocess calls, the intro or `draw_*` layout |
 
