@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
-  import { onMount, untrack } from "svelte";
+  import { onDestroy, onMount, untrack } from "svelte";
+  import { SvelteSet } from "svelte/reactivity";
   import type { IconName } from "../lib/icons";
   import { press } from "../lib/keys";
   import type { Kind, Shelf, Sort } from "../lib/protocol";
@@ -36,22 +37,31 @@
   });
 
   // Covers for the folders scrolled into view, so a big library is not one long batch the next command waits
-  // behind. Untracked, since `askThumbs` reads `app.model` and every message would ask again.
-  let seen = $state<string[]>([]);
+  // behind. `wanted` is read tracked, so a folder scrolling in asks; `askThumbs` runs untracked, since it reads
+  // `app.model` and every message would ask again.
+  // One observer for every tile, each tile's folder looked up by its element.
+  const seen = new SvelteSet<string>();
+  const paths = new Map<Element, string>();
+  const io = new IntersectionObserver((entries) => {
+    for (const e of entries) if (e.isIntersecting && paths.has(e.target)) seen.add(paths.get(e.target)!);
+  });
+  onDestroy(() => io.disconnect());
   function watch(node: HTMLElement, path: string) {
-    const io = new IntersectionObserver(([e]) => {
-      if (e.isIntersecting && !seen.includes(path)) seen = [...seen, path];
-    });
+    paths.set(node, path);
     io.observe(node);
-    return { destroy: () => io.disconnect() };
+    return {
+      update: (to: string) => paths.set(node, to),
+      destroy: () => (io.unobserve(node), paths.delete(node)),
+    };
   }
   const library = $derived(m.library);
   const artwork = $derived(m.artwork);
   const busy = $derived(working());
-  const wanted = $derived(library.filter((s) => seen.includes(s.path)).flatMap((s) => { const a = shelfArt(s); return typeof a === "object" ? a.files : []; }));
+  const wanted = $derived(library.filter((s) => seen.has(s.path)).flatMap((s) => { const a = shelfArt(s); return typeof a === "object" ? a.files : []; }));
   $effect(() => {
     void artwork;
-    if (!busy) untrack(() => askThumbs(wanted));
+    const files = wanted;
+    if (!busy) untrack(() => askThumbs(files));
   });
 
   function select(s: Shelf) {

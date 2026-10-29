@@ -92,7 +92,8 @@ sits in, and `Art.svelte` draws a folder's sleeve or mosaic with
 a finished one, or a folder opened from disk, is `Run.svelte`.
 `src/look.css` is the only stylesheet. Run it
 with `pnpm dev` in `crates/gui` and `cargo run -p earworm-gui`, or
-`pnpm tauri dev`; `pnpm test` runs the reducer tests. `pnpm tauri build`
+`pnpm tauri dev`; `pnpm test` runs the page's tests: the reducer's, and the
+library screen mounted in jsdom. `pnpm tauri build`
 makes the ad-hoc signed `.app` and `.dmg`, and `.github/workflows/desktop.yml`
 builds those and the Linux AppImage and `.deb` for a `v*` tag, attaching
 them to a draft release that is published by hand.

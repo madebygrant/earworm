@@ -148,9 +148,14 @@
   message, so an effect reading through it re-ran per log line: the spinner's
   interval never fired, the list snapped back to the cursor while somebody
   scrolled it, and the whole track list crossed IPC for every line of yt-dlp
-  output. Take the field into its own `$derived` first.
-  Nothing tests it; the reducer tests have no DOM, so it was checked in the
-  running app.
+  output. Take the field into its own `$derived` first. The reverse bites too:
+  a dependency read inside `untrack` is never followed, so the library asked
+  for no covers in a built app, where nothing else re-ran the effect once the
+  folders scrolled into view. Read what the effect depends on before
+  `untrack`, and untrack only the call. The covers are pinned by `asks for a
+  folder's cover when it scrolls into view after the library has drawn` in
+  `Library.test.ts`, which mounts the screen in jsdom with the observers
+  driven by hand; the rest was checked in the running app.
 - **A thumbnail is asked for once, and again after an `Idle` that left it
   unanswered.** The screens ask whenever a reply lands, so without
   `thumbsAsked` the files still on their way went out again; a batch the

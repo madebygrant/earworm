@@ -10,5 +10,7 @@ export default defineConfig({
   plugins: [svelte()],
   clearScreen: false,
   server: { port: 1420, strictPort: true, watch: { ignored: ["**/src-tauri/**"] }, fs: { allow: ["../..", thumbs] } },
+  // Svelte's browser build, so a component test can mount; its server build only renders to a string.
+  resolve: process.env.VITEST ? { conditions: ["browser"] } : undefined,
   test: { environment: "node" },
 });
