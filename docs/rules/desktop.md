@@ -41,10 +41,63 @@
   the wrong ground; `paint` overwrites it with the palette `Config::build`
   resolved, so `theme`, `[themes.*]` and `[colors]` apply as they do in the
   terminal. The variables painted are exactly the ones `:root` defines, its
-  values are core's, and an alias `.look` defines is read only under `.look`,
-  where it resolves
+  values are core's, and any other variable is a measure `body` sets
+  (`--sheet`) or an alias `.look` defines, read only under `.look`, where it
+  resolves
   (`the_palette_paints_exactly_the_colours_the_stylesheets_use`). Whether
   a theme is light is read off its ground, not its name.
+- **`look.css` is the page's only stylesheet.** The mockups' `tokens.css`
+  and `base.css` styled the same class names (`.sheet`, `.tile`, `.log`,
+  `.bar`) for the old screens, so every new rule had to be shielded with
+  `all: revert`, and a rule meant for one log leaked onto the other once the
+  shield moved. `main.ts` imports `look.css` and the `@fontsource` faces, and
+  no file under `src/` brings in styles of its own: no other `.css` import,
+  `<style>` block or `@import`. The mockups stay under `docs/mockups/` as
+  pictures
+  (`the_page_imports_look_css_and_the_fonts_and_no_other_stylesheet`).
+- **The desktop's derived colours are worked out in Rust, beside the
+  palette, and measured there.** `card2` (the well inside a card: the active
+  pill, a stat tile, a key badge), `glass` (the bar), `accent2`, `glow` and
+  `scrim` are mixed by `vars` in `main.rs`, `card2` through
+  `Palette::card2`, rather than with CSS `color-mix()`, which WebKit lacks
+  before 16.2: the bundle runs from macOS 11, and a Mac on 11 or 12 that
+  never took a Safari update has an older one. `theme.rs`'s
+  `desktop_grounds` measures every readable slot on the card wells and on
+  the bar composited over each end of the gradient
+  (`every_palette_is_legible_on_its_own_ground`,
+  `muted_is_measured_on_the_desktops_card_wells`). `card2` sinks `surface`
+  halfway to `far` rather than lifting it toward `text`, which put warm's
+  `muted` at 3.7:1. Text on `scrim` (a tile's status pill and caption) is
+  not measured: on a sleeve it is over a picture, and on an empty tile
+  nothing checks it. A `[themes.*]` theme is measured on the terminal's
+  grounds only: nothing calls `desktop_unreadable` outside its test.
+- **Never a key badge on an icon.** Icons are for the mouse: a pill, a
+  toolbar button or a sheet button shows an icon or a word, and does what a
+  key does, by pressing it or by setting the state the key walks to (the
+  kind, sort and tiles/list buttons). Key badges appear only in the bar, the
+  `h` sheet and a dialog's foot hints, each as a badge and a word. A badge on an icon
+  reads as a second, different action, and the icon and the badge then
+  disagree about what the button is. Nothing tests it.
+- **The run is a chip, not a pill.** A run starts by syncing a link and is
+  never gone to, so a Run pill was disabled nearly always and read as
+  broken. The reducer keeps the last download in `run`: it starts at the
+  pick gate or the first track in hand, which opening a folder never has,
+  and `Done` closes it with its look and failed counts, since its tracks are
+  gone once another folder is opened. The chip opens that folder again, as
+  Enter on it in the library does, and a folder opened any other way lights
+  Library (`remembers the last download, and opening a folder from disk
+  neither starts nor ends it`, `starts the run at the pick gate, before any
+  track is in hand`).
+- **The sheet is on the right and shows what the screen's keys act on.**
+  That is the item under the cursor, except in the playlist picker, where
+  Enter acts on the whole list, so the sheet shows the list's order after
+  Enter. Its buttons do what that screen's keys do (the artist page's `o`
+  opens the artist's folders whichever release is under the cursor), so a
+  sheet showing anything else would put a button on one thing that acts on
+  another. A run in progress puts its own card there instead. Below 1100px
+  wide the sheet hides; the pick gate's Download and take none move into its
+  toolbar, and every other button is a key. Nothing tests it; the reducer
+  tests have no DOM.
 - **`^t` and the theme button save through `config::keep_theme`, and say so
   through `Kept::said`.** The same calls the terminal's `^t` makes, so a secret theme is never written and
   `--no-config` keeps the file out; why this write skips the worker is in
@@ -53,11 +106,11 @@
 - **A config that does not build still opens the window.** Launched from the
   Finder there is no terminal to print to, so the error is the window's
   content, painted in the first built-in. Nothing tests it.
-- **The fonts are bundled.** JetBrains Mono comes from `@fontsource` into the
-  build; a desktop app that fetched its type would draw in a fallback
-  offline.
-  Nothing tests it; the release bundle was checked to carry them and the
-  licence.
+- **The fonts are bundled.** Manrope (the page) and JetBrains Mono (key
+  badges, tag sources, install lines and the log) come from `@fontsource` into the build, and
+  `bundle.resources` puts both OFL licences in the app; a desktop app that
+  fetched its type would draw in a fallback offline. Nothing tests it; the
+  bundle was checked to carry both fonts and both licences.
 - **A status's colour is core's `theme::status_slot`.** The terminal's
   `status_color` reads the same table, and the page gets the slot name with
   each status's word at start, which is also the CSS variable to paint it in.
@@ -163,6 +216,11 @@
   key saw it, as in the terminal; putting it back to wait made it reappear at
   once and swallow the next key, over and over while somebody typed.
   Nothing tests it; checked through `EARWORM_DRIVE`.
+- **The icons are generated from `crates/gui/app-icon.svg`.** `pnpm tauri
+  icon app-icon.svg` in `crates/gui` writes them; only the six
+  `tauri.conf.json` lists are kept, and the Android, iOS and Windows store
+  sizes it also writes are not. Edit the SVG and regenerate rather than
+  editing a PNG, or the sizes drift apart. Nothing tests it.
 - **The bundle is ad-hoc signed, never unsigned.** Apple Silicon will not
   run a binary with no signature, and bundling rewrites the app after the
   linker signed it, so `bundle.macOS.signingIdentity` is `"-"` and the

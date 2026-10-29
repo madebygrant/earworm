@@ -1,4 +1,4 @@
-/* docs/mockups/ideas/6-wall-and-room-icons.html, scoped to `.look`. No color-mix(): macOS 11's WebKit
+/* docs/mockups/ideas/6-wall-and-room-icons.html, scoped to `.look`. No color-mix(): WebKit before 16.2
    lacks it, so main.rs derives card2, glass, accent2, glow and scrim. */
 /* graphite until core's palette is painted over it, with its derived slots as main.rs works them out. */
 :root { color-scheme: dark;
@@ -13,7 +13,8 @@
 * { box-sizing: border-box; margin: 0; }
 html, body { height: 100%; }
 body { font: 13px/1.5 "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace; color: var(--text); overflow: hidden; user-select: none; -webkit-user-select: none;
-  background: linear-gradient(160deg, var(--near) 0%, var(--far) var(--stop, 76%), var(--far) 100%); }
+  background: linear-gradient(160deg, var(--near) 0%, var(--far) var(--stop, 76%), var(--far) 100%);
+  --sheet: 330px; }
 button, input { font: inherit; color: inherit; background: none; border: 0; }
 button { cursor: pointer; }
 :focus-visible { outline: 1px solid var(--accent); outline-offset: 0; }
@@ -30,14 +31,14 @@ main.app { display: grid; min-height: 0; }
 .console { position: fixed; left: 0; right: 0; bottom: 84px; background: var(--surface); border-top: 1px solid var(--accent); padding: 4px 16px; display: flex; gap: 1ch; z-index: 6; }
 .console input { flex: 1; outline: none; }
 /* The redesign's chrome: header, the screens between, then the floating bar. Room for the traffic lights. */
-.shell { height: 100%; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; gap: 14px; padding: 12px 24px 16px; }
-main.app, main.app.no-detail { grid-template-columns: minmax(0, 1fr) 330px; gap: 18px; }
+.shell { height: 100%; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; gap: 14px; padding: 18px 24px 16px; }
+main.app, main.app.no-detail { grid-template-columns: minmax(0, 1fr) var(--sheet); gap: 18px; }
 main.app.no-detail { grid-template-columns: minmax(0, 1fr); }
 @media (max-width: 1100px) { main.app, main.app.no-detail { grid-template-columns: minmax(0, 1fr); } }
 /* A wall: its toolbar stays put while the sleeves scroll under it, and the log keeps its third. */
 .view.walled { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
 /* A run: its counts and table, and its own card where the sheet would be. */
-.view.room { display: grid; grid-template-columns: minmax(0, 1fr) 330px; grid-template-rows: minmax(0, 1fr); gap: 18px; padding: 0; overflow: hidden; }
+.view.room { display: grid; grid-template-columns: minmax(0, 1fr) var(--sheet); grid-template-rows: minmax(0, 1fr); gap: 18px; padding: 0; overflow: hidden; }
 /* Narrow, the run's card goes as the sheet does, but the log stays, under the table, so `l` still shows it. */
 @media (max-width: 1100px) { .view.room { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; } .view.room .side .run { display: none; } .view.room .side .log { max-height: 160px; } }
 /* yt-dlp's log, under a folder's wall or in the run's card. */
@@ -68,10 +69,15 @@ main.app.no-detail { grid-template-columns: minmax(0, 1fr); }
 
 .look .i { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
 
-/* The left room is for the macOS traffic lights over the overlay title bar. */
-.look header { display: flex; align-items: center; gap: 24px; padding: 4px 0 4px 64px; }
+/* Flush with the screen below: the macOS traffic lights sit above the logo, in the shell's top padding. */
+.look header { display: flex; align-items: center; gap: 24px; padding: 4px 0; }
 .look .logo { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 20px; letter-spacing: -.02em; }
-.look .logo i { width: 30px; height: 30px; border-radius: 9px; background: linear-gradient(135deg, var(--accent), var(--cursor)); }
+/* The gradient is 1.5:1 on a light ground, so there the coil takes the text colour and the eye is a hole.
+   WebKit before 15.4 has only the prefixed mask. */
+.look .logo i { width: 30px; height: 30px; background: radial-gradient(circle 0.7px at 93.6% 28.6%, #000 99%, #0000), linear-gradient(135deg, #9DB7FF, #7CDDB2); -webkit-mask: url("./logo.svg") center / contain no-repeat; mask: url("./logo.svg") center / contain no-repeat; }
+/* Before `paint`, the system's scheme decides, as :root's palette does. */
+:root[data-light="true"] .look .logo i { background: var(--text); -webkit-mask-image: url("./logo-cut.svg"); mask-image: url("./logo-cut.svg"); }
+@media (prefers-color-scheme: light) { :root:not([data-light]) .look .logo i { background: var(--text); -webkit-mask-image: url("./logo-cut.svg"); mask-image: url("./logo-cut.svg"); } }
 .look .crumb { flex: 1 1 0; min-width: 0; color: var(--muted); font-weight: 600; white-space: nowrap; }
 .look .crumb .line { display: flex; gap: 8px; align-items: baseline; }
 /* The place may be cut; the count never is, since a cut-off count reads as a wrong one. */
@@ -90,6 +96,14 @@ main.app.no-detail { grid-template-columns: minmax(0, 1fr); }
 .look .tools .search { width: 200px; color: var(--muted); }
 .look .tools .search kbd { margin-left: auto; }
 .look .tools .icon { width: 38px; padding: 0; justify-content: center; }
+/* The run's chip: its name may be cut, its count never is, as in the crumb. */
+.look .tools .run { max-width: 280px; min-width: 0; }
+.look .tools .run.on { background: var(--card-2); box-shadow: inset 0 0 0 1px var(--line); }
+.look .tools .run .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.look .tools .run .said { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+.look .tools .run .said.warn { color: var(--warn); }
+.look .tools .run .said.error { color: var(--error); }
+.look .tools .run .progress { flex: none; width: 48px; }
 
 .look .seg3 { display: flex; gap: 2px; padding: 4px; background: var(--card); border: 1px solid var(--line); border-radius: 999px; align-items: center; }
 .look .seg3 > * { width: 34px; height: 30px; border-radius: 999px; display: grid; place-items: center; color: var(--muted); }
@@ -149,11 +163,19 @@ main.app.no-detail { grid-template-columns: minmax(0, 1fr); }
 .look .s.gone img { opacity: .35; filter: grayscale(1); }
 .look .s .cap { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-.look .sheet { min-height: 0; overflow: auto; background: var(--card); border: 1px solid var(--line); border-radius: var(--r); padding: 22px; display: flex; flex-direction: column; gap: 14px; }
-.look .sheet .big { width: 100%; height: 170px; flex: none; border-radius: 14px; background: var(--card-2); border: 1px dashed var(--line); display: grid; place-items: center; color: var(--muted); overflow: hidden; }
-.look .sheet .big.mosaic { grid-template-columns: 1fr 1fr; place-items: stretch; gap: 3px; border: 0; background: var(--line); }
+/* Scrolls only on a window too short for it, with no bar: the bottom fades instead, over padding that a sheet
+   which fits leaves empty, so the fade shows only when something is under it. */
+.look .sheet { min-height: 0; overflow: hidden; background: var(--card); border: 1px solid var(--line); border-radius: var(--r); padding: 22px 22px 2px; display: flex; flex-direction: column; }
+.look .sheet > .in { flex: 1; min-height: 0; overflow: auto; scrollbar-width: none; padding-bottom: 20px; display: flex; flex-direction: column; gap: 14px;
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 20px), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 20px), transparent); }
+.look .sheet > .in::-webkit-scrollbar { display: none; }
+/* Square, as a sleeve is: as wide as the sheet less its padding and border, shrinking to the room the rest leaves. */
+.look .sheet .big { flex: 0 1 calc(var(--sheet) - 46px); min-height: 96px; aspect-ratio: 1; align-self: center; max-width: 100%; border-radius: 14px; background: var(--card-2); border: 1px dashed var(--line); display: grid; place-items: center; color: var(--muted); overflow: hidden; }
 .look .sheet .big.art { border: 0; }
+.look .sheet .big:not(.art) { padding: 10px; text-align: center; }
 .look .sheet .big { position: relative; }
+/* Safari 14's WebKit has no aspect-ratio, and the picture's only child is positioned, so it would be 0 wide. */
+@supports not (aspect-ratio: 1) { .look .sheet .big { align-self: stretch; } }
 .look .sheet .big .i { width: 40px; height: 40px; }
 .look .sheet .big img { width: 100%; height: 100%; object-fit: cover; }
 .look .sheet h3 { margin: 0; font-size: 18px; font-weight: 800; letter-spacing: -.02em; }
@@ -239,7 +261,7 @@ main.app.no-detail { grid-template-columns: minmax(0, 1fr); }
 
 @media (max-width: 1100px) { .look .sheet { display: none; } }
 /* Narrow windows keep the icons; each button's title still names it. */
-@media (max-width: 1240px) { .look nav.pills button span, .look .tools .search span { display: none; } .look .tools .search { width: 38px; padding: 0; justify-content: center; } }
+@media (max-width: 1240px) { .look nav.pills button span, .look .tools .search span, .look .tools .run .name { display: none; } .look .tools .search { width: 38px; padding: 0; justify-content: center; } }
 @media (max-width: 860px) { .look .crumb { display: none; } }
 
 /* Questions and overlays: a card over a scrim, the key hints as badges and words. */
@@ -314,12 +336,10 @@ main.app.no-detail { grid-template-columns: minmax(0, 1fr); }
 .look .tick .i { width: 14px; height: 14px; stroke-width: 3; }
 .look td.twin { color: var(--unsure); }
 .look td u { text-decoration-color: var(--accent); text-underline-offset: 3px; }
-.look .s.person { font-size: 34px; letter-spacing: -.02em; color: var(--text); background: var(--card-2); border-style: solid; }
-.look .s .kind.star { color: var(--accent); font-size: 13px; line-height: 14px; width: 24px; height: 24px; }
+.look td.star { width: 2ch; color: var(--accent); }
 .look .s .kind.fresh { padding: 3px 8px; font-size: 11px; font-weight: 700; color: var(--accent); }
 .look .sheet .files { margin: 0; }
 .look .sheet .files .live { color: var(--accent); }
-.look .s.person .cap { letter-spacing: 0; }
 .look td.what { width: 55%; }
 
 /* A table's secondary columns: the number, the folder, the year. */

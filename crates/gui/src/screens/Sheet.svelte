@@ -28,7 +28,7 @@
 </script>
 
 <div class="look">
-  <aside class="sheet">
+  <aside class="sheet"><div class="in">
     {#if picture}<div class="big" class:art>{@render picture()}</div>{/if}
     <h3>{title}</h3>
     {#if why}<p class="why" style:color={tone}>{why}</p>{/if}
@@ -47,5 +47,5 @@
         {/each}
       </div>
     {/if}
-  </aside>
+  </div></aside>
 </div>

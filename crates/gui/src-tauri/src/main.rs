@@ -111,7 +111,7 @@ fn rgba((r, g, b): (u8, u8, u8), alpha: f32) -> String {
 
 // Every slot by its role name, which is also the stylesheets' variable name, plus the gradient's ends and
 // the tones look.css derives from them. Mixed here rather than with `color-mix()`, which WebKit lacks before
-// macOS 13.1 and the bundle runs from 11.
+// 16.2, and a Mac on 11 or 12 without a Safari update has an older one.
 fn vars(p: &Palette) -> BTreeMap<&'static str, String> {
     let mut vars: BTreeMap<&'static str, String> = p.slots().into_iter().map(|(name, c)| (name, hex(c))).collect();
     let rgb = |c: Color| match c {
@@ -785,10 +785,14 @@ mod tests {
         let root = look.split(":root {").nth(1).unwrap().split('}').next().unwrap();
         let used: std::collections::BTreeSet<&str> =
             root.split("--").skip(1).map(|v| v.split(':').next().unwrap().trim()).collect();
-        // Every other variable look.css reads is an alias `.look` defines, read under `.look`, where it resolves.
+        // Every other variable look.css reads is a measure `body` sets, or an alias `.look` defines, read under
+        // `.look`, where it resolves.
         let named = |s: &str| s.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').count();
-        let block = look.split("\n.look {").nth(1).unwrap().split('}').next().unwrap();
-        let aliases: std::collections::BTreeSet<&str> = block.split("--").skip(1).map(|v| &v[..named(v)]).collect();
+        let set_in = |rule: &str| -> std::collections::BTreeSet<&str> {
+            let block = look.split(rule).nth(1).unwrap().split('}').next().unwrap();
+            block.split("--").skip(1).map(|v| &v[..named(v)]).collect()
+        };
+        let (aliases, measures) = (set_in("\n.look {"), set_in("\nbody {"));
         let mut stray = vec![];
         for (at, _) in look.match_indices("var(--") {
             let v = &look[at + 6..][..named(&look[at + 6..])];
@@ -796,7 +800,7 @@ mod tests {
             let rule = look[..open].rfind(['{', '}']).map_or(0, |i| i + 1);
             // The selector's own line, past any comment above it.
             let selector = look[rule..open].trim().lines().last().unwrap_or("");
-            if !(v == "stop" || used.contains(v) || aliases.contains(v) && selector.starts_with(".look")) {
+            if !(v == "stop" || used.contains(v) || measures.contains(v) || aliases.contains(v) && selector.starts_with(".look")) {
                 stray.push((selector, v));
             }
         }
@@ -817,6 +821,34 @@ mod tests {
             }
         }
         assert_eq!(look.matches(":root {").count(), 2);
+    }
+
+    // The mockups' stylesheets styled the same class names as look.css, and their rules leaked onto the new
+    // screens, so no file under src may bring in styles of its own: no other .css import, `<style>` or `@import`.
+    #[test]
+    fn the_page_imports_look_css_and_the_fonts_and_no_other_stylesheet() {
+        fn files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            for entry in std::fs::read_dir(dir).unwrap().flatten() {
+                let path = entry.path();
+                if path.is_dir() { files(&path, out) } else { out.push(path) }
+            }
+        }
+        let src = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../src"));
+        let mut all = vec![];
+        files(src, &mut all);
+        let mut stray = vec![];
+        for path in all.iter().filter(|p| p.extension().is_some_and(|e| ["ts", "svelte", "css"].contains(&e.to_str().unwrap()))) {
+            let text = std::fs::read_to_string(path).unwrap();
+            for line in text.lines() {
+                let sheet = line.contains(".css\"") && !line.contains("@fontsource/") && line.trim() != "import \"./look.css\";";
+                if sheet || line.contains("<style") || line.trim_start().starts_with("@import") {
+                    stray.push(format!("{}: {}", path.strip_prefix(src).unwrap().display(), line.trim()));
+                }
+            }
+        }
+        assert!(stray.is_empty(), "{stray:#?}");
+        let main = std::fs::read_to_string(src.join("main.ts")).unwrap();
+        assert!(main.lines().any(|l| l == "import \"./look.css\";"));
     }
 
     #[test]

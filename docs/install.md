@@ -40,6 +40,22 @@ for Apple Silicon Macs, and an AppImage and a `.deb` for Linux. The app uses
 the same tools, config and library as the terminal one, so install the tools
 above first.
 
+### Building it yourself
+
+From a clone, with Rust, [Node.js](https://nodejs.org) and
+[pnpm](https://pnpm.io):
+
+```sh
+scripts/install-desktop.sh
+```
+
+It builds the app and installs it for you. On a Mac it puts `earworm.app` in
+`/Applications`, or `~/Applications` if that is not writable, replacing any
+earlier copy; quit earworm first, or the open window keeps running the old
+one until you do. On Linux it installs the AppImage as
+`~/.local/bin/earworm-desktop`, with a menu entry. A copy you built yourself
+is not quarantined, so the step below is only for a downloaded one.
+
 ### First launch on macOS
 
 The app is not signed with an Apple Developer ID or notarised, so macOS

@@ -25,7 +25,7 @@ vi.mock("@tauri-apps/api/core", () => ({
     return reply;
   },
 }));
-vi.stubGlobal("document", { documentElement: { style: { setProperty() {}, colorScheme: "" } } });
+vi.stubGlobal("document", { documentElement: { style: { setProperty() {}, colorScheme: "" }, dataset: {} } });
 
 const theme = { name: "graphite", light: false, names: ["graphite"], vars: {}, said: null };
 const setup = { text: "", format: "opus", rows: [], dir: "~/Music", key: false };

@@ -119,6 +119,8 @@ export function paint(theme: Theme) {
     document.documentElement.style.setProperty(`--${name}`, value);
   }
   document.documentElement.style.colorScheme = theme.light ? "light" : "dark";
+  // CSS cannot match a colorScheme set from script, and look.css draws the logo differently on light.
+  document.documentElement.dataset.light = String(theme.light);
   app.theme = theme;
   if (theme.said) flash(theme.said);
 }

@@ -31,6 +31,30 @@ describe("the reducer", () => {
     expect(s.quit).toBe(true);
   });
 
+  it("remembers the last download, and opening a folder from disk neither starts nor ends it", () => {
+    const ok = { Done: { result: { Ok: "done" }, stage: "finished" } } as Msg;
+    const open = (name: string): Msg[] => ["Restart", { Playlist: name }, { Folder: `/music/${name}` }, { Tracks: tracks("Ok") }, ok];
+    let s = run(initial(statuses), ...open("Krautrock"));
+    expect(s.run).toBe(null);
+    s = run(s, "Restart", { Playlist: "Kraut" }, { Folder: "/music/Kraut" }, { Tracks: tracks("Pending", "Pending", "Pending") });
+    s = run(s, { Progress: { index: 1, percent: 40 } });
+    expect(s.run).toEqual({ name: "Kraut", folder: "/music/Kraut", done: false, ok: true, look: 0, failed: 0 });
+    s = run(s, { Tracks: tracks("Ok", "Weak", "Failed") }, ok);
+    expect(s.run).toEqual({ name: "Kraut", folder: "/music/Kraut", done: true, ok: true, look: 1, failed: 1 });
+    expect(run(s, ...open("Krautrock")).run).toEqual(s.run);
+  });
+
+  it("remembers a run that ended in an error as one, whatever its tracks say", () => {
+    const s = run(initial(statuses), { Folder: "/music/Kraut" }, { Tracks: tracks("Ok", "Pending") }, { Progress: { index: 2, percent: 5 } },
+      { Done: { result: { Err: "yt-dlp is not on PATH" }, stage: "finished" } });
+    expect([s.run?.done, s.run?.ok, s.run?.failed]).toEqual([true, false, 0]);
+  });
+
+  it("starts the run at the pick gate, before any track is in hand", () => {
+    const s = run(initial(statuses), { Playlist: "Kraut" }, { Folder: "/music/Kraut" }, { Tracks: tracks("Pending") }, { Pick: { id: 4 } });
+    expect(s.run?.done).toBe(false);
+  });
+
   it("takes a track's artist and title from Meta, never from the display name", () => {
     const s = run(
       { ...initial(statuses), tracks: tracks("Tagging") },

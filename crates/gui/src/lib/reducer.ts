@@ -7,6 +7,7 @@ import type {
   TopRow, Track, Word,
 } from "./protocol";
 import { variant } from "./protocol";
+import { runStats } from "./run";
 
 export type View = "Tracks" | "Library" | "Found" | "Playlist" | "Pick" | "Artists" | "Artist" | "Settings";
 
@@ -18,6 +19,17 @@ export interface Page {
   loaded: boolean;
   top: Result<TopRow[], string> | null;
   related: Result<RelatedRow[], string> | null;
+}
+
+export interface Run {
+  name: string;
+  folder: string | null;
+  done: boolean;
+  /** False when it ended in an error, which leaves tracks Pending and so counts as neither failed nor a look. */
+  ok: boolean;
+  /** Counted when it finished, since the tracks are gone once another folder is opened. */
+  look: number;
+  failed: number;
 }
 
 export interface State {
@@ -57,6 +69,8 @@ export interface State {
   pickTracks: string | null;
   foundMarks: [string, string][];
   done: Result<string, string> | null;
+  /** The last download, which the header offers a way back to after another folder is opened. */
+  run: Run | null;
   busy: boolean;
   searching: boolean;
   settings: { text: string; format: string; rows: SettingRow[]; brief: [string, string][] };
@@ -112,6 +126,7 @@ export function initial(statuses: Word[] = []): State {
     pickTracks: null,
     foundMarks: [],
     done: null,
+    run: null,
     busy: false,
     searching: false,
     settings: { text: "", format: "", rows: [], brief: [] },
@@ -171,6 +186,13 @@ function track(s: State, index: number, change: (t: Track) => Track): State {
   return { ...s, tracks: s.tracks.map((t) => (t.index === index ? change(t) : t)) };
 }
 
+// A track in hand is a download, which opening a folder never has: it starts the run the header follows, or
+// a new one when the last finished or was another folder's.
+function downloading(s: State): State {
+  if (s.run && !s.run.done && s.run.folder === s.folder) return s;
+  return { ...s, run: { name: s.playlist, folder: s.folder, done: false, ok: true, look: 0, failed: 0 } };
+}
+
 function followTo(s: State, index: number): State {
   return s.follow ? { ...s, cursor: index } : s;
 }
@@ -191,11 +213,11 @@ const handlers: Handlers = {
   OnAir: (s, onAir) => ({ ...s, onAir }),
   Tracks: (s, tracks) => ({ ...s, tracks }),
   Progress: (s, { index, percent }) =>
-    followTo(track(s, index, (t) => ({ ...t, percent, status: "Downloading" })), index),
+    downloading(followTo(track(s, index, (t) => ({ ...t, percent, status: "Downloading" })), index)),
   Twin: (s, { index, twin }) => track(s, index, (t) => ({ ...t, twin })),
   Score: (s, { index, score }) => track(s, index, (t) => ({ ...t, score })),
-  Update: (s, { index, status, source, note, name }) =>
-    followTo(
+  Update: (s, { index, status, source, note, name }) => {
+    const next = followTo(
       track(s, index, (t) => ({
         ...t,
         status,
@@ -204,7 +226,9 @@ const handlers: Handlers = {
         name: name ?? t.name,
       })),
       index,
-    ),
+    );
+    return word(s, status)?.in_hand ? downloading(next) : next;
+  },
   Meta: (s, { index, artist, title, album, year }) => track(s, index, (t) => ({ ...t, artist, title, album, year })),
   Path: (s, { index, path }) => track(s, index, (t) => ({ ...t, path })),
   Log: (s, line) => ({ ...s, logs: [...s.logs, line] }),
@@ -251,13 +275,18 @@ const handlers: Handlers = {
     s.onAir && s.onAir[0] === old ? { ...s, onAir: [renamed, s.onAir[1]] } : s,
   Ask: (s, { id, prompt }) => ({ ...s, prompt: { id, prompt } }),
   // The gate opens with everything it could fetch marked; core decides which those are.
+  // The gate is the first sign of a download, before any track is in hand.
   Pick: (s, { id }) => ({
-    state: { ...s, picking: id, pickHeld: [], follow: false },
+    state: downloading({ ...s, picking: id, pickHeld: [], follow: false }),
     effects: [{ GateMarks: { tracks: s.tracks, held: s.pickHeld } }],
   }),
   Done: (s, { result, stage }) => {
     const said = "Ok" in result ? stage : "failed";
-    return { ...s, stage: said, resting: said, flash: null, done: result };
+    // Opening a folder from disk ends in Done too; only a download that is still going is finished by it.
+    const ended = s.run && !s.run.done && s.run.folder === s.folder;
+    const stats = ended ? runStats(s.tracks, s.statuses) : null;
+    const run = stats ? { ...s.run!, done: true, ok: "Ok" in result, look: stats.look.length, failed: stats.failed.length } : s.run;
+    return { ...s, stage: said, resting: said, flash: null, done: result, run };
   },
   Unmark: (s) => ({ ...s, marked: [] }),
   // A batch the worker cut short at `stop` ends here too, so what it never answered can be asked again.

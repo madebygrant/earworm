@@ -225,7 +225,7 @@ Exit: `git grep "docs/mockups/tokens"` finds nothing under `crates/gui`; the
 bundle lists both font licences; all suites pass; the preview still replays
 both sessions.
 
-## 7. Describe the result
+## 7. Describe the result [done 2026-10-29]
 
 Why last: it documents the state the other waves leave.
 

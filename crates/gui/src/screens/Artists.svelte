@@ -5,11 +5,10 @@
   import FilterBox from "./FilterBox.svelte";
   import Wall from "./Wall.svelte";
 
-  // In core's order, starred first. Nothing here has a portrait, so a tile is the artist's initials.
+  // In core's order, starred first. A table rather than a wall: nothing here has a picture to tile.
   const m = $derived(app.model);
   // With each row's position, which is what core's new releases are kept by.
   const rows = $derived(screens.artistRows.map((at) => [at, m.artists.rows[at]] as const).filter(([, a]) => a));
-  const initials = (name: string) => name.split(/\s+/).filter((w) => /\p{L}|\p{N}/u.test(w)).slice(0, 2).map((w) => [...w.replace(/^[^\p{L}\p{N}]+/u, "")][0] ?? "").join("").toUpperCase() || "?";
 </script>
 
 <section class="view walled">
@@ -18,16 +17,17 @@
       <FilterBox placeholder="filter artists" bind:value={screens.artistQuery} typing={screens.artistTyping} count={screens.artistQuery ? `${rows.length} of ${m.artists.rows.length}` : ""} />
     </div>
     {#if rows.length}
-      <Wall at={screens.artist ?? ""} list={false}>
+      <Wall at={screens.artist ?? ""} list={true}>
+        {#snippet head()}<tr><th></th><th>artist</th><th>tracks</th><th>albums</th><th></th></tr>{/snippet}
         {#each rows as [at, a] (a.name)}
           {@const fresh = screens.artistNew[at]?.length ?? 0}
-          <div class="s empty person" class:cur={a.name === screens.artist} data-k={a.name} role="button" tabindex="-1"
-            onclick={() => (screens.artist = a.name)} ondblclick={() => press("Enter")} onkeydown={() => {}}>
-            {initials(a.name)}
-            {#if fresh}<span class="st accent">+{fresh} new</span>{/if}
-            {#if a.starred}<span class="kind star" title="starred">★</span>{/if}
-            <div class="cap">{a.name}<small>{a.tracks} {a.tracks === 1 ? "track" : "tracks"}{a.albums ? ` · ${a.albums} ${a.albums === 1 ? "album" : "albums"}` : ""}</small></div>
-          </div>
+          <tr class:cur={a.name === screens.artist} data-k={a.name} onclick={() => (screens.artist = a.name)} ondblclick={() => press("Enter")}>
+            <td class="star" title={a.starred ? "starred" : ""}>{a.starred ? "★" : ""}</td>
+            <td><span class="t">{a.name}</span></td>
+            <td class="a">{a.tracks}</td>
+            <td class="a">{a.albums || ""}</td>
+            <td class="live">{fresh ? `${fresh} new` : ""}</td>
+          </tr>
         {/each}
       </Wall>
     {:else}

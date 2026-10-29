@@ -81,7 +81,16 @@ through Vite. `src-tauri/src/main.rs` (package `earworm-gui`, binary
 functions as commands. `src/lib/reducer.ts` is the page's `App::apply`, `src/lib/keys.ts` its
 `handle_key` and `src/lib/screens.svelte.ts` the cursors and actions of the
 screens past the run and the library;
-`src/lib/msgs.json` is recorded from core's samples for its tests. Run it
+`src/lib/msgs.json` is recorded from core's samples for its tests. The
+chrome is `App.svelte` laying out `screens/Header.svelte` (crumb, pills, the
+run's chip, search, theme), the screen, `screens/Detail.svelte` drawing
+`screens/Sheet.svelte` on the right, and `screens/Bar.svelte` with its hints
+from `src/lib/bar.ts`; the `h` sheet is `screens/Help.svelte` over
+`src/lib/keysheet.ts`. `Wall.svelte` is the scroller every wall and table
+sits in, and `Art.svelte` draws a folder's sleeve or mosaic with
+`src/lib/wall.ts`. A run in progress is `Room.svelte` over `src/lib/run.ts`;
+a finished one, or a folder opened from disk, is `Run.svelte`.
+`src/look.css` is the only stylesheet. Run it
 with `pnpm dev` in `crates/gui` and `cargo run -p earworm-gui`, or
 `pnpm tauri dev`; `pnpm test` runs the reducer tests. `pnpm tauri build`
 makes the ad-hoc signed `.app` and `.dmg`, and `.github/workflows/desktop.yml`

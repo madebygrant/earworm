@@ -21,7 +21,8 @@ There is also a [desktop app](docs/gui.md) for macOS and Linux, with the
 same keys and the same library. Each published
 [release](https://github.com/madebygrant/earworm/releases) carries it, and
 [installing](docs/install.md#the-desktop-app) covers the one-time step
-macOS asks for because the app is not signed.
+macOS asks for because the app is not signed. From a clone,
+`scripts/install-desktop.sh` builds it and installs it for you.
 
 ## Features
 

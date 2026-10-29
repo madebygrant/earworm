@@ -143,9 +143,7 @@
     fields={[
       { icon: "tracks", name: "tracks", value: `${shelf.tracks}${shelf.missing ? `, ${shelf.missing} missing` : ""}`, tone: shelf.missing ? "var(--warn)" : undefined },
       ...(shelf.kind === "Custom" ? [] : [{ icon: "clock", name: "synced", value: ago(shelf.synced) } as Field]),
-      ...(shelf.url ? [{ icon: "link", name: "url", value: shelf.url } as Field] : []),
       shelf.kind === "Custom" ? { icon: "file", name: "file", value: short(shelf.path) } : { icon: "folder", name: "folder", value: short(shelf.path) },
-      ...(shelf.playlist ? [{ icon: "m3u8", name: "m3u8", value: shelf.playlist.split("/").pop() ?? "" } as Field] : []),
     ]}
     acts={shelfActs(shelf)}
   >
