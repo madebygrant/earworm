@@ -36,12 +36,14 @@
   rewrites it). The reducer test then requires a handler for every recorded
   variant and no handler for one that does not exist, so a new `Msg` fails
   on both sides until the page handles it.
-- **The palette is core's, sent as CSS variables.** The mockups' stylesheets
-  are imported unchanged for layout and type; `paint` overwrites their
-  colour variables with the palette `Config::build` resolved, so `theme`,
-  `[themes.*]` and `[colors]` apply as they do in the terminal. The variables
-  painted are exactly the ones tokens.css defines
-  (`the_palette_paints_exactly_the_colours_the_stylesheets_use`), and whether
+- **The palette is core's, sent as CSS variables.** `look.css`'s `:root`
+  holds graphite, or light on a light system, so the window does not open in
+  the wrong ground; `paint` overwrites it with the palette `Config::build`
+  resolved, so `theme`, `[themes.*]` and `[colors]` apply as they do in the
+  terminal. The variables painted are exactly the ones `:root` defines, its
+  values are core's, and an alias `.look` defines is read only under `.look`,
+  where it resolves
+  (`the_palette_paints_exactly_the_colours_the_stylesheets_use`). Whether
   a theme is light is read off its ground, not its name.
 - **`^t` and the theme button save through `config::keep_theme`, and say so
   through `Kept::said`.** The same calls the terminal's `^t` makes, so a secret theme is never written and
@@ -112,8 +114,8 @@
   version probes). `pnpm dev` opened in a browser, with
   `?file=<session>&upto=<n>`, mocks IPC and replays the first `n` messages;
   `quit`, `logs`, `mode` and `tokens` set the page's own state, `tokens`
-  keeping the stylesheet's graphite for comparing with
-  `docs/mockups/shots/`. A question in the history is open only when it is
+  keeping look.css's own colours for comparing with
+  `docs/mockups/ideas/6-wall-and-room-icons.html`. A question in the history is open only when it is
   the last message applied, since the page's answers are not in it. Covers
   load through Vite's `/@fs`, so the thumbnail cache is in `server.fs.allow`;
   a session recorded with another `XDG_CACHE_HOME` needs the preview started

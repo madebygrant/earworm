@@ -206,7 +206,7 @@ Exit: every view in `View` draws in the chrome; `h` on each shows its keys;
 the pick gate, the tag form and the cover question each answer through the
 dialog in a driven app (`EARWORM_DRIVE`); `svelte-check` is clean.
 
-## 6. Retire the old look
+## 6. Retire the old look [done 2026-10-29]
 
 Why here: only now is it known what nothing reads any more.
 

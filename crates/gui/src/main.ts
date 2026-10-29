@@ -6,11 +6,6 @@ import "@fontsource/manrope/500.css";
 import "@fontsource/manrope/600.css";
 import "@fontsource/manrope/700.css";
 import "@fontsource/manrope/800.css";
-// The mockups' stylesheets are the app's, so the two cannot drift; core's palette repaints the colours.
-import "../../../docs/mockups/tokens.css";
-import "../../../docs/mockups/base.css";
-import "./app.css";
-import "./screens.css";
 import "./look.css";
 import { mount } from "svelte";
 import App from "./App.svelte";

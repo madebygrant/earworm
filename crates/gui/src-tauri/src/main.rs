@@ -777,20 +777,30 @@ mod tests {
         assert!(recorded == json, "crates/gui/src/lib/msgs.json is stale: EARWORM_RECORD=1 cargo test -p earworm-gui rewrites it");
     }
 
-    // `paint` overwrites the variables tokens.css defines, so the two sets of names have to be the same:
-    // a slot the stylesheet lacks is never used, and one the palette lacks keeps the mockup's colour.
+    // `paint` overwrites the variables look.css's `:root` defines, so the two sets of names have to be the same:
+    // a slot the stylesheet lacks is never used, and one the palette lacks keeps graphite's colour.
     #[test]
     fn the_palette_paints_exactly_the_colours_the_stylesheets_use() {
-        let tokens = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../docs/mockups/tokens.css")).unwrap();
-        let block = tokens.split("[data-theme=\"graphite\"]").nth(1).unwrap().split('}').next().unwrap();
-        let mut used: std::collections::BTreeSet<&str> =
-            block.split("--").skip(1).map(|v| v.split(':').next().unwrap().trim()).collect();
-        // look.css defines its aliases and reads every other variable it names from the palette.
         let look = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../src/look.css")).unwrap();
+        let root = look.split(":root {").nth(1).unwrap().split('}').next().unwrap();
+        let used: std::collections::BTreeSet<&str> =
+            root.split("--").skip(1).map(|v| v.split(':').next().unwrap().trim()).collect();
+        // Every other variable look.css reads is an alias `.look` defines, read under `.look`, where it resolves.
         let named = |s: &str| s.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').count();
-        let defined: std::collections::BTreeSet<&str> =
-            look.split("  --").chain(look.split("; --")).skip(1).map(|v| &v[..named(v)]).collect();
-        used.extend(look.split("var(--").skip(1).map(|v| &v[..named(v)]).filter(|v| !defined.contains(v)));
+        let block = look.split("\n.look {").nth(1).unwrap().split('}').next().unwrap();
+        let aliases: std::collections::BTreeSet<&str> = block.split("--").skip(1).map(|v| &v[..named(v)]).collect();
+        let mut stray = vec![];
+        for (at, _) in look.match_indices("var(--") {
+            let v = &look[at + 6..][..named(&look[at + 6..])];
+            let open = look[..at].rfind('{').unwrap();
+            let rule = look[..open].rfind(['{', '}']).map_or(0, |i| i + 1);
+            // The selector's own line, past any comment above it.
+            let selector = look[rule..open].trim().lines().last().unwrap_or("");
+            if !(v == "stop" || used.contains(v) || aliases.contains(v) && selector.starts_with(".look")) {
+                stray.push((selector, v));
+            }
+        }
+        assert!(stray.is_empty(), "{stray:?}");
         let themes = Themes::default();
         for name in themes.list() {
             let vars = vars(&themes.named(name).unwrap());
@@ -798,6 +808,15 @@ mod tests {
             assert_eq!(painted, used, "{name}");
             assert!(vars.values().filter(|v| v.starts_with('#')).all(|v| v.len() == 7), "{name}");
         }
+        // Before `paint`, and under `?tokens`, the page shows graphite, or light on a light system.
+        for (block, theme) in look.split(":root {").skip(1).zip(["graphite", "light"]) {
+            let want = vars(&themes.named(theme).unwrap());
+            for slot in block.split('}').next().unwrap().split("--").skip(1) {
+                let (name, value) = slot.split_once(':').unwrap();
+                assert_eq!(value.split(';').next().unwrap().trim(), want[name.trim()], "{theme} {name}");
+            }
+        }
+        assert_eq!(look.matches(":root {").count(), 2);
     }
 
     #[test]

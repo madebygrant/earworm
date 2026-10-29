@@ -1,5 +1,59 @@
-/* docs/mockups/ideas/6-wall-and-room-icons.html, scoped to `.look` while the old screens use base.css.
-   No color-mix(): macOS 11's WebKit lacks it, so main.rs derives card2, glass, accent2, glow and scrim. */
+/* docs/mockups/ideas/6-wall-and-room-icons.html, scoped to `.look`. No color-mix(): macOS 11's WebKit
+   lacks it, so main.rs derives card2, glass, accent2, glow and scrim. */
+/* graphite until core's palette is painted over it, with its derived slots as main.rs works them out. */
+:root { color-scheme: dark;
+  --text:#F1F2F4; --accent:#9DB7FF; --cursor:#7CDDB2; --warn:#F5B867; --error:#FF8F87; --muted:#A0A6B2;
+  --rule:#4E525C; --surface:#262A31; --unsure:#B9BEC8; --ink:#16181D; --near:#1D2026; --far:#121418;
+  --card2:#1C1F25; --glass:rgba(38, 42, 49, 0.82); --accent2:#6C7EAE; --glow:rgba(157, 183, 255, 0.22); --scrim:rgba(18, 20, 24, 0.78); }
+/* light on a light system, so the window does not open dark and then flip. */
+@media (prefers-color-scheme: light) { :root { color-scheme: light;
+  --text:#26221E; --accent:#7C540E; --cursor:#116E62; --warn:#845206; --error:#AA2828; --muted:#696258;
+  --rule:#ACA496; --surface:#FDFBF7; --unsure:#746038; --ink:#FAF8F4; --near:#F7F3EC; --far:#E7E1D6;
+  --card2:#F2EEE7; --glass:rgba(253, 251, 247, 0.82); --accent2:#A18554; --glow:rgba(124, 84, 14, 0.22); --scrim:rgba(231, 225, 214, 0.78); } }
+* { box-sizing: border-box; margin: 0; }
+html, body { height: 100%; }
+body { font: 13px/1.5 "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace; color: var(--text); overflow: hidden; user-select: none; -webkit-user-select: none;
+  background: linear-gradient(160deg, var(--near) 0%, var(--far) var(--stop, 76%), var(--far) 100%); }
+button, input { font: inherit; color: inherit; background: none; border: 0; }
+button { cursor: pointer; }
+:focus-visible { outline: 1px solid var(--accent); outline-offset: 0; }
+.good { color: var(--cursor); } .warn { color: var(--warn); } .error { color: var(--error); } .muted { color: var(--muted); }
+.unsure { color: var(--unsure); } .live { color: var(--accent); font-weight: 700; }
+.k { color: var(--accent); }
+.view { overflow: auto; min-width: 0; padding: 12px 16px 24px; }
+main.app { display: grid; min-height: 0; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+.fail { padding: 24px 16px; }
+.fail h1 { font-size: 17px; color: var(--error); margin-bottom: 8px; }
+.fail pre { white-space: pre-wrap; color: var(--text); font: inherit; }
+.console { position: fixed; left: 0; right: 0; bottom: 84px; background: var(--surface); border-top: 1px solid var(--accent); padding: 4px 16px; display: flex; gap: 1ch; z-index: 6; }
+.console input { flex: 1; outline: none; }
+/* The redesign's chrome: header, the screens between, then the floating bar. Room for the traffic lights. */
+.shell { height: 100%; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; gap: 14px; padding: 12px 24px 16px; }
+main.app, main.app.no-detail { grid-template-columns: minmax(0, 1fr) 330px; gap: 18px; }
+main.app.no-detail { grid-template-columns: minmax(0, 1fr); }
+@media (max-width: 1100px) { main.app, main.app.no-detail { grid-template-columns: minmax(0, 1fr); } }
+/* A wall: its toolbar stays put while the sleeves scroll under it, and the log keeps its third. */
+.view.walled { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+/* A run: its counts and table, and its own card where the sheet would be. */
+.view.room { display: grid; grid-template-columns: minmax(0, 1fr) 330px; grid-template-rows: minmax(0, 1fr); gap: 18px; padding: 0; overflow: hidden; }
+/* Narrow, the run's card goes as the sheet does, but the log stays, under the table, so `l` still shows it. */
+@media (max-width: 1100px) { .view.room { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; } .view.room .side .run { display: none; } .view.room .side .log { max-height: 160px; } }
+/* yt-dlp's log, under a folder's wall or in the run's card. */
+.log { overflow: auto; font: 12px/1.6 "JetBrains Mono", ui-monospace, monospace; color: var(--muted); user-select: text; -webkit-user-select: text; }
+.log .warn { color: var(--warn); } .log .error { color: var(--error); }
+.log div { white-space: pre-wrap; word-break: break-all; }
+.view.walled > .log { border-top: 1px solid var(--rule); height: 30%; min-height: 120px; padding: 8px 16px; flex: none; }
+.view.walled > .log.tall { height: 50%; }
+
+/* The picker's list in the order Enter leaves it. */
+.order { list-style: none; padding: 0; font-size: 13px; margin-top: 8px; counter-reset: o; }
+.order li { counter-increment: o; display: grid; grid-template-columns: 3ch 1fr; }
+.order li::before { content: counter(o); color: var(--muted); }
+.order li.out { color: var(--muted); text-decoration: line-through; }
+.order li.out::before { content: ""; }
+
 /* display: contents, so the header, the bar and the sheet stay the shell's grid items. */
 .look {
   display: contents;
@@ -8,9 +62,6 @@
   --r: 18px; --r-s: 12px;
   font: 14px/1.45 var(--font); color: var(--text);
 }
-/* base.css styles these names for the old screens. */
-.look :where(.acts, .bar, .cap, .kv, .log, .sheet, .tile, .sub, .go) { all: revert; }
-.look * { box-sizing: border-box; }
 /* Glow is light only: muted on it measures 3:1 on warm, so no text sits on it. */
 .stage { background: radial-gradient(900px 400px at 70% -10%, var(--glow), transparent 60%); }
 .look kbd { font: 11px var(--mono); color: var(--accent); background: var(--card-2); padding: 1px 6px; border-radius: 6px; }
@@ -60,7 +111,7 @@
 .look .seg3 > button { cursor: pointer; }
 .look .find { margin-left: auto; flex: 0 1 420px; min-width: 220px; height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 14px; background: var(--card); border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-weight: 600; }
 .look .find.on { border-color: var(--accent); color: var(--text); }
-.look .find button, .look .find input { flex: 1; min-width: 0; text-align: left; font: inherit; color: inherit; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; outline: none; caret-color: var(--accent); }
+.look .find button, .look .find input { flex: 1; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; outline: none; caret-color: var(--accent); }
 .look .find input::placeholder { color: var(--muted); }
 .look .find input { min-width: 120px; }
 .look .find .n { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
@@ -155,8 +206,7 @@
 .look .kv { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 20px; margin-top: 16px; }
 .look .kv b { display: block; font-size: 22px; font-weight: 800; letter-spacing: -.02em; }
 .look .kv span { color: var(--muted); font-weight: 600; font-size: 13px; }
-.look .log { font: 12px/1.6 var(--mono); color: var(--muted); margin-top: 4px; }
-.look .log .e { color: var(--error); }
+.look .log { margin-top: 4px; }
 
 /* The run: tiles over the table, the run's card and the log beside them. */
 .look .watch { display: flex; flex-direction: column; gap: 16px; min-width: 0; min-height: 0; }
@@ -180,9 +230,8 @@
 .look .gauge .fill { stroke: url(#arc); transition: stroke-dasharray 200ms ease-out; }
 .look .gauge .big { margin-top: -50px; }
 .look .head .hide { display: grid; place-items: center; color: var(--muted); cursor: pointer; }
-.look .side .log { max-height: 220px; overflow: auto; user-select: text; -webkit-user-select: text; }
+.look .side .log { max-height: 220px; }
 .look .side .log.tall { max-height: 50vh; }
-.look .side .log div { white-space: pre-wrap; word-break: break-all; }
 /* A status word fades in over the last, so the column is seen to settle. */
 .look .status.fade { animation: settle 160ms ease-out; }
 @keyframes settle { from { opacity: 0; } }
@@ -230,6 +279,7 @@
 .look .toast .big { grid-row: span 9; font-size: 28px; line-height: 1; color: var(--accent); }
 .look .toast b { display: block; color: var(--accent); }
 .look .toast span:not(.big) { color: var(--muted); font-size: 13px; }
+@keyframes rise { from { transform: translateY(8px); opacity: 0; } }
 @media (prefers-reduced-motion: no-preference) { .look .toast { animation: rise 160ms ease-out; } }
 @media (max-width: 760px) { .look .keys { grid-template-columns: 1fr; } }
 
