@@ -1,125 +1,96 @@
-# earworm
+<p align="center">
+  <img src="crates/gui/app-icon.svg" alt="The earworm logo: a green-to-blue spiral that ends in a worm's head" width="128">
+</p>
 
-**Playlist in, library out.**
+<h1 align="center">earworm</h1>
 
-A terminal app that turns a YouTube playlist into audio files with verified tags, cover art and an .m3u8.
+<p align="center"><b>Playlist in, library out.</b></p>
+
+<p align="center">
+  Paste a YouTube playlist. Get back a folder of properly tagged audio files
+  with cover art and an <code>.m3u8</code>, ready for any player.
+</p>
 
 ![A playlist open in earworm: the track list on the left, the selected track's
 tags and file path in a pane on the right, and the run's settings along the
 header](docs/images/earworm.png)
 
+## Try it
+
 ```sh
 brew install yt-dlp ffmpeg chromaprint
-cargo install --git https://github.com/madebygrant/earworm --tag v0.4.0
-# To open the TUI
-earworm
-# Or without using the TUI
-earworm 'https://youtube.com/playlist?list=...'
+cargo install --git https://github.com/madebygrant/earworm --tag v0.6.0
+
+earworm                                            # open the app
+earworm 'https://youtube.com/playlist?list=...'    # or go straight to a playlist
 ```
 
-There is also a [desktop app](docs/gui.md) for macOS and Linux, with the
-same keys and the same library. Each published
-[release](https://github.com/madebygrant/earworm/releases) carries it, and
-[installing](docs/install.md#the-desktop-app) covers the one-time step
-macOS asks for because the app is not signed. From a clone,
-`scripts/install-desktop.sh` builds it and installs it for you.
+Prefer a window? The **[desktop app](docs/gui.md)** for macOS and Linux runs
+the same library with the same keys. Grab it from the
+[releases](https://github.com/madebygrant/earworm/releases), or see
+[installing](docs/install.md) for everything else.
 
-## Features
+![The desktop app's library: a playlist shown as a tile of four sleeves, with
+its details and actions in a sheet on the right and the keys along the bottom](docs/images/desktop/library.jpg)
 
-yt-dlp downloads the audio. earworm does the rest, which is what separates a
-download from a music library:
+## Why earworm
 
-- **Tagging that checks itself.** Artist and title are parsed out of the video
-  title, then confirmed against AcoustID fingerprints, Deezer and Apple Music.
-  A track that survives none of that is marked `guessed`, and earworm asks
-  about it rather than writing a tag it can't back up.
-- **Cover art embedded at a sane size.** YouTube serves 2048² thumbnails for
-  its auto-generated albums. earworm keeps them out of your files: what gets
-  embedded is capped at 1000×1000.
-- **Albums get one sleeve, playlists get twelve.** An official album release is
-  recognised on sight, and anything else you settle by putting `[album]` or
-  `[playlist]` in the folder's name. earworm reads that marker and never
-  writes one.
-- **Re-runs skip work you already did.** Each playlist folder keeps an
-  `.earworm` manifest with its URL and current filenames. Sync it again and
-  earworm fetches only the new tracks, reports the ones that left the
-  playlist, and reads the tags it already wrote instead of looking them up.
-- **Fix anything weeks later.** Every folder opens from disk, offline. Edit
-  tags, swap artist and title, search `/` across every folder you own, rename
-  a playlist and have the rename survive the next sync.
-- **Music earworm didn't download is welcome too.** Copy a folder of audio
-  into your library and it appears with the rest, opens from its tags, and
-  takes every editing key. Give it a URL later and earworm works out which
-  files it already has before it fetches anything.
-- **Change format without throwing away what you have.** Tracks already on
-  disk convert on their next sync in whatever way costs the least re-encoding.
-  Why some never re-encode at all is [documented](docs/formats.md), because
-  the answer surprised me too.
-- **Plays through [cliamp](https://docs.cliamp.stream).** `p` hands over the
-  playlist in the right order, tags as track titles.
-- **Five themes, measured rather than eyeballed, plus your own.** `^t` walks
-  them with the screen in front of you and remembers the one you stop on.
-  Every shipped colour clears WCAG 4.5:1 on its own background, including the
-  light theme for terminals the others are unreadable on, and a
-  [palette of your own](docs/themes.md) gets the same numbers run over it.
-- **Icons for the library.** `●` marks an album, `▤` a playlist and `◆` a
-  folder earworm did not download. `icons = "nerd"` draws larger Nerd Font glyphs, and `icons = "text"` goes
-  back to words.
-- **Custom playlists.** Build a list from tracks in any of your folders with
-  `N` (which opens a fuzzy track picker) and `P`, reorder it, and play it in cliamp. It follows a track when you
-  edit it, and deleting a list never touches audio.
-- **Export to a device.** `E` copies a folder or a custom playlist to a stick,
-  card or synced folder, with names every filesystem accepts and a playlist
-  file beside the audio. A second export copies only what changed, and nothing
-  on the device is deleted unless you ask, and then every file is named first.
-  It can re-encode for players that cannot read opus. [Details](docs/library.md#exporting).
-- **A song on two playlists downloads once.** A video another folder already
-  holds is copied across instead of fetched again, and the pick screen marks a
-  likely duplicate with `≈`.
-- **Artists, and what you're missing of them.** `b` lists every artist your
-  tags name. Star the ones you follow, open an artist to see their
-  discography marked owned, partial or missing, their top tracks and who's
-  related, and hear about their new releases each time earworm starts.
-  [Details](docs/discovery.md).
-- **Retries and undos.** `r` re-downloads whatever failed. `u` puts back the
-  last tag edit.
+yt-dlp gets you audio files. earworm turns them into a music library.
+
+- 🎯 **Tags it can back up.** Every track is checked against AcoustID
+  fingerprints, Deezer and Apple Music. If earworm isn't sure, it says so
+  instead of guessing.
+- 🖼️ **Cover art that fits.** Embedded and capped at 1000×1000, not
+  YouTube's 2048² thumbnails. Albums get one sleeve, playlists a mosaic.
+- 🔁 **Sync again, download only what's new.** Re-runs fetch new tracks,
+  report the ones that left, and never redo work.
+- ✏️ **Fix anything later, offline.** Edit tags, search your whole library,
+  rename folders. Folders you copied in yourself work too.
+- 🎧 **Then listen.** Play through [cliamp](https://docs.cliamp.stream),
+  build custom playlists, or export to a USB stick or SD card.
+- 🔭 **Find what you're missing.** Browse your artists, see which of their
+  albums you own, and hear about new releases.
+
+The full list, with the details, is in **[features](docs/features.md)**.
 
 ## How a run goes
 
-Give it a URL and earworm does the whole job: read the playlist, download,
-identify, tag, add art, name files, write the `.m3u8`. One step waits for
-you. Before downloading, the run shows the list and asks which tracks you
-want.
+1. Give earworm a link.
+2. It lists the playlist and asks which tracks you want. Enter takes them
+   all, and `space` and `/` pick out the rest. You'll want this the first
+   time a playlist turns out to be 361 tracks of seminar recordings.
+3. It downloads, identifies, tags, adds art, names the files and writes the
+   `.m3u8`.
+4. Anything it couldn't confirm is marked for a look. `v` shows just those.
 
-Enter takes all of them. Esc takes none. `space` and the `/` filter are there
-for everything in between, which you will need the first time a playlist
-turns out to be 361 tracks of seminar recordings.
+## Learn more
 
-## Where to go next
-
-| | |
+| Start here | |
 | --- | --- |
-| [docs/install.md](docs/install.md) | tools, the AcoustID key, `--check` |
-| [docs/gui.md](docs/gui.md) | the desktop app, screen by screen |
-| [docs/configuration.md](docs/configuration.md) | the config file, every flag |
-| [docs/workflow.md](docs/workflow.md) | picks, filters, fixing tags, retry |
-| [docs/formats.md](docs/formats.md) | m4a, opus, mp3, flac, and what converts |
-| [docs/chapters.md](docs/chapters.md) | cutting an album upload into tracks by its chapters |
-| [docs/loudness.md](docs/loudness.md) | ReplayGain and R128 tags, so tracks play at one volume |
-| [docs/lyrics.md](docs/lyrics.md) | embedded lyrics from LRCLIB, and what is sent to it |
-| [docs/library.md](docs/library.md) | the library screen, search, `--resync` |
-| [docs/discovery.md](docs/discovery.md) | artists, stars, discographies, new releases |
-| [docs/playback.md](docs/playback.md) | playing through cliamp |
-| [docs/themes.md](docs/themes.md) | the five palettes, `^t`, and defining your own |
-| [docs/keys.md](docs/keys.md) | every key, both screens, the status words |
-| [docs/internals.md](docs/internals.md) | how tagging decides, what gets written |
+| [Installing](docs/install.md) | tools, the AcoustID key, `--check` |
+| [Features](docs/features.md) | everything earworm does, in detail |
+| [Workflow](docs/workflow.md) | picks, filters, fixing tags, retry |
+| [Keys](docs/keys.md) | every key and what the status words mean |
+| [Desktop app](docs/gui.md) | the window, screen by screen |
+
+| Going deeper | |
+| --- | --- |
+| [Configuration](docs/configuration.md) | the config file and every flag |
+| [Library](docs/library.md) | the library screen, search, export, `--resync` |
+| [Formats](docs/formats.md) | m4a, opus, mp3, flac, and what converts |
+| [Chapters](docs/chapters.md) | cutting an album upload into tracks |
+| [Loudness](docs/loudness.md) and [lyrics](docs/lyrics.md) | ReplayGain, R128 and LRCLIB |
+| [Artists](docs/discovery.md) | stars, discographies, new releases |
+| [Playback](docs/playback.md) | playing through cliamp |
+| [Themes](docs/themes.md) | five palettes and your own |
+| [Internals](docs/internals.md) | how tagging decides, what gets written |
 
 ## Who it's for
 
-People who download playlists and then rename the files by hand. earworm
-doesn't delete anything you didn't ask it to, shows you when it isn't sure
-about a tag, and answers `--list` and `--check` in plain text so scripts can
-use them too.
+Anyone who has downloaded a playlist and then renamed the files by hand.
+earworm never deletes anything you didn't ask it to, tells you when it isn't
+sure about a tag, and answers `--list` and `--check` in plain text, so
+scripts can use them too.
 
 ## Licence
 
