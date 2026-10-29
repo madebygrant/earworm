@@ -514,7 +514,8 @@ async function libraryKey(e: KeyboardEvent) {
   else if (k === "R") void send("ResyncAll");
   else if (k === "n") void send("Url");
   else if (k === "N") void send("NewPlaylist");
-  else if (k === "t") void sc.findTracks();
+  // Like `/`: the box takes the focus before the key's default, which would type the t into it.
+  else if (k === "t") e.preventDefault(), void sc.findTracks();
   else if (k === "b") sc.openArtists();
   else if (k === " " && m.playback.player === "Running") void send("Toggle");
   else if (!shelf) return;
