@@ -11,7 +11,7 @@
   `reducer.test.ts`).
 - **The worker starts when the page asks, not when the window opens.** `start`
   is called after the page has subscribed to `earworm://msg`; a worker
-  started in `setup` sends the library before anything listens and the rail
+  started in `setup` sends the library before anything listens and the wall
   stays empty. `boot` runs once, since a second listener applies every
   message twice (`listens_once_however_often_it_is_mounted` in
   `store.test.ts`).
@@ -77,8 +77,9 @@
   empty link comes back empty. The format question asked straight after is a
   dialog (`makes the link question the whole screen only while there is
   nothing in the library`).
-- **One filter, two screens, cleared by a new run.** The rail's box narrows
-  folders and the band over the tracks narrows tracks, through the one
+- **One filter, two screens, cleared by a new run.** The box over the
+  library's wall narrows folders and the one over a folder's tracks narrows
+  tracks, through the one
   `ui.filter`, as the terminal's box does. `Restart` clears it, for the
   reason `threads-and-messages.md` gives (`clears the page's own narrowing
   when a new run starts`).
@@ -102,7 +103,7 @@
   answered (`asks again for a thumbnail a cut-short batch never answered,
   once the worker is idle`).
 - **Debug builds print a `probe` line per change.** The page reports the
-  rail, the theme and the computed accent to stderr, which is how a check
+  wall, the theme and the computed accent to stderr, which is how a check
   reads the window where screen capture is not allowed. Release builds
   compile the command to nothing. Nothing tests it.
 - **Debug builds record a session, and the browser replays it.** With

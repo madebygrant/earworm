@@ -12,6 +12,11 @@ body { background: linear-gradient(160deg, var(--near) 0%, var(--far) var(--stop
 /* The redesign's chrome: header, the screens between, then the floating bar. Room for the traffic lights. */
 body { display: block; }
 .shell { height: 100%; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; gap: 14px; padding: 12px 24px 16px; }
-main.app { grid-template-columns: var(--rail) minmax(0, 1fr) 330px; gap: 18px; }
-@media (max-width: 1100px) { main.app { grid-template-columns: var(--rail) minmax(0, 1fr); } }
-@media (max-width: 760px) { main.app { grid-template-columns: 1fr; } }
+main.app, main.app.no-detail { grid-template-columns: minmax(0, 1fr) 330px; gap: 18px; }
+main.app.no-detail { grid-template-columns: minmax(0, 1fr); }
+main.app.railed { grid-template-columns: var(--rail) minmax(0, 1fr) 330px; }
+main.app.railed.no-detail { grid-template-columns: var(--rail) minmax(0, 1fr); }
+@media (max-width: 1100px) { main.app, main.app.no-detail { grid-template-columns: minmax(0, 1fr); } main.app.railed, main.app.railed.no-detail { grid-template-columns: var(--rail) minmax(0, 1fr); } }
+@media (max-width: 760px) { main.app, main.app.no-detail, main.app.railed, main.app.railed.no-detail { grid-template-columns: 1fr; } }
+/* A wall: its toolbar stays put while the sleeves scroll under it, and the log keeps its third. */
+.view.walled { display: flex; flex-direction: column; padding: 0; overflow: hidden; }

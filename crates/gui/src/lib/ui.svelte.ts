@@ -30,7 +30,7 @@ export const ui = $state({
   tools: null as Tool[] | null,
   /** The first screen has sent a link, so the next link question is a refusal of it, empty link included. */
   linkSent: false,
-  /** Positions in `tracks` the list shows, and in `library` the rail shows, in order; core's answers. */
+  /** Positions in `tracks` the list shows, and in `library` the wall shows, in order; core's answers. */
   rows: [] as number[],
   shelves: [] as number[],
 });
@@ -47,7 +47,7 @@ export function canCommand(): boolean {
   return m.view === "Tracks" && m.done !== null && m.prompt === null && !m.busy && m.tracks.length > 0;
 }
 
-// Not while a run is going either: the library is reachable from the rail mid-run, and a sync or remove sent
+// Not while a run is going either: a library key reaching here mid-run would send a sync or remove that
 // then would queue behind a pipeline that is still writing.
 export function canBrowse(): boolean {
   const m = app.model;

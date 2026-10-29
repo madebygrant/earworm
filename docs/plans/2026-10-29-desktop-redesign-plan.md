@@ -109,7 +109,7 @@ Exit: the app opens in the new chrome with today's screens inside it; every
 pill and the two buttons do what their key does; the bar's hints match
 `keysheet.ts` per view; no icon in the bar carries a letter.
 
-## 3. The library and the open folder as walls, with the sheet filled
+## 3. The library and the open folder as walls, with the sheet filled [done 2026-10-29]
 
 Why here: the most-used screen, and the one the chrome exists for. It needs
 wave 1's icons and derived colours and wave 2's sheet.

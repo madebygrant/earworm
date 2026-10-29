@@ -53,6 +53,15 @@ mockIPC(
         return (a.rows as unknown[]).map((_, i) => i);
       case "release_rows":
         return (a.rows as { kind: string }[]).map((r, i) => (a.allKinds || ["album", "ep"].includes(r.kind) ? i : -1)).filter((i) => i >= 0);
+      // Core's cycles and labels, for the library's kind and sort groups.
+      case "next_kind": {
+        const next = ({ null: "Album", Album: "Playlist", Playlist: "Custom", Custom: null } as Record<string, string | null>)[String(a.only)];
+        return [next, ({ null: "every folder", Album: "albums", Playlist: "playlists", Custom: "custom playlists" } as Record<string, string>)[String(next)]];
+      }
+      case "next_sort": {
+        const next = ({ Name: "Synced", Synced: "Missing", Missing: "Name" } as Record<string, string>)[String(a.sort)];
+        return [next, ({ Name: "name", Synced: "last synced", Missing: "most missing" } as Record<string, string>)[next]];
+      }
       case "earned":
         return [];
       // Close enough to core's for a picture: everything still to fetch.

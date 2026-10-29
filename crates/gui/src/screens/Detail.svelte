@@ -2,8 +2,10 @@
   import { convertFileSrc } from "@tauri-apps/api/core";
   import type { Shelf, Status, Track } from "../lib/protocol";
   import { app } from "../lib/store.svelte";
-  import { label, names, short, tone } from "../lib/ui.svelte";
+  import { label, names, short, tone, word } from "../lib/ui.svelte";
+  import { ago, shelfArt } from "../lib/wall";
   import { complete, customRow, foundAt, relatedRows, releaseSelected, screens, topRows } from "../lib/screens.svelte";
+  import Art from "./Art.svelte";
   import Sheet, { type Act, type Field } from "./Sheet.svelte";
 
   interface Props {
@@ -37,7 +39,9 @@
 
   // The keys that fix a track in this state, first the one most likely wanted.
   function acts(t: Track): Act[] {
-    if (["Kept", "Weak", "NoMatch"].includes(t.status)) return [{ key: "T", icon: "search", word: "Search again" }, { key: "e", icon: "rename", word: "Edit" }];
+    if (["Kept", "Weak", "NoMatch"].includes(t.status)) {
+      return [{ key: "T", icon: "search", word: "Search again" }, { key: "e", icon: "rename", word: "edit" }, { key: "c", icon: "cover", word: "cover" }, { key: "s", icon: "swap", word: "swap" }];
+    }
     if (t.status === "Failed") return [{ key: "r", icon: "retry", word: "Retry failed" }, { key: "l", icon: "log", word: "Log" }];
     if (t.status === "Gone") return t.departure_proven ? [{ key: "D", icon: "remove", word: "Delete departed" }] : [];
     // `u` only while the worker holds something to put back: a key that can only fail is worse than none.
@@ -49,12 +53,9 @@
 
   function trackFields(t: Track): Field[] {
     const all: Field[] = [
-      { icon: "mark", name: "status", value: label(t.status), tone: tone(t.status) },
       { icon: "artists", name: "artist", value: t.artist },
-      { icon: "tracks", name: "title", value: t.title },
       { icon: "album", name: "album", value: t.album },
       { icon: "clock", name: "year", value: t.year ? String(t.year) : "" },
-      { icon: "link", name: "source", value: t.source },
       { icon: "video", name: "video", value: t.was },
       { icon: "swap", name: "twin", value: t.twin ?? "" },
       { icon: "file", name: "file", value: t.path ? short(t.path) : "" },
@@ -63,13 +64,27 @@
     return all.filter((f) => f.value);
   }
 
-  const SHELF_ACTS: Act[] = [
-    { key: "Enter", icon: "open", word: "Open" },
-    { key: "S", icon: "run", word: "Sync" },
-    { key: "O", icon: "folder", word: "Show" },
-    { key: "e", icon: "rename", word: "Rename" },
-    { key: "D", icon: "remove", word: "Remove" },
-  ];
+  // A custom playlist has nothing upstream to sync and no folder of its own to show.
+  function shelfActs(s: Shelf): Act[] {
+    const play: Act[] = m.playback.player === "Running" ? [{ key: "p", icon: "play", word: "play" }] : [];
+    const folder: Act[] = s.kind === "Custom" ? [] : [{ key: "S", icon: "run", word: "sync" }];
+    const show: Act[] = s.kind === "Custom" ? [] : [{ key: "O", icon: "folder", word: "show" }];
+    return [
+      { key: "Enter", icon: "open", word: "Open" }, ...folder, ...play, ...show, { key: "e", icon: "rename", word: "rename" },
+      { key: "E", icon: "m3u8", word: "export" }, { key: "D", icon: "remove", word: "remove" },
+    ];
+  }
+
+  function shelfWhy(s: Shelf): string {
+    if (s.kind === "Album") return "An album. Its tracks share one sleeve.";
+    if (s.kind === "Custom") return "A custom playlist, built here from tracks in other folders.";
+    return s.url ? "A playlist. Each track keeps its own sleeve." : "A folder earworm did not download. S asks for its link.";
+  }
+
+  function sleeveless(t: Track): string {
+    if (t.status === "Failed") return "no sleeve, the download failed";
+    return word(t.status)?.look ? "no sleeve until it's confirmed" : "no sleeve yet";
+  }
 
   function length(secs: number): string {
     const [h, mm, ss] = [Math.floor(secs / 3600), Math.floor((secs % 3600) / 60), secs % 60];
@@ -77,14 +92,6 @@
     return h ? `${h}:${two(mm)}:${two(ss)}` : `${mm}:${two(ss)}`;
   }
 
-  function ago(secs: number | null): string {
-    if (!secs) return "never";
-    const days = Math.floor((Date.now() / 1000 - secs) / 86400);
-    return days < 1 ? "today" : days === 1 ? "yesterday" : `${days} days ago`;
-  }
-
-  const kindWord = (s: Shelf) => (s.kind === "Album" ? "album" : s.kind === "Custom" ? "custom playlist" : s.url ? "playlist" : "local folder");
-  const kindIcon = (s: Shelf) => (s.kind === "Album" ? "album" : s.kind === "Custom" ? "custom" : s.url ? "playlist" : "adopted");
   const missing = $derived(shelf ? shelf.files.filter(([, here]) => !here).map(([name]) => name) : []);
   const found = $derived(m.view === "Found" ? foundAt() : null);
   const entry = $derived(m.view === "Playlist" ? customRow() : undefined);
@@ -113,26 +120,31 @@
 {:else if track}
   {@const [title, artist] = names(track)}
   {@const thumb = track.path ? m.thumbs[track.path] : null}
-  <Sheet {press} title={`${title}${artist ? ` - ${artist}` : ""}`} why={SAY[track.status]?.(track) ?? ""} fields={trackFields(track)} acts={m.done !== null ? acts(track) : []}>
+  {@const why = SAY[track.status]?.(track)}
+  <Sheet {press} title={`${title}${artist ? ` - ${artist}` : ""}`} why={why ? `${label(track.status)} · ${why}` : label(track.status)} tone={tone(track.status)}
+    art={!!thumb} fields={trackFields(track)} acts={m.done !== null ? acts(track) : []}>
     {#snippet picture()}
-      {#if thumb}<img src={convertFileSrc(thumb)} alt="" />{:else}{track.status === "Failed" ? "no sleeve, the download failed" : "no sleeve yet"}{/if}
+      {#if thumb}<img src={convertFileSrc(thumb)} alt="" />{:else}{sleeveless(track)}{/if}
     {/snippet}
   </Sheet>
 {:else if shelf}
   <Sheet
     {press}
     title={shelf.name}
-    why={shelf.kind === "Album" ? "An album. Its tracks share one sleeve." : shelf.url ? "A playlist. Each track keeps its own sleeve." : "A folder earworm did not download. S asks for its link."}
+    why={shelfWhy(shelf)}
+    art={typeof shelfArt(shelf) === "object"}
     fields={[
-      { icon: kindIcon(shelf), name: "kind", value: kindWord(shelf) },
       { icon: "tracks", name: "tracks", value: `${shelf.tracks}${shelf.missing ? `, ${shelf.missing} missing` : ""}`, tone: shelf.missing ? "var(--warn)" : undefined },
-      { icon: "clock", name: "synced", value: ago(shelf.synced) },
+      ...(shelf.kind === "Custom" ? [] : [{ icon: "clock", name: "synced", value: ago(shelf.synced) } as Field]),
       ...(shelf.url ? [{ icon: "link", name: "url", value: shelf.url } as Field] : []),
-      { icon: "folder", name: "folder", value: short(shelf.path) },
+      shelf.kind === "Custom" ? { icon: "file", name: "file", value: short(shelf.path) } : { icon: "folder", name: "folder", value: short(shelf.path) },
       ...(shelf.playlist ? [{ icon: "m3u8", name: "m3u8", value: shelf.playlist.split("/").pop() ?? "" } as Field] : []),
     ]}
-    acts={SHELF_ACTS}
+    acts={shelfActs(shelf)}
   >
+    {#snippet picture()}
+      <Art {shelf} />
+    {/snippet}
     {#snippet extra()}
       {#if missing.length}<ul class="files">{#each missing as name (name)}<li class="warn">! {name}</li>{/each}</ul>{/if}
     {/snippet}

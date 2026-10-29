@@ -14,20 +14,24 @@
   interface Props {
     title: string;
     why?: string;
+    // The reason line in the status's colour, which is how much to trust it.
+    tone?: string;
     picture?: Snippet;
+    // Art fills the picture box edge to edge; a placeholder sits in a dashed one.
+    art?: boolean;
     fields?: Field[];
     acts?: Act[];
     extra?: Snippet;
     press: (key: string) => void;
   }
-  let { title, why = "", picture, fields = [], acts = [], extra, press }: Props = $props();
+  let { title, why = "", tone, picture, art = false, fields = [], acts = [], extra, press }: Props = $props();
 </script>
 
 <div class="look">
   <aside class="sheet">
-    {#if picture}<div class="big">{@render picture()}</div>{/if}
+    {#if picture}<div class="big" class:art>{@render picture()}</div>{/if}
     <h3>{title}</h3>
-    {#if why}<p class="why">{why}</p>{/if}
+    {#if why}<p class="why" style:color={tone}>{why}</p>{/if}
     {#if fields.length}
       <dl>
         {#each fields as f (f.name)}

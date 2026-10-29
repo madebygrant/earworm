@@ -7,6 +7,7 @@ import * as sc from "./screens.svelte";
 import { screens } from "./screens.svelte";
 import { answerPick, app, walkTheme } from "./store.svelte";
 import { canBrowse, canCommand, quit, say, send, ui, working } from "./ui.svelte";
+import { shown } from "./wall";
 
 let armed = 0;
 
@@ -257,9 +258,10 @@ function order(): number[] {
   return ui.rows.map((at) => app.model.tracks[at]?.index).filter((i) => i !== undefined);
 }
 
-// How many tiles a row of the sheet holds, read off the grid the browser laid out.
+// How many tiles a row of the wall holds, read off the grid the browser laid out. The artist page's
+// releases are still the old `.sheet`.
 function columns(): number {
-  const sheet = document.querySelector(".view .sheet");
+  const sheet = shown.el?.firstElementChild ?? document.querySelector(".view .sheet");
   if (!sheet || ui.mode !== "tiles") return 1;
   return getComputedStyle(sheet).gridTemplateColumns.split(" ").length;
 }
@@ -283,8 +285,8 @@ function move(by: number | "first" | "last") {
 
 function page(): number {
   // One selector list would match `.view` first, which is the ancestor and never the part that scrolls.
-  const view = document.querySelector(".view .scroll") ?? document.querySelector(".view");
-  const tile = document.querySelector(".view .tile, .view .r");
+  const view = shown.el ?? document.querySelector(".view .scroll") ?? document.querySelector(".view");
+  const tile = shown.el?.querySelector("[data-k]") ?? document.querySelector(".view .tile, .view .r");
   if (!view || !tile) return 10;
   const rows = Math.max(1, Math.floor(view.clientHeight / tile.getBoundingClientRect().height));
   return rows * columns();
@@ -479,12 +481,17 @@ async function libraryKey(e: KeyboardEvent) {
   const rows = shelfOrder();
   const at = Math.max(0, rows.indexOf(m.shelf ?? ""));
   const go = (i: number) => rows.length && (app.model = { ...app.model, shelf: rows[Math.min(rows.length - 1, Math.max(0, i))] });
-  if (k === "j" || k === "ArrowDown") go(at + 1);
-  else if (k === "k" || k === "ArrowUp") go(at - 1);
+  // The arrows move on the wall as drawn, j and k through it in order, as on a folder's tracks. The wall
+  // scrolls, so the browser's own scroll for these keys would move it a second time.
+  if (["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", " "].includes(k)) e.preventDefault();
+  if (k === "j" || k === "ArrowRight") go(at + 1);
+  else if (k === "k" || k === "ArrowLeft") go(at - 1);
+  else if (k === "ArrowDown") go(at + columns());
+  else if (k === "ArrowUp") go(at - columns());
   else if (k === "g") go(0);
   else if (k === "G") go(rows.length - 1);
-  else if (k === "PageDown" || (e.ctrlKey && k === "d")) go(at + 10);
-  else if (k === "PageUp" || (e.ctrlKey && k === "u")) go(at - 10);
+  else if (k === "PageDown" || (e.ctrlKey && k === "d")) go(at + page());
+  else if (k === "PageUp" || (e.ctrlKey && k === "u")) go(at - page());
   else if (k === "q" || (e.ctrlKey && k === "c")) askQuit();
   else if (help(e)) return;
   else if (k === "Escape") {

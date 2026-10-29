@@ -27,7 +27,7 @@
   import Quit from "./screens/Quit.svelte";
   import Rail from "./screens/Rail.svelte";
   import Run from "./screens/Run.svelte";
-  import ShelfView from "./screens/ShelfView.svelte";
+  import Library from "./screens/Library.svelte";
   import sprite from "./icons.svg?raw";
 
   const m = $derived(app.model);
@@ -35,6 +35,7 @@
   const library = $derived(m.library);
   const first = $derived(firstScreen(m) ? m.prompt!.prompt : null);
   const dialog = $derived(m.prompt && !first ? m.prompt.prompt : null);
+  const railed = $derived(!first && (m.view === "Artists" || m.view === "Artist"));
   const detail = $derived(
     !first &&
       (m.view === "Tracks" ? m.tracks.length > 0
@@ -165,7 +166,7 @@
       dialog: dialog ? Object.keys(dialog)[0] : null,
       note: m.prompt ? (Object.values(m.prompt.prompt)[0] as { note: string }).note : null,
       picking: m.picking !== null,
-      rail: ui.shelves.map((at) => library[at]?.name),
+      wall: ui.shelves.map((at) => library[at]?.name),
       selected: library.find((s) => s.path === m.shelf)?.name ?? null,
       tracks: tracks.map((t) => `${t.index}:${t.status}`).join(" "),
       shown: ui.rows.length,
@@ -203,8 +204,9 @@
 <div class="shell stage">
 <Header />
 
-<main class="app" class:no-detail={!detail}>
-  <Rail />
+<!-- Folders are the library's wall; the rail is left holding the artists until they get a wall of their own. -->
+<main class="app" class:no-detail={!detail} class:railed={railed}>
+  {#if railed}<Rail />{/if}
   {#if app.error}
     <section class="view"><div class="fail"><h1>earworm could not start</h1><pre>{app.error}</pre></div></section>
   {:else if first}
@@ -226,7 +228,7 @@
   {:else if m.view === "Tracks" && m.tracks.length}
     <Run />
   {:else}
-    <ShelfView />
+    <Library />
   {/if}
   {#if detail}<Detail {press} />{/if}
 </main>
