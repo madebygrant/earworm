@@ -363,15 +363,37 @@ struct Unlock {
     theme: Option<Theme>,
     /// The YouTube Music unlock is on after this code, whichever code it was.
     music: bool,
+    /// Set only by the call that turned a feature on, which is what gets a card rather than a flash.
+    found: Option<Found>,
+}
+
+/// What the unlock card shows. `art` picks the card's animation; the words are core's `prize`.
+#[derive(Serialize)]
+struct Found {
+    art: &'static str,
+    prize: &'static str,
+    note: &'static str,
+}
+
+impl Found {
+    // Not `Feature::note`: a secret theme is switched to here at once, so the terminal's "^t walks to it" is wrong.
+    fn of(feature: Feature) -> Found {
+        let (art, note) = match feature {
+            Feature::Music => ("music", feature.note()),
+            Feature::Vaporwave => ("vaporwave", "on now  ·  this session only"),
+            Feature::GameBoy => ("gameboy", "on now  ·  this session only"),
+        };
+        Found { art, prize: feature.prize(), note }
+    }
 }
 
 #[tauri::command]
 fn cheat(code: String, shell: State<Shell>) -> Unlock {
     let Some(cheat) = cheats::find(&code) else {
-        return Unlock { said: "nothing happens".into(), theme: None, music: shell.unlocked.has(Feature::Music) };
+        return Unlock { said: "nothing happens".into(), theme: None, music: shell.unlocked.has(Feature::Music), found: None };
     };
     if !shell.unlocked.grant(cheat.feature) {
-        return Unlock { said: format!("already found  ·  {}", cheat.feature.prize()), theme: None, music: shell.unlocked.has(Feature::Music) };
+        return Unlock { said: format!("already found  ·  {}", cheat.feature.prize()), theme: None, music: shell.unlocked.has(Feature::Music), found: None };
     }
     let theme = cheat.feature.theme().map(|name| {
         // A `[themes.*]` already holding the name keeps it: it was there first.
@@ -385,7 +407,7 @@ fn cheat(code: String, shell: State<Shell>) -> Unlock {
         }
         shell.switch(name)
     });
-    Unlock { said: cheat.feature.prize().into(), theme, music: shell.unlocked.has(Feature::Music) }
+    Unlock { said: cheat.feature.prize().into(), theme, music: shell.unlocked.has(Feature::Music), found: Some(Found::of(cheat.feature)) }
 }
 
 #[tauri::command]

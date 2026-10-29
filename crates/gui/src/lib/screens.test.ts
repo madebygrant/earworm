@@ -3,9 +3,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const sent: unknown[] = [];
+let cheat: unknown = null;
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: async (name: string, args: { cmd?: unknown }) => {
     if (name === "send") sent.push(args.cmd);
+    if (name === "cheat") return cheat;
     return name === "send" ? true : null;
   },
 }));
@@ -51,5 +53,31 @@ describe("the artist page", () => {
     expect(sent).toEqual([{ GetAlbum: { artist: "Can", title: "R1" } }]);
     sc.screens.release = 2;
     expect(sc.canGet()).toBe(false);
+  });
+});
+
+// A found code gets a card that answers the Enter just typed; the achievement it earns waits for the card.
+describe("a found code", () => {
+  beforeEach(() => vi.resetModules());
+
+  it("shows the card and holds the achievement toast until it closes", async () => {
+    const sc = await import("./screens.svelte");
+    sc.celebrate({ art: "music", prize: "YouTube Music links", note: "for this session" });
+    sc.screens.waiting = [{ id: "secret", label: "Found a secret", hint: "" }];
+    expect(sc.calm()).toBe(false);
+    sc.showPrizes();
+    expect(sc.screens.toast).toBeNull();
+    sc.endSecret();
+    sc.showPrizes();
+    expect(sc.screens.toast?.prizes.map((p) => p.id)).toEqual(["secret"]);
+  });
+
+  it("is said, not celebrated, when it was already found", async () => {
+    const { app, tryCode } = await import("./store.svelte");
+    const sc = await import("./screens.svelte");
+    cheat = { said: "already found  ·  YouTube Music links", theme: null, music: true, found: null };
+    sc.celebrate(await tryCode("again"));
+    expect(sc.screens.secret).toBeNull();
+    expect(app.model.flash).toBe("already found  ·  YouTube Music links");
   });
 });

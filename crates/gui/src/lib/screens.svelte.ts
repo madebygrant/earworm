@@ -2,7 +2,7 @@
 // cursors and which screen is up are kept here, as the terminal's `App` keeps them.
 import { invoke } from "@tauri-apps/api/core";
 import type { Cmd, Pick } from "./commands";
-import type { AlbumRow, Hit, PickRow, Prize, RelatedRow, Shelf, TopRow } from "./protocol";
+import type { AlbumRow, Found, Hit, PickRow, Prize, RelatedRow, Shelf, TopRow } from "./protocol";
 import { firstScreen, type View } from "./reducer";
 import { app, flash } from "./store.svelte";
 import { say, send, ui } from "./ui.svelte";
@@ -59,6 +59,8 @@ export const screens = $state({
   // The achievements on show and when they went up, then those waiting for a calm screen.
   toast: null as { prizes: Prize[]; at: number } | null,
   waiting: [] as Prize[],
+  // The unlock card, up from the code's Enter until a key or its time ends it.
+  secret: null as Found | null,
 });
 
 const m = () => app.model;
@@ -442,7 +444,7 @@ export async function changeSetting(walkTheme: () => Promise<void>) {
 export function calm(): boolean {
   const s = m();
   return s.prompt === null && s.picking === null && !ui.typing && !screens.artistTyping && s.view !== "Pick"
-    && !screens.help && !ui.quitting && !screens.discard && !firstScreen(s);
+    && !screens.help && !ui.quitting && !screens.discard && !screens.secret && !firstScreen(s);
 }
 
 export async function checkPrizes() {
@@ -450,6 +452,14 @@ export async function checkPrizes() {
   const fresh = await invoke<Prize[]>("earned", { library: s.library, tracks: s.tracks, done: s.done, stage: s.resting, playback: s.playback });
   const shown = new Set([...(screens.toast?.prizes ?? []), ...screens.waiting].map((p) => p.id));
   screens.waiting = [...screens.waiting, ...fresh.filter((p) => !shown.has(p.id))];
+}
+
+export function celebrate(found: Found | null) {
+  if (found) screens.secret = found;
+}
+
+export function endSecret() {
+  screens.secret = null;
 }
 
 // Everything waiting becomes one toast.

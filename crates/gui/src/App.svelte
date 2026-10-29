@@ -18,6 +18,7 @@
   import Picker from "./screens/Picker.svelte";
   import Search from "./screens/Search.svelte";
   import Settings from "./screens/Settings.svelte";
+  import Secret from "./screens/Secret.svelte";
   import Toast from "./screens/Toast.svelte";
   import Dialog from "./screens/Dialog.svelte";
   import FirstLaunch from "./screens/FirstLaunch.svelte";
@@ -151,7 +152,7 @@
   function consoleKey(e: KeyboardEvent) {
     if (e.key === "Escape") code = null;
     else if (e.key === "Enter" && code) {
-      void tryCode(code);
+      void tryCode(code).then(sc.celebrate);
       code = null;
     }
   }
@@ -176,6 +177,7 @@
       quitting: ui.quitting,
       help: screens.help,
       toast: screens.toast?.prizes.map((p) => p.id) ?? null,
+      secret: screens.secret?.art ?? null,
       hits: screens.hits.length,
       found: screens.found?.[1] ?? null,
       pick: m.view === "Pick" ? { name: screens.pick.name, rows: screens.pick.rows.length, marks: screens.pick.marks.length, add: screens.pick.add, remove: screens.pick.remove } : null,
@@ -243,6 +245,7 @@
 {#if screens.help}<Help />{/if}
 {#if screens.discard}<Discard />{/if}
 <Toast />
+{#if screens.secret}<Secret found={screens.secret} />{/if}
 {#if code !== null}
   <div class="console"><span class="k">&gt;</span><input bind:this={field} bind:value={code} onkeydown={consoleKey} spellcheck="false" /></div>
 {/if}

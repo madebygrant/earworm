@@ -303,6 +303,43 @@ main.app.no-detail { grid-template-columns: minmax(0, 1fr); }
 .look .toast span:not(.big) { color: var(--muted); font-size: 13px; }
 @keyframes rise { from { transform: translateY(8px); opacity: 0; } }
 @media (prefers-reduced-motion: no-preference) { .look .toast { animation: rise 160ms ease-out; } }
+/* A found code: a card in the middle, its art played once. Every piece rests in its final state and animates
+   from hidden, so with motion reduced the card is complete and still. */
+.look .unlock { position: fixed; z-index: 8; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(calc(100% - 48px), 380px); padding: 20px 22px 16px; text-align: center; background: var(--card); border: 1px solid var(--accent); border-radius: var(--r); box-shadow: 0 0 0 100vmax var(--scrim), 0 20px 60px var(--scrim); overflow: hidden; }
+.look .unlock .t { color: var(--accent); font: 700 12px var(--mono); letter-spacing: .14em; }
+.look .unlock .art { position: relative; height: 104px; margin: 12px 0 14px; overflow: hidden; border-radius: var(--r-s); }
+.look .unlock .words b { display: block; font-size: 18px; font-weight: 800; letter-spacing: -.02em; }
+.look .unlock .words span { color: var(--muted); font-size: 13px; }
+.look .unlock .foot { margin-top: 14px; color: var(--muted); font-size: 12px; }
+.look .unlock .words { animation: rise 400ms ease-out 800ms both; }
+.look .unlock .spark { position: absolute; color: var(--accent); font-size: 14px; opacity: 0; animation: twinkle 1.4s ease-in-out infinite; }
+@keyframes twinkle { 50% { opacity: 1; transform: scale(1.15); } }
+/* YouTube Music links: the chest opens and notes float out of it. */
+.look .unlock .chest { position: absolute; left: 50%; bottom: 8px; width: 104px; height: 46px; margin-left: -52px; border: 2px solid var(--warn); border-radius: 6px; background: var(--ink); }
+.look .unlock .chest::after { content: "◆"; position: absolute; left: 50%; top: -10px; transform: translateX(-50%); color: var(--accent); font-size: 12px; }
+.look .unlock .lid { position: absolute; left: -2px; right: -2px; top: -22px; height: 20px; border: 2px solid var(--warn); border-radius: 8px 8px 2px 2px; background: var(--card-2); transform-origin: 0 100%; transform: rotate(-14deg); animation: open 600ms cubic-bezier(.3, 1.6, .5, 1) 150ms both; }
+@keyframes open { from { transform: none; } }
+.look .unlock .glow { position: absolute; left: 8px; right: 8px; top: 0; height: 12px; background: var(--accent); filter: blur(9px); opacity: .5; animation: shine 1.2s ease-in-out 500ms infinite alternate; }
+@keyframes shine { from { opacity: .2; } to { opacity: .85; } }
+.look .unlock .note { position: absolute; bottom: 44px; color: var(--cursor); font-size: 18px; opacity: 0; animation: float 1.8s ease-out infinite; }
+@keyframes float { 20% { opacity: 1; } 100% { opacity: 0; transform: translate(12px, -60px) rotate(20deg); } }
+/* Vaporwave: a striped sun rises over a grid that runs at you. */
+.look .unlock .sun { position: absolute; left: 50%; top: 6px; width: 68px; height: 68px; margin-left: -34px; border-radius: 50%; background: linear-gradient(var(--warn), var(--accent));
+  -webkit-mask: linear-gradient(#000 0 36px, transparent 36px 40px, #000 40px 47px, transparent 47px 50px, #000 50px 55px, transparent 55px 57px, #000 57px);
+  mask: linear-gradient(#000 0 36px, transparent 36px 40px, #000 40px 47px, transparent 47px 50px, #000 50px 55px, transparent 55px 57px, #000 57px);
+  animation: sunrise 900ms ease-out 100ms both; }
+@keyframes sunrise { from { transform: translateY(44px); opacity: 0; } }
+.look .unlock .grid { position: absolute; left: -40%; right: -40%; bottom: -30px; height: 74px; transform: perspective(90px) rotateX(55deg); opacity: .7;
+  background: repeating-linear-gradient(90deg, var(--cursor) 0 1px, transparent 1px 22px), repeating-linear-gradient(0deg, var(--cursor) 0 1px, transparent 1px 14px); animation: run 900ms linear infinite; }
+@keyframes run { to { background-position: 0 0, 0 14px; } }
+.look .unlock.vaporwave .t { text-shadow: 1px 1px 0 var(--cursor); }
+/* Game boy: the name drops in pixel steps and the screen comes up through four shades. Nothing glides. */
+.look .unlock.gameboy, .look .unlock.gameboy * { font-family: var(--mono); }
+.look .unlock .lcd { position: absolute; inset: 0 14%; background: var(--ink); border: 3px solid var(--rule); border-radius: 4px; animation: shades 800ms steps(4) both; }
+@keyframes shades { from { background: var(--far); } }
+.look .unlock .drop { position: absolute; left: 0; right: 0; top: 30px; color: var(--accent); font: 700 22px var(--mono); letter-spacing: .08em; animation: drop 1s steps(10) 200ms both; }
+@keyframes drop { from { transform: translateY(-72px); } }
+.look .unlock .blip { position: absolute; left: 0; right: 0; bottom: 10px; color: var(--cursor); font-size: 11px; animation: rise 1ms steps(1) 1300ms both; }
 @media (max-width: 760px) { .look .keys { grid-template-columns: 1fr; } }
 
 /* First launch: the link field is the screen, with what earworm needs under it. */

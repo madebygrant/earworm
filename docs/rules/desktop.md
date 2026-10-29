@@ -237,6 +237,16 @@
   key saw it, as in the terminal; putting it back to wait made it reappear at
   once and swallow the next key, over and over while somebody typed.
   Nothing tests it; checked through `EARWORM_DRIVE`.
+- **A found code is a centred card; the achievement it earns waits for it.**
+  The card answers the Enter just typed, so it takes the next key, as the
+  terminal's cheat popup does, and only the `cheat` call that turned a feature
+  on returns `found`: a repeat or a miss is a flash. `calm` counts the card,
+  or the "found a secret" toast would land on top of it (`shows the card and
+  holds the achievement toast until it closes` in `screens.test.ts`). A theme
+  is switched to before the card shows, so the card is drawn in it and its
+  note says so rather than the terminal's "^t walks to it". The card's art
+  rests in its final state and animates from hidden, so reduced motion still
+  shows the words. Nothing tests the drawing.
 - **The icons are generated from `crates/gui/app-icon.svg`.** `pnpm tauri
   icon app-icon.svg` in `crates/gui` writes them; only the six
   `tauri.conf.json` lists are kept, and the Android, iOS and Windows store

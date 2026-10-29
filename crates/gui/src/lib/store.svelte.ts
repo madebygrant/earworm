@@ -2,7 +2,7 @@
 // through `apply`; the effects it returns are core questions, answered here and folded back in.
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { AlbumRow, Msg, Reply, SettingRow, Word } from "./protocol";
+import type { AlbumRow, Found, Msg, Reply, SettingRow, Word } from "./protocol";
 import { apply, expire, hasRoom, initial, say, type Effect, type State } from "./reducer";
 
 export interface Theme {
@@ -129,11 +129,13 @@ export async function walkTheme() {
   paint(await invoke<Theme>("theme_next"));
 }
 
-export async function tryCode(code: string) {
-  const found = await invoke<{ said: string; theme: Theme | null; music: boolean }>("cheat", { code });
-  if (found.theme) paint({ ...found.theme, said: null });
-  app.music = found.music;
-  flash(found.said);
+// What a fresh find turned on, for the card; a repeat or a miss is only said.
+export async function tryCode(code: string): Promise<Found | null> {
+  const got = await invoke<{ said: string; theme: Theme | null; music: boolean; found: Found | null }>("cheat", { code });
+  if (got.theme) paint({ ...got.theme, said: null });
+  app.music = got.music;
+  if (!got.found) flash(got.said);
+  return got.found;
 }
 
 let booted = false;

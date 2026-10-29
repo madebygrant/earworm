@@ -85,6 +85,8 @@ export interface Hit { shelf: number; file: number; score: number; at: number[];
 export interface PickRow extends Hit { folder: string; name: string; marked: boolean; held: boolean }
 // An achievement as the toast shows it.
 export interface Prize { id: string; label: string; hint: string }
+// A code that turned something on, as the unlock card shows it. `art` picks the card's animation.
+export interface Found { art: "music" | "vaporwave" | "gameboy"; prize: string; note: string }
 
 export interface SettingRow {
   key: string;
