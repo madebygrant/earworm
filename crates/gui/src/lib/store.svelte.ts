@@ -127,10 +127,6 @@ export async function walkTheme() {
   paint(await invoke<Theme>("theme_next"));
 }
 
-export async function chooseTheme(name: string) {
-  paint(await invoke<Theme>("theme_set", { name }));
-}
-
 export async function tryCode(code: string) {
   const found = await invoke<{ said: string; theme: Theme | null; music: boolean }>("cheat", { code });
   if (found.theme) paint({ ...found.theme, said: null });

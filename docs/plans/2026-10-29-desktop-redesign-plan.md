@@ -74,7 +74,7 @@ five derived variables are on `:root` in the app (probe shows them),
 `cargo test --workspace` and `pnpm test` pass with the new palette test, and
 `unreadable()` names `card2` for a palette built to fail it.
 
-## 2. The chrome: pill nav, crumb, bar and the sheet shell
+## 2. The chrome: pill nav, crumb, bar and the sheet shell [done 2026-10-29]
 
 Why here: the three big screens all sit inside it, and building it around the
 existing screens first means each later wave swaps one region at a time.

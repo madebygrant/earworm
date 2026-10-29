@@ -43,7 +43,7 @@
   painted are exactly the ones tokens.css defines
   (`the_palette_paints_exactly_the_colours_the_stylesheets_use`), and whether
   a theme is light is read off its ground, not its name.
-- **`^t` and the theme picker save through `config::keep_theme`, and say so
+- **`^t` and the theme button save through `config::keep_theme`, and say so
   through `Kept::said`.** The same calls the terminal's `^t` makes, so a secret theme is never written and
   `--no-config` keeps the file out; why this write skips the worker is in
   `themes-and-colour.md`.
@@ -85,7 +85,7 @@
 - **The platform keeps its shortcuts and a focused control keeps its keys.**
   ⌘c is copy, not `c`, which opened the cover question; a bare Shift or Ctrl
   is no keypress, where it dismissed the quit question before the Y of
-  Shift+Y; arrows on the theme picker are not cursor moves; and a clicked
+  Shift+Y; and a clicked
   button never keeps the focus, or the next space pressed it again. Checked
   through `EARWORM_DRIVE`, since the reducer tests have no DOM.
 - **An effect reads only what it depends on.** `app.model` changes on every

@@ -4,6 +4,7 @@
   import { app } from "../lib/store.svelte";
   import { label, names, short, tone } from "../lib/ui.svelte";
   import { complete, customRow, foundAt, relatedRows, releaseSelected, screens, topRows } from "../lib/screens.svelte";
+  import Sheet, { type Act, type Field } from "./Sheet.svelte";
 
   interface Props {
     /** Runs the key a button stands for, so a click and the key are one action. */
@@ -35,14 +36,40 @@
   };
 
   // The keys that fix a track in this state, first the one most likely wanted.
-  function acts(t: Track): [string, string][] {
-    if (["Kept", "Weak", "NoMatch"].includes(t.status)) return [["T", "search again"], ["e", "edit"]];
-    if (t.status === "Failed") return [["r", "retry failed"], ["l", "log"]];
-    if (t.status === "Gone") return t.departure_proven ? [["D", "delete departed"]] : [];
+  function acts(t: Track): Act[] {
+    if (["Kept", "Weak", "NoMatch"].includes(t.status)) return [{ key: "T", icon: "search", word: "Search again" }, { key: "e", icon: "rename", word: "Edit" }];
+    if (t.status === "Failed") return [{ key: "r", icon: "retry", word: "Retry failed" }, { key: "l", icon: "log", word: "Log" }];
+    if (t.status === "Gone") return t.departure_proven ? [{ key: "D", icon: "remove", word: "Delete departed" }] : [];
     // `u` only while the worker holds something to put back: a key that can only fail is worse than none.
-    if (["Ok", "Manual", "Have"].includes(t.status)) return [["e", "edit"], ["c", "cover"], ...(m.undoable ? [["u", "undo"] as [string, string]] : [])];
+    if (["Ok", "Manual", "Have"].includes(t.status)) {
+      return [{ key: "e", icon: "rename", word: "Edit tags" }, { key: "c", icon: "cover", word: "Cover" }, ...(m.undoable ? [{ key: "u", icon: "undo", word: "Undo" } as Act] : [])];
+    }
     return [];
   }
+
+  function trackFields(t: Track): Field[] {
+    const all: Field[] = [
+      { icon: "mark", name: "status", value: label(t.status), tone: tone(t.status) },
+      { icon: "artists", name: "artist", value: t.artist },
+      { icon: "tracks", name: "title", value: t.title },
+      { icon: "album", name: "album", value: t.album },
+      { icon: "clock", name: "year", value: t.year ? String(t.year) : "" },
+      { icon: "link", name: "source", value: t.source },
+      { icon: "video", name: "video", value: t.was },
+      { icon: "swap", name: "twin", value: t.twin ?? "" },
+      { icon: "file", name: "file", value: t.path ? short(t.path) : "" },
+    ];
+    // Only what the tags hold so far: before the tag pass there is nothing to show.
+    return all.filter((f) => f.value);
+  }
+
+  const SHELF_ACTS: Act[] = [
+    { key: "Enter", icon: "open", word: "Open" },
+    { key: "S", icon: "run", word: "Sync" },
+    { key: "O", icon: "folder", word: "Show" },
+    { key: "e", icon: "rename", word: "Rename" },
+    { key: "D", icon: "remove", word: "Remove" },
+  ];
 
   function length(secs: number): string {
     const [h, mm, ss] = [Math.floor(secs / 3600), Math.floor((secs % 3600) / 60), secs % 60];
@@ -56,7 +83,8 @@
     return days < 1 ? "today" : days === 1 ? "yesterday" : `${days} days ago`;
   }
 
-  const kindWord = (s: Shelf) => (s.kind === "Album" ? "● album" : s.kind === "Custom" ? "≡ custom playlist" : s.url ? "▤ playlist" : "◆ local folder");
+  const kindWord = (s: Shelf) => (s.kind === "Album" ? "album" : s.kind === "Custom" ? "custom playlist" : s.url ? "playlist" : "local folder");
+  const kindIcon = (s: Shelf) => (s.kind === "Album" ? "album" : s.kind === "Custom" ? "custom" : s.url ? "playlist" : "adopted");
   const missing = $derived(shelf ? shelf.files.filter(([, here]) => !here).map(([name]) => name) : []);
   const found = $derived(m.view === "Found" ? foundAt() : null);
   const entry = $derived(m.view === "Playlist" ? customRow() : undefined);
@@ -68,87 +96,77 @@
   const leaving = $derived(m.view === "Pick" ? screens.pick.removing : []);
 </script>
 
-<aside class="detail">
-  {#if track && m.picking !== null}
-    {@const [title, artist] = names(track)}
-    {@const on = m.marked.includes(track.index)}
-    <div class="none">no sleeve until it's downloaded</div>
-    <h2>{title}{artist ? ` - ${artist}` : ""}</h2>
-    <p class="say">
-      {#if track.status === "Have"}Already in the folder, so there is nothing to fetch.
-      {:else if track.twin}{track.twin}. Leave it selected and earworm copies that file across instead of downloading it again.
-      {:else if track.duration > 1800}Over half an hour long. Probably not one track.
-      {:else}{on ? "Selected." : "Not selected."}{/if}
-    </p>
-    <dl class="kv">
-      <dt>video</dt><dd>{track.was}</dd>
-      {#if track.duration}<dt>length</dt><dd>{length(track.duration)}</dd>{/if}
-    </dl>
-  {:else if track}
-    {@const [title, artist] = names(track)}
-    {@const thumb = track.path ? m.thumbs[track.path] : null}
-    {#if thumb}
-      <img class="cover" src={convertFileSrc(thumb)} alt="" />
-    {:else}
-      <div class="none">{track.status === "Failed" ? "no sleeve, the download failed" : "no sleeve yet"}</div>
-    {/if}
-    <h2>{title}{artist ? ` - ${artist}` : ""}</h2>
-    <p class="say">{SAY[track.status]?.(track) ?? ""}</p>
-    <dl class="kv">
-      <dt>status</dt><dd style:color={tone(track.status)}>{label(track.status)}</dd>
-      <!-- Only what the tags hold so far: before the tag pass there is nothing to show. -->
-      {#each [["artist", track.artist], ["title", track.title], ["album", track.album], ["year", track.year ?? ""], ["source", track.source], ["video", track.was]] as [key, value] (key)}
-        {#if value}<dt>{key}</dt><dd>{value}</dd>{/if}
-      {/each}
-      {#if track.twin}<dt>twin</dt><dd class="twin">{track.twin}</dd>{/if}
-      {#if track.path}<dt>file</dt><dd>{short(track.path)}</dd>{/if}
-    </dl>
-    {#if m.done !== null}
-      <div class="acts">
-        {#each acts(track) as [key, what] (key)}<button onclick={() => press(key)}><span class="kc">{key}</span>{what}</button>{/each}
-      </div>
-    {/if}
-  {:else if shelf}
-    <h2>{shelf.name}</h2>
-    <p class="say">{shelf.kind === "Album" ? "An album. Its tracks share one sleeve." : shelf.url ? "A playlist. Each track keeps its own sleeve." : "A folder earworm did not download. S asks for its link."}</p>
-    <dl class="kv">
-      <dt>kind</dt><dd>{kindWord(shelf)}</dd>
-      <dt>tracks</dt><dd>{shelf.tracks}{#if shelf.missing}, <span class="warn">{shelf.missing} missing</span>{/if}</dd>
-      <dt>synced</dt><dd>{ago(shelf.synced)}</dd>
-      {#if shelf.url}<dt>url</dt><dd>{shelf.url}</dd>{/if}
-      <dt>folder</dt><dd>{short(shelf.path)}</dd>
-      {#if shelf.playlist}<dt>m3u8</dt><dd>{shelf.playlist.split("/").pop()}</dd>{/if}
-    </dl>
-    {#if missing.length}
-      <ul class="files">{#each missing as name (name)}<li class="miss">! {name}</li>{/each}</ul>
-    {/if}
-    <div class="acts">
-      {#each [["enter", "open"], ["S", "sync"], ["O", "show folder"], ["e", "rename"], ["D", "remove"]] as [key, what] (key)}
-        <button onclick={() => press(key === "enter" ? "Enter" : key)}><span class="kc">{key}</span>{what}</button>
-      {/each}
-    </div>
-  {:else if found}
-    {@const [s, [file, here]] = found}
-    <h2>{file.replace(/\.[^.]+$/, "")}</h2>
-    <p class="say">{here ? `In ${s.name}. Enter opens it on this track; tab marks it for P.` : "Listed in the folder's manifest, but the file is gone."}</p>
-    <dl class="kv"><dt>folder</dt><dd>{s.name}</dd><dt>file</dt><dd>{short(`${s.path}/${file}`)}</dd></dl>
-  {:else if entry}
-    <h2>{entry.label}</h2>
-    <p class="say">{entry.path ? `From ${entry.folder}. A list holds the track, not the file, so its tags are edited there: Enter goes to it.` : `${entry.file} is not on disk. x takes it off the list.`}</p>
-    <dl class="kv"><dt>folder</dt><dd>{entry.folder}</dd><dt>file</dt><dd>{entry.file}</dd></dl>
-  {:else if m.view === "Pick"}
-    <h2>{screens.pick.name}, after Enter</h2>
-    <p class="say">Marks join in the order you made them. Unmarking a track the list holds takes it off the list, never off the disk.</p>
-    <ol class="order">{#each order as t, i (i)}<li>{t}</li>{/each}{#each leaving as [folder, n] (`${folder}/${n}`)}<li class="out">{n.replace(/\.[^.]+$/, "")}</li>{/each}</ol>
-  {:else if release}
-    <h2>{release.title}</h2>
-    <p class="say">{release.kind}{release.year ? `, ${release.year}` : ""}. {release.have === 0 ? "None of it is here." : complete(release) ? "All of it is here." : release.of === null ? `${release.have} of its tracks are here; Deezer has not said how many it has.` : `${release.have} of its ${release.of} tracks are here.`}{release.new ? " Out since you last looked." : ""}</p>
-    <div class="acts"><button onclick={() => press("o")}><span class="kc">o</span>their folders</button></div>
-  {:else if top}
-    <h2>{top.title}</h2>
-    <p class="say">{top.have ? "Already in the library." : "Not in the library."}{top.album ? ` From ${top.album}.` : ""}</p>
-  {:else if related}
-    <h2>{related.name}</h2>
-    <p class="say">{related.fans.toLocaleString()} fans on Deezer.{related.tracks ? ` ${related.tracks} of their tracks are here.` : ""} Enter opens their page.</p>
-  {/if}
-</aside>
+{#if track && m.picking !== null}
+  {@const [title, artist] = names(track)}
+  {@const on = m.marked.includes(track.index)}
+  <Sheet
+    {press}
+    title={`${title}${artist ? ` - ${artist}` : ""}`}
+    why={track.status === "Have" ? "Already in the folder, so there is nothing to fetch."
+      : track.twin ? `${track.twin}. Leave it selected and earworm copies that file across instead of downloading it again.`
+      : track.duration > 1800 ? "Over half an hour long. Probably not one track."
+      : on ? "Selected." : "Not selected."}
+    fields={[{ icon: "video", name: "video", value: track.was }, ...(track.duration ? [{ icon: "clock", name: "length", value: length(track.duration) } as Field] : [])]}
+  >
+    {#snippet picture()}no sleeve until it's downloaded{/snippet}
+  </Sheet>
+{:else if track}
+  {@const [title, artist] = names(track)}
+  {@const thumb = track.path ? m.thumbs[track.path] : null}
+  <Sheet {press} title={`${title}${artist ? ` - ${artist}` : ""}`} why={SAY[track.status]?.(track) ?? ""} fields={trackFields(track)} acts={m.done !== null ? acts(track) : []}>
+    {#snippet picture()}
+      {#if thumb}<img src={convertFileSrc(thumb)} alt="" />{:else}{track.status === "Failed" ? "no sleeve, the download failed" : "no sleeve yet"}{/if}
+    {/snippet}
+  </Sheet>
+{:else if shelf}
+  <Sheet
+    {press}
+    title={shelf.name}
+    why={shelf.kind === "Album" ? "An album. Its tracks share one sleeve." : shelf.url ? "A playlist. Each track keeps its own sleeve." : "A folder earworm did not download. S asks for its link."}
+    fields={[
+      { icon: kindIcon(shelf), name: "kind", value: kindWord(shelf) },
+      { icon: "tracks", name: "tracks", value: `${shelf.tracks}${shelf.missing ? `, ${shelf.missing} missing` : ""}`, tone: shelf.missing ? "var(--warn)" : undefined },
+      { icon: "clock", name: "synced", value: ago(shelf.synced) },
+      ...(shelf.url ? [{ icon: "link", name: "url", value: shelf.url } as Field] : []),
+      { icon: "folder", name: "folder", value: short(shelf.path) },
+      ...(shelf.playlist ? [{ icon: "m3u8", name: "m3u8", value: shelf.playlist.split("/").pop() ?? "" } as Field] : []),
+    ]}
+    acts={SHELF_ACTS}
+  >
+    {#snippet extra()}
+      {#if missing.length}<ul class="files">{#each missing as name (name)}<li class="warn">! {name}</li>{/each}</ul>{/if}
+    {/snippet}
+  </Sheet>
+{:else if found}
+  {@const [s, [file, here]] = found}
+  <Sheet
+    {press}
+    title={file.replace(/\.[^.]+$/, "")}
+    why={here ? `In ${s.name}. Enter opens it on this track; tab marks it for P.` : "Listed in the folder's manifest, but the file is gone."}
+    fields={[{ icon: "folder", name: "folder", value: s.name }, { icon: "file", name: "file", value: short(`${s.path}/${file}`) }]}
+  />
+{:else if entry}
+  <Sheet
+    {press}
+    title={entry.label}
+    why={entry.path ? `From ${entry.folder}. A list holds the track, not the file, so its tags are edited there: Enter goes to it.` : `${entry.file} is not on disk. x takes it off the list.`}
+    fields={[{ icon: "folder", name: "folder", value: entry.folder }, { icon: "file", name: "file", value: entry.file }]}
+  />
+{:else if m.view === "Pick"}
+  <Sheet {press} title={`${screens.pick.name}, after Enter`} why="Marks join in the order you made them. Unmarking a track the list holds takes it off the list, never off the disk.">
+    {#snippet extra()}
+      <ol class="order">{#each order as t, i (i)}<li>{t}</li>{/each}{#each leaving as [folder, n] (`${folder}/${n}`)}<li class="out">{n.replace(/\.[^.]+$/, "")}</li>{/each}</ol>
+    {/snippet}
+  </Sheet>
+{:else if release}
+  <Sheet
+    {press}
+    title={release.title}
+    why={`${release.kind}${release.year ? `, ${release.year}` : ""}. ${release.have === 0 ? "None of it is here." : complete(release) ? "All of it is here." : release.of === null ? `${release.have} of its tracks are here; Deezer has not said how many it has.` : `${release.have} of its ${release.of} tracks are here.`}${release.new ? " Out since you last looked." : ""}`}
+    acts={[{ key: "o", icon: "folder", word: "Their folders" }]}
+  />
+{:else if top}
+  <Sheet {press} title={top.title} why={`${top.have ? "Already in the library." : "Not in the library."}${top.album ? ` From ${top.album}.` : ""}`} />
+{:else if related}
+  <Sheet {press} title={related.name} why={`${related.fans.toLocaleString()} fans on Deezer.${related.tracks ? ` ${related.tracks} of their tracks are here.` : ""} Enter opens their page.`} />
+{/if}

@@ -66,10 +66,9 @@ export async function handleKey(e: KeyboardEvent) {
   if (view === "Artists" && screens.artistTyping) return artistQueryKey(e);
   if (ui.typing) return filterKey(e);
   if (e.ctrlKey && !CTRL.includes(e.key)) return;
-  // A focused control keeps its own keys: arrows on the theme picker are not cursor moves, and space or
-  // Enter on a button tabbed to presses that button.
+  // A focused control keeps its own keys: space or Enter on a button tabbed to presses that button.
   const target = e.target as HTMLElement | null;
-  if (target instanceof HTMLSelectElement || target instanceof HTMLInputElement) return;
+  if (target instanceof HTMLInputElement) return;
   if (target instanceof HTMLButtonElement && (e.key === " " || e.key === "Enter")) return;
   if (view === "Found") return foundKey(e);
   if (view === "Library" && app.model.picking === null) return libraryKey(e);

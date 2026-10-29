@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { Shelf } from "../lib/protocol";
-  import { app, chooseTheme } from "../lib/store.svelte";
+  import { app } from "../lib/store.svelte";
   import { say, ui, working } from "../lib/ui.svelte";
   import { openPage, screens } from "../lib/screens.svelte";
 
@@ -96,13 +96,5 @@
     <p class="empty">Nothing matches. Esc clears the filter.</p>
   {:else if !artistView && !app.error}
     <p class="empty">No folders yet. A synced playlist lands here.</p>
-  {/if}
-  {#if app.theme}
-    <label class="themes">
-      <span><span class="k">^t</span> theme</span>
-      <select value={app.theme.name} onchange={(e) => chooseTheme(e.currentTarget.value)}>
-        {#each app.theme.names as name (name)}<option value={name}>{name}</option>{/each}
-      </select>
-    </label>
   {/if}
 </nav>

@@ -18,18 +18,18 @@ export const SHEETS: Record<View, [string, Group[]]> = {
     ["narrow", [["/", "filter folders"], ["s", "sort"], ["a", "kind"], ["t", "find a track"], ["b", "artists"]]],
     ["folder", [["enter", "open"], ["e", "rename"], ["D", "remove"], ["O", "show folder"], ["E", "export"], ["p", "play"]]],
     ["sync", [["S", "sync this"], ["R", "sync all"], ["n", "new link"], ["N", "new custom playlist"], ["space", "play/pause"]]],
-    ["leave", [[",", "settings"], ["q ^c", "quit"]]],
+    ["leave", [[",", "settings"], ["l", "the log"], ["q ^c", "quit"]]],
   ]],
   Found: ["search", [
     ["move", MOVE],
     ["result", [["enter", "open its folder"], ["tab space", "mark"], ["P", "add to a playlist"], ["/", "edit the query"]]],
-    ["leave", [["esc", "the library"], ["q ^c", "quit"]]],
+    ["leave", [["esc", "the library"], ["l", "the log"], ["q ^c", "quit"]]],
   ]],
   Playlist: ["custom playlist", [
     ["move", MOVE],
     ["edit", [["J K", "move this track"], ["x", "take it off"], ["P", "add tracks"], ["enter", "go to its folder"]]],
     ["play", [["p", "play in cliamp"]]],
-    ["leave", [["esc", "the library"], ["q ^c", "quit"]]],
+    ["leave", [["esc", "the library"], ["l", "the log"], ["q ^c", "quit"]]],
   ]],
   Pick: ["pick tracks", [
     ["move", [["↑ ↓ ^n ^p", "move"], ["PgDn PgUp", "by a screenful"]]],
@@ -39,17 +39,17 @@ export const SHEETS: Record<View, [string, Group[]]> = {
   Artists: ["artists", [
     ["move", MOVE],
     ["artist", [["enter", "their page"], ["o", "their folders"], ["*", "star"], ["/", "filter"]]],
-    ["leave", [["esc", "filter, then the library"], ["q ^c", "quit"]]],
+    ["leave", [["esc", "filter, then the library"], ["l", "the log"], ["q ^c", "quit"]]],
   ]],
   Artist: ["artist page", [
     ["move", [...MOVE, ["tab", "releases, top tracks, related"], ["w", "tiles or list"]]],
     ["page", [["enter", "open a related artist"], ["a", "albums and EPs, or all"], ["o", "their folders"]]],
-    ["leave", [["esc", "the page before"], ["q ^c", "quit"]]],
+    ["leave", [["esc", "the page before"], ["l", "the log"], ["q ^c", "quit"]]],
   ]],
   Settings: ["settings", [
     ["move", MOVE],
     ["change", [["enter space", "switch it, or the next choice"]]],
-    ["leave", [["esc ,", "the screen before"], ["q ^c", "quit"]]],
+    ["leave", [["esc ,", "the screen before"], ["l", "the log"], ["q ^c", "quit"]]],
   ]],
 };
 

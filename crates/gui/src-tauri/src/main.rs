@@ -344,11 +344,6 @@ fn theme_next(shell: State<Shell>) -> Theme {
     shell.switch(&name)
 }
 
-#[tauri::command]
-fn theme_set(name: String, shell: State<Shell>) -> Theme {
-    shell.switch(&name)
-}
-
 #[derive(Serialize)]
 struct Unlock {
     said: String,
@@ -715,7 +710,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            start, send, answer, stop, theme_next, theme_set, cheat, rows, shelf_rows, search, artist_rows,
+            start, send, answer, stop, theme_next, cheat, rows, shelf_rows, search, artist_rows,
             release_rows, take, flip, invert, gate_marks, unread, mark_new, counts, picker_rows, pick_toggle,
             pick_changes, earned, shown, next_icons, switch_flag, lead_artist, new_titles, artist_at, next_kind, next_sort, probe, tools, latest, quit
         ])

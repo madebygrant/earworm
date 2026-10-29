@@ -21,7 +21,7 @@
   import Toast from "./screens/Toast.svelte";
   import Dialog from "./screens/Dialog.svelte";
   import FirstLaunch from "./screens/FirstLaunch.svelte";
-  import Footer from "./screens/Footer.svelte";
+  import Bar from "./screens/Bar.svelte";
   import Header from "./screens/Header.svelte";
   import Pick from "./screens/Pick.svelte";
   import Quit from "./screens/Quit.svelte";
@@ -181,7 +181,7 @@
       artist: screens.artist,
       page: m.view === "Artist" ? { name: m.page.name, section: screens.section, releases: screens.releaseRows.length, error: m.page.error } : null,
       settingsAt: m.view === "Settings" ? m.settings.rows[screens.settingsAt]?.key : null,
-      hints: [...document.querySelectorAll(".ft .hints > span")].map((e) => e.textContent?.trim()).join(" | "),
+      hints: [...document.querySelectorAll(".bar .hints > span")].map((e) => e.textContent?.trim()).join(" | "),
       byArtist: ui.byArtist?.[0] ?? null,
       filter: ui.filter,
       marked: m.marked,
@@ -200,6 +200,7 @@
 <!-- Once, for every Icon's <use>; positioned out of the body's grid. -->
 {@html sprite}
 
+<div class="shell stage">
 <Header />
 
 <main class="app" class:no-detail={!detail}>
@@ -230,7 +231,8 @@
   {#if detail}<Detail {press} />{/if}
 </main>
 
-<Footer />
+<Bar />
+</div>
 
 {#if dialog}<Dialog prompt={dialog} />{/if}
 {#if ui.quitting}<Quit />{/if}
