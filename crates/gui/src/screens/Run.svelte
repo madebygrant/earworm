@@ -39,9 +39,10 @@
     tip = false;
     markSeen("first-run");
   }
-  // Pressing `v` is doing what the tip says, so it has been read.
+  // Pressing `v` is doing what the tip says, so it has been read. `review` on its own, or every message re-runs this.
+  const review = $derived(m.review);
   $effect(() => {
-    if (m.review && showTip) gotIt();
+    if (review && showTip) gotIt();
   });
 
   const narrowed = $derived(!!ui.filter || m.review);

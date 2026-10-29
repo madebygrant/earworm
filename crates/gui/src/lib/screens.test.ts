@@ -8,6 +8,7 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: async (name: string, args: { cmd?: unknown }) => {
     if (name === "send") sent.push(args.cmd);
     if (name === "cheat") return cheat;
+    if (name === "earned") return [];
     return name === "send" ? true : null;
   },
 }));

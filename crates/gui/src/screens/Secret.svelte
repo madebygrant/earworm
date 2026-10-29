@@ -26,7 +26,9 @@
 
 <svelte:window onkeydowncapture={key} />
 
-<div class="look"><div class="unlock {found.art}" role="status">
+<!-- Any key dismisses it through the window handler above, so a click is the mouse's way, not a missing key. -->
+<!-- svelte-ignore a11y_click_events_have_key_events, a11y_no_noninteractive_element_interactions -->
+<div class="look"><div class="unlock {found.art}" role="status" onclick={endSecret}>
   <span class="t">✦ secret found ✦</span>
   <div class="art" aria-hidden="true">
     {#if found.art === "music"}
@@ -36,10 +38,10 @@
     {:else if found.art === "vaporwave"}
       <div class="sun"></div><div class="grid"></div>
       {#each sparks.slice(0, 2) as [x, y, d, c], i (i)}<span class="spark" style:left="{x}%" style:top="{y}%" style:animation-delay="{d}ms">{c}</span>{/each}
-    {:else}
+    {:else if found.art === "gameboy"}
       <div class="lcd"><span class="drop">earworm</span><span class="blip">▲ ▼ ◀ ▶</span></div>
     {/if}
   </div>
   <div class="words"><b>{found.prize} unlocked</b><span>{found.note}</span></div>
-  <p class="foot"><kbd>any key</kbd> carry on</p>
+  <p class="foot"><kbd>any key</kbd> or a click carries on</p>
 </div></div>

@@ -794,6 +794,19 @@ mod tests {
     use super::*;
     use earworm_core::protocol::test_support::{every_cmd, every_msg};
 
+    // `art` is a bare string to the page, so a feature whose art the card has no branch for compiles on both
+    // sides and draws an empty card. Every real code's feature has one, and protocol.ts names it.
+    #[test]
+    fn the_unlock_card_draws_every_features_art() {
+        let card = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../src/screens/Secret.svelte")).unwrap();
+        let types = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../src/lib/protocol.ts")).unwrap();
+        for cheat in cheats::CHEATS {
+            let art = Found::of(cheat.feature).art;
+            assert!(card.contains(&format!("found.art === \"{art}\"")), "Secret.svelte draws no {art}");
+            assert!(types.contains(&format!("\"{art}\"")), "protocol.ts's Found does not name {art}");
+        }
+    }
+
     // The page's reducer tests run on this file, so a message the worker can send and the file lacks is
     // one the page was never tested against. `EARWORM_RECORD=1` rewrites it.
     #[test]

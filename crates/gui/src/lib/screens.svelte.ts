@@ -454,8 +454,11 @@ export async function checkPrizes() {
   screens.waiting = [...screens.waiting, ...fresh.filter((p) => !shown.has(p.id))];
 }
 
+// The unlock count is not among the facts the page watches, so a find asks core itself what it earned.
 export function celebrate(found: Found | null) {
-  if (found) screens.secret = found;
+  if (!found) return;
+  screens.secret = found;
+  void checkPrizes();
 }
 
 export function endSecret() {

@@ -49,10 +49,8 @@
   function watch(node: HTMLElement, path: string) {
     paths.set(node, path);
     io.observe(node);
-    return {
-      update: (to: string) => paths.set(node, to),
-      destroy: () => (io.unobserve(node), paths.delete(node)),
-    };
+    // Rows are keyed by path, so a tile's folder never changes under it and the action needs no `update`.
+    return { destroy: () => (io.unobserve(node), paths.delete(node)) };
   }
   const library = $derived(m.library);
   const artwork = $derived(m.artwork);

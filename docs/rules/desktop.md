@@ -247,6 +247,13 @@
   note says so rather than the terminal's "^t walks to it". The card's art
   rests in its final state and animates from hidden, so reduced motion still
   shows the words. Nothing tests the drawing.
+- **A key that opens or closes a box is spent there.** A box takes the focus
+  while the key is still being handled, so `t` typed its own t into the
+  search until it prevented the default, as `/` already did
+  (`t opens the search without letting the letter through` in
+  `keys.test.ts`). The Enter or Esc that closes the console stops at it: by
+  the time it reaches the window the console is shut, and Settings, the
+  picker and the help sheet took it as their own (`Console.test.ts`).
 - **The icons are generated from `crates/gui/app-icon.svg`.** `pnpm tauri
   icon app-icon.svg` in `crates/gui` writes them; only the six
   `tauri.conf.json` lists are kept, and the Android, iOS and Windows store

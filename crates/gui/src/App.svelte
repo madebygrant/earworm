@@ -2,15 +2,16 @@
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount, untrack } from "svelte";
-  import { clearFilter, consoleHooks, handleKey, press } from "./lib/keys";
+  import { clearFilter, handleKey, press } from "./lib/keys";
   import type { Shelf } from "./lib/protocol";
   import { firstScreen, settledCount } from "./lib/reducer";
-  import { app, boot, hooks, tryCode } from "./lib/store.svelte";
+  import { app, boot, hooks } from "./lib/store.svelte";
   import { quit, running as isRunning, trackRows, ui } from "./lib/ui.svelte";
   import * as sc from "./lib/screens.svelte";
   import { screens } from "./lib/screens.svelte";
   import ArtistPage from "./screens/ArtistPage.svelte";
   import Artists from "./screens/Artists.svelte";
+  import Console from "./screens/Console.svelte";
   import Custom from "./screens/Custom.svelte";
   import Detail from "./screens/Detail.svelte";
   import Discard from "./screens/Discard.svelte";
@@ -141,25 +142,6 @@
     if (m.quit) void quit();
   });
 
-  let code = $state<string | null>(null);
-  let field = $state<HTMLInputElement>();
-  consoleHooks.open = () => {
-    code = "";
-    queueMicrotask(() => field?.focus());
-  };
-  consoleHooks.isOpen = () => code !== null;
-
-  function consoleKey(e: KeyboardEvent) {
-    // The key that closes the console is the console's: by the time it reaches the window the console is shut,
-    // and the screen under it would take it as its own Enter or Esc.
-    if (e.key === "Escape" || e.key === "Enter") e.stopPropagation();
-    if (e.key === "Escape") code = null;
-    else if (e.key === "Enter" && code) {
-      void tryCode(code).then(sc.celebrate);
-      code = null;
-    }
-  }
-
   hooks.restart = clearFilter;
   onMount(() => void boot());
 
@@ -249,6 +231,4 @@
 {#if screens.discard}<Discard />{/if}
 <Toast />
 {#if screens.secret}<Secret found={screens.secret} />{/if}
-{#if code !== null}
-  <div class="console"><span class="k">&gt;</span><input bind:this={field} bind:value={code} onkeydown={consoleKey} spellcheck="false" /></div>
-{/if}
+<Console />
