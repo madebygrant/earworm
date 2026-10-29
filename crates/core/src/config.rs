@@ -580,6 +580,16 @@ pub fn save_switch(path: &std::path::Path, key: &str, on: bool) -> Result<()> {
     save_key(path, key, if on { "true" } else { "false" })
 }
 
+/// The AcoustID key a front end was handed. Letters, digits, `-` and `_` only: every key acoustid.org issues
+/// is made of them, and anything else could close the quoted string `save_key` writes it into.
+pub fn save_acoustid_key(path: &std::path::Path, key: &str) -> Result<()> {
+    let key = key.trim();
+    if key.is_empty() || !key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        anyhow::bail!("an AcoustID key is letters and digits");
+    }
+    save_key(path, "acoustid_key", &format!("\"{key}\""))
+}
+
 pub fn save_icons(path: &std::path::Path, icons: crate::icons::Icons) -> Result<()> {
     save_key(path, "icons", &format!("\"{}\"", icons.name()))
 }
@@ -1629,6 +1639,21 @@ mod tests {
         assert!(matches!(keep_theme(None, "cool"), Kept::Session));
         assert!(matches!(keep_theme(Some(path), "cool"), Kept::Saved));
         assert!(std::fs::read_to_string(path).unwrap().contains("theme = \"cool\""));
+    }
+
+    #[test]
+    fn an_acoustid_key_is_saved_above_the_tables_and_nothing_else_is() {
+        let file = temp("acoustidkey");
+        std::fs::write(&file.path, "format = \"opus\"\n\n[colors]\naccent = \"#FFFFFF\"\n").unwrap();
+        let path = std::path::Path::new(&file.path);
+        save_acoustid_key(path, "  8XaBELgH \n").unwrap();
+        let read = |p| toml::from_str::<FileConfig>(&std::fs::read_to_string(p).unwrap()).unwrap().acoustid_key;
+        assert_eq!(read(path).as_deref(), Some("8XaBELgH"));
+        let before = std::fs::read_to_string(path).unwrap();
+        for bad in ["", "   ", "abc\"def", "a\\b", "two words"] {
+            assert!(save_acoustid_key(path, bad).is_err(), "{bad:?} was taken");
+        }
+        assert_eq!(std::fs::read_to_string(path).unwrap(), before, "a refused key changed the file");
     }
 
     /// A file with no `theme` line at all gains one rather than being ignored.

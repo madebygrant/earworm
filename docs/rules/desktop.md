@@ -75,9 +75,25 @@
   toolbar button or a sheet button shows an icon or a word, and does what a
   key does, by pressing it or by setting the state the key walks to (the
   kind, sort and tiles/list buttons). Key badges appear only in the bar, the
-  `h` sheet and a dialog's foot hints, each as a badge and a word. A badge on an icon
+  `h` sheet, a dialog's foot hints and a tip's, each as a badge and a word. A badge on an icon
   reads as a second, different action, and the icon and the badge then
   disagree about what the button is. Nothing tests it.
+- **The first screen's AcoustID key restarts the app.** The worker reads the
+  config once, before it asks for the link, and is blocked on that question
+  while the first screen shows, so a command carrying the key would wait
+  until after the very run it is for. The shell saves it through
+  `config::save_acoustid_key` and restarts; with nothing synced the first
+  screen comes back, now saying the key is set. The key is letters, digits,
+  `-` and `_`, the only characters that cannot close the quoted string
+  `save_key` writes (`an_acoustid_key_is_saved_above_the_tables_and_nothing_else_is`).
+  The restart was checked in a debug bundle.
+- **One-time tips are the page's, kept in the window's storage.** A lost
+  `localStorage` shows a tip again and costs nothing, so it is not worth a
+  file the worker would own; `tips.ts` reads unreadable storage as nothing
+  seen (`remembers a tip once it is seen, and only that tip` in
+  `tips.test.ts`). The first-run tip shows only for a download this session
+  that finished without an error and left tracks to fix, and pressing `v`,
+  which is what it asks for, counts as reading it.
 - **The run is a chip, not a pill.** A run starts by syncing a link and is
   never gone to, so a Run pill was disabled nearly always and read as
   broken. The reducer keeps the last download in `run`: it starts at the

@@ -4,6 +4,7 @@
   import { press } from "../lib/keys";
   import type { Track } from "../lib/protocol";
   import { app } from "../lib/store.svelte";
+  import { markSeen, seen } from "../lib/tips";
   import { askThumbs, label, names, tone, ui, word, working } from "../lib/ui.svelte";
   import FilterBox from "./FilterBox.svelte";
   import Icon from "./Icon.svelte";
@@ -30,6 +31,19 @@
     untrack(() => askThumbs(want));
   });
 
+  // Once, on the first download to finish with tracks to fix: where they are and the keys that fix them.
+  let tip = $state(!seen("first-run"));
+  const fix = $derived(m.run && m.run.done && m.run.ok && m.folder === m.run.folder ? m.run.look + m.run.failed : 0);
+  const showTip = $derived(tip && done && fix > 0);
+  function gotIt() {
+    tip = false;
+    markSeen("first-run");
+  }
+  // Pressing `v` is doing what the tip says, so it has been read.
+  $effect(() => {
+    if (m.review && showTip) gotIt();
+  });
+
   const narrowed = $derived(!!ui.filter || m.review);
   const errorLine = (line: string) => (line.includes("ERROR") ? "error" : line.includes("WARNING") ? "warn" : "");
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -51,6 +65,19 @@
       </div>
       <FilterBox bind:value={ui.filter} typing={ui.typing} placeholder="filter tracks" count={narrowed ? `${shown.length} of ${m.tracks.length}` : ""} />
     </div>
+    {#if showTip}
+      <div class="card tip">
+        <div>
+          <b>{fix} {fix === 1 ? "track wants" : "tracks want"} a look.</b>
+          The lookups could not confirm {fix === 1 ? "it" : "them"}. Show just those, then on each one search again or fix the tags by hand.
+          <div class="foot">
+            <span><kbd>v</kbd>worth a look</span><span><kbd>n</kbd>next one</span><span><kbd>T</kbd>search again</span><span><kbd>e</kbd>edit tags</span>
+            {#if m.run?.failed}<span><kbd>r</kbd>retry the failed</span>{/if}
+          </div>
+        </div>
+        <button onclick={gotIt}>Got it</button>
+      </div>
+    {/if}
     {#if shown.length}
       <Wall at={String(m.cursor ?? "")} list={ui.mode === "list"}>
         {#snippet head()}<tr><th>#</th><th></th><th>track</th><th>confidence</th><th>status</th><th>source</th><th>length</th></tr>{/snippet}

@@ -320,6 +320,13 @@ main.app.no-detail { grid-template-columns: minmax(0, 1fr); }
 .look .check h2:first-child { margin-top: 0; }
 .look .check > div { display: grid; grid-template-columns: 22px 90px 150px 1fr; gap: 10px; align-items: center; padding: 5px 0; white-space: nowrap; }
 .look .check > div > * { overflow: hidden; text-overflow: ellipsis; }
+/* The missing key's row says where to get one, which is worth a wrapped line rather than an ellipsis. */
+.look .check > div.nokey .fix { white-space: normal; }
+.look .check > .key > input, .look .check > .key > .said { grid-column: 3 / -1; }
+.look .check > .key > input { padding: 6px 12px; background: var(--card-2); border: 1px solid var(--line); border-radius: 10px; outline: none; font: inherit; color: var(--text); caret-color: var(--accent); }
+.look .check > .key > input:focus { border-color: var(--accent); }
+.look .check > .key > .said { color: var(--muted); white-space: normal; }
+.look .check > .key > .said.error { color: var(--error); }
 .look .check .i { width: 16px; height: 16px; }
 .look .check .fix, .look .check .path { color: var(--muted); }
 .look .check .copy { color: var(--accent); font-family: var(--mono); user-select: text; -webkit-user-select: text; }
@@ -341,6 +348,11 @@ main.app.no-detail { grid-template-columns: minmax(0, 1fr); }
 .look .sheet .files { margin: 0; }
 .look .sheet .files .live { color: var(--accent); }
 .look td.what { width: 55%; }
+
+/* The first-run tip: what to do next, over the wall it is about. */
+.look .card.tip { flex: none; display: flex; gap: 18px; align-items: center; margin: 0 0 10px; padding: 14px 18px; border-color: var(--accent); }
+.look .card.tip > div { flex: 1; min-width: 0; }
+.look .card.tip button { flex: none; padding: 8px 16px; border-radius: 999px; font-weight: 700; background: var(--accent); color: var(--ink); }
 
 /* A table's secondary columns: the number, the folder, the year. */
 .look td.a { color: var(--muted); font-size: 13px; }

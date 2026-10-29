@@ -32,6 +32,21 @@
     }
     else if (e.key === "Escape") void reply("Cancel");
   }
+  // The key is read once at start, so saving it restarts the app; until then this says why nothing moved.
+  let acoustid = $state("");
+  let keySaid = $state("");
+  let keyBad = $state(false);
+  async function saveKey(e: KeyboardEvent) {
+    if (e.key !== "Enter" || !acoustid.trim()) return;
+    keySaid = "saving, earworm restarts with it";
+    keyBad = false;
+    try {
+      await invoke("acoustid_key", { key: acoustid });
+    } catch (err) {
+      keySaid = String(err);
+      keyBad = true;
+    }
+  }
   const setup = $derived(app.setup);
   // Any link question after one was sent is a refusal of it, an empty link included.
   const refused = $derived(ui.linkSent);
@@ -65,11 +80,18 @@
         {/if}
         {#if setup}
           <h2>Settings</h2>
-          <div>
+          <div class:nokey={!setup.key}>
             <span class={setup.key ? "good" : "warn"}><Icon name={setup.key ? "mark" : "missing"} /></span><b>acoustid</b>
             <span class={setup.key ? "" : "warn"}>{setup.key ? "set" : "no key"}</span>
-            <span class="fix">{setup.key ? "fingerprint lookups" : "lookups fall back to Deezer and Apple"}</span>
+            <span class="fix">{#if setup.key}fingerprint lookups{:else}lookups fall back to Deezer and Apple; a free key from <span class="copy">acoustid.org/new-application</span> confirms far more tracks{/if}</span>
           </div>
+          {#if !setup.key}
+            <div class="key">
+              <span></span><span></span>
+              <input bind:value={acoustid} onkeydown={saveKey} placeholder="paste the key, Enter saves it" spellcheck="false" aria-label="AcoustID key" />
+            </div>
+            {#if keySaid}<div class="key"><span></span><span></span><span class="said" class:error={keyBad}>{keySaid}</span></div>{/if}
+          {/if}
           <div><span class="good"><Icon name="mark" /></span><b>format</b><span>{setup.format}</span><span class="fix">changed on the settings screen</span></div>
           <div><span class="good"><Icon name="mark" /></span><b>folder</b><span class="path">{setup.dir}</span><span class="fix">where playlists land</span></div>
         {/if}

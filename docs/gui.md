@@ -22,6 +22,12 @@ started from Finder doesn't get your shell's PATH, so earworm also looks in
 Homebrew's folders and `~/.local/bin` itself, and `[tools]` in the config
 names any tool kept somewhere else.
 
+Without an AcoustID key, lookups fall back to Deezer and Apple and confirm
+fewer tracks. The AcoustID row says where to get a free key, at
+acoustid.org/new-application, and has a field under it: paste the key and
+press Enter, and earworm saves it to the config and restarts with it, still
+on this screen.
+
 ## The window
 
 The window has four parts:
@@ -74,7 +80,9 @@ keeps YouTube's thumbnail, and one with no art at all is a numbered tile.
 The sheet says why each track has its status ("deezer found a
 match that didn't fit"), and its buttons search again, edit the tags or set
 the cover. The toolbar's warning button (`v`) narrows the folder to the
-tracks worth a look, and the arrow (`n`) jumps to the next one. `w` switches
+tracks worth a look, and the arrow (`n`) jumps to the next one. The first
+time a run finishes with tracks to fix, a tip over the wall says how many and
+names those keys; Got it, or `v`, puts it away for good. `w` switches
 between tiles and a table:
 
 ![The same run as a table: track number, sleeve, title and artist,

@@ -338,6 +338,15 @@ fn switch_flag(key: String) -> String {
     config::SWITCHES.iter().find(|s| s.key == key).map_or(key.clone(), |s| s.flag.to_string()).replace('_', "-")
 }
 
+/// The AcoustID key typed on the first screen: saved, then the app starts again, since the worker read the
+/// config once at its start and the run about to follow is the one the key is for.
+#[tauri::command]
+fn acoustid_key(key: String, app: tauri::AppHandle, shell: State<Shell>) -> Result<(), String> {
+    let file = shell.config_file.as_deref().ok_or("--no-config keeps the config file out of this run")?;
+    config::save_acoustid_key(file, &key).map_err(|e| e.to_string())?;
+    app.restart()
+}
+
 #[tauri::command]
 fn theme_next(shell: State<Shell>) -> Theme {
     let name = {
@@ -715,7 +724,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             start, send, answer, stop, theme_next, cheat, rows, shelf_rows, search, artist_rows,
             release_rows, take, flip, invert, gate_marks, unread, mark_new, counts, picker_rows, pick_toggle,
-            pick_changes, earned, shown, next_icons, switch_flag, lead_artist, new_titles, artist_at, next_kind, next_sort, probe, tools, latest, quit
+            pick_changes, earned, shown, next_icons, switch_flag, lead_artist, new_titles, artist_at, next_kind, next_sort, probe, tools, latest, acoustid_key, quit
         ])
         .build(tauri::generate_context!())
         .expect("the window could not be built")
