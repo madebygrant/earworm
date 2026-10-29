@@ -63,6 +63,28 @@ impl Palette {
     }
 }
 
+/// The palette slot a status is drawn in, by name. Colour is confidence and the word is provenance, so `ok`
+/// and `manual` share one: both were confirmed. Nothing unverified wears a settled colour. By name so a
+/// front end that paints with CSS variables reads the same table as the terminal.
+pub fn status_slot(status: crate::protocol::Status) -> &'static str {
+    use crate::protocol::Status;
+    match status {
+        Status::Ok | Status::Manual => "cursor",
+        Status::Weak => "warn",
+        Status::Kept | Status::NoMatch => "unsure",
+        Status::Failed => "error",
+        Status::Downloading | Status::Tagging | Status::Downloaded | Status::Converting => "accent",
+        // Nothing to act on: not downloaded, deliberately left alone, or the user's own file.
+        Status::Pending | Status::Have | Status::Gone | Status::Skipped | Status::Local => "muted",
+    }
+}
+
+/// `status_slot` read off a palette.
+pub fn status_color(status: crate::protocol::Status, p: Palette) -> Color {
+    let slot = status_slot(status);
+    p.slots().into_iter().find(|(name, _)| *name == slot).map_or(p.text, |(_, c)| c)
+}
+
 /* Warm cream-on-dark: gold carries structure, teal marks where you are, and
    everything secondary is a muted sand rather than a grey. Text and ground
    are both warm, so the one cool colour is what the eye lands on.
@@ -609,6 +631,18 @@ pub fn shade(color: Color) -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // By name so CSS can read it, which means a misspelt slot compiles: `status_color` would fall back to
+    // `text` and paint an unconfirmed tag as plain as a confirmed one.
+    #[test]
+    fn every_status_is_painted_in_a_slot_the_palette_has() {
+        let p = Palette::default();
+        let names: Vec<&str> = p.slots().iter().map(|(name, _)| *name).collect();
+        for status in crate::protocol::TALLY {
+            assert!(names.contains(&status_slot(status)), "{status:?} is painted in {}", status_slot(status));
+        }
+        assert_eq!(status_color(crate::protocol::Status::Ok, p), status_color(crate::protocol::Status::Manual, p));
+    }
 
     /// The cube is coarse and the grey ramp is fine, and most of this palette
     /// sits nearer a grey than a cube corner.

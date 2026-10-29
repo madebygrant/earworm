@@ -52,7 +52,66 @@
 - **The fonts are bundled.** JetBrains Mono comes from `@fontsource` into the
   build; a desktop app that fetched its type would draw in a fallback
   offline.
+- **A status's colour is core's `theme::status_slot`.** The terminal's
+  `status_color` reads the same table, and the page gets the slot name with
+  each status's word at start, which is also the CSS variable to paint it in.
+  Colour is confidence, so a copy that drifted would put an unconfirmed tag
+  in a confirmed colour. The slot is a name so CSS can read it, which means a
+  misspelt one compiles (`every_status_is_painted_in_a_slot_the_palette_has`).
+- **Text is typed into real inputs.** The prompts, the URL field and the
+  filter box are `<input>`s, so the caret, selection and paste are the
+  platform's; the terminal's caret code exists because a terminal has none.
+  The keys the terminal adds on top (`^u` clears the focused box, `^s` swaps
+  artist and title by label, a digit answers a choice only when that option
+  is there) are the dialog's own (`answers a choice by digit only when that
+  option is there`).
+- **The first URL prompt is the first screen, not a dialog.** With nothing in
+  the library the worker's first question is the link, so the field is the
+  screen and `--check`'s tools are under it. A refused link comes back as the
+  next question with the reason as its header. The page tells a refusal from
+  the opening ask by having sent a link already, not by the value, since an
+  empty link comes back empty. The format question asked straight after is a
+  dialog (`makes the link question the whole screen only while there is
+  nothing in the library`).
+- **One filter, two screens, cleared by a new run.** The rail's box narrows
+  folders and the band over the tracks narrows tracks, through the one
+  `ui.filter`, as the terminal's box does. `Restart` clears it, for the
+  reason `threads-and-messages.md` gives (`clears the page's own narrowing
+  when a new run starts`).
+- **The platform keeps its shortcuts and a focused control keeps its keys.**
+  ⌘c is copy, not `c`, which opened the cover question; a bare Shift or Ctrl
+  is no keypress, where it dismissed the quit question before the Y of
+  Shift+Y; arrows on the theme picker are not cursor moves; and a clicked
+  button never keeps the focus, or the next space pressed it again. Checked
+  through `EARWORM_DRIVE`, since the reducer tests have no DOM.
+- **An effect reads only what it depends on.** `app.model` changes on every
+  message, so an effect reading through it re-ran per log line: the spinner's
+  interval never fired, the list snapped back to the cursor while somebody
+  scrolled it, and the whole track list crossed IPC for every line of yt-dlp
+  output. Take the field into its own `$derived` first.
+- **A thumbnail is asked for once, and again after an `Idle` that left it
+  unanswered.** The screens ask whenever a reply lands, so without
+  `thumbsAsked` the files still on their way went out again; a batch the
+  worker cut short at `stop` ends at `Idle`, which releases what it never
+  answered (`asks again for a thumbnail a cut-short batch never answered,
+  once the worker is idle`).
 - **Debug builds print a `probe` line per change.** The page reports the
   rail, the theme and the computed accent to stderr, which is how a check
   reads the window where screen capture is not allowed. Release builds
   compile the command to nothing.
+- **Debug builds record a session, and the browser replays it.** With
+  `EARWORM_SESSION=<file>` the debug app writes every message, the boot data
+  and the tools on the way out (before the stops, which would end the
+  version probes). `pnpm dev` opened in a browser, with
+  `?file=<session>&upto=<n>`, mocks IPC and replays the first `n` messages;
+  `quit`, `logs`, `mode` and `tokens` set the page's own state, `tokens`
+  keeping the stylesheet's graphite for comparing with
+  `docs/mockups/shots/`. A question in the history is open only when it is
+  the last message applied, since the page's answers are not in it. Never in
+  a build.
+- **A check presses keys through `EARWORM_DRIVE`, never the system's
+  keyboard.** Debug builds with it set run each line appended to that file
+  as JavaScript in this window's page. Synthetic keystrokes go to whichever
+  app has the focus, which on a machine somebody is using is not this one:
+  the first exit check typed into a browser that way. Release builds compile
+  it to nothing, like `probe`.

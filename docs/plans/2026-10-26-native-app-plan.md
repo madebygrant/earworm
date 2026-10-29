@@ -166,7 +166,7 @@ Exit: the app opens on a fixture `--dir` and lists its folders from
 `Msg::Library` in the rail; the reducer tests pass; `^t` walks every palette
 and a `[colors]` override in the fixture config shows on screen.
 
-## 7. Library, runs and questions
+## 7. Library, runs and questions [done 2026-10-29]
 
 - Screens, each with its mockup:
   - first launch, with `--check`'s tools table (`first-launch.html`);

@@ -1,159 +1,148 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount } from "svelte";
+  import { clearFilter, consoleHooks, handleKey, press } from "./lib/keys";
   import type { Shelf } from "./lib/protocol";
-  import { app, boot, chooseTheme, tryCode, walkTheme } from "./lib/store.svelte";
+  import { firstScreen, settledCount } from "./lib/reducer";
+  import { app, boot, hooks, tryCode } from "./lib/store.svelte";
+  import { quit, trackRows, ui } from "./lib/ui.svelte";
+  import Detail from "./screens/Detail.svelte";
+  import Dialog from "./screens/Dialog.svelte";
+  import FirstLaunch from "./screens/FirstLaunch.svelte";
+  import Footer from "./screens/Footer.svelte";
+  import Header from "./screens/Header.svelte";
+  import Pick from "./screens/Pick.svelte";
+  import Quit from "./screens/Quit.svelte";
+  import Rail from "./screens/Rail.svelte";
+  import Run from "./screens/Run.svelte";
+  import ShelfView from "./screens/ShelfView.svelte";
 
-  // The library's order is core's `view::shelf_rows`, asked only when the library itself is replaced: the
-  // derived keeps its reference across every other message. A reply is kept with the library it answered,
-  // so a late one for an older library is never laid over a newer one.
-  const library = $derived(app.model.library);
-  let answered = $state<{ library: Shelf[]; order: number[] } | null>(null);
+  const m = $derived(app.model);
+  const tracks = $derived(m.tracks);
+  const library = $derived(m.library);
+  const first = $derived(firstScreen(m) ? m.prompt!.prompt : null);
+  const dialog = $derived(m.prompt && !first ? m.prompt.prompt : null);
+  const detail = $derived(!first && (m.view === "Tracks" ? m.tracks.length > 0 : m.library.length > 0));
+
+  // Core's answers to what each list shows, asked again only when what they depend on changes. A reply is
+  // kept only while it still answers the latest question.
+  // Each input derived on its own, so a log line or a progress tick does not ask again.
+  const review = $derived(m.review);
+  let asked = 0;
   $effect(() => {
-    const asked = library;
-    invoke<number[]>("shelf_rows", { library: asked, filter: "", only: null, folders: null, sort: "Name" }).then((order) => {
-      if (asked === app.model.library) answered = { library: asked, order };
+    const [t, filter, id] = [tracks, ui.filter, ++asked];
+    void trackRows(t, filter, review).then((rows) => {
+      if (id === asked) ui.rows = rows;
+    });
+  });
+  let askedShelves = 0;
+  $effect(() => {
+    const [lib, filter, only, sort, id] = [library, ui.filter, ui.only, ui.sort, ++askedShelves];
+    void invoke<number[]>("shelf_rows", { library: lib, filter, only, folders: null, sort }).then((rows) => {
+      if (id === askedShelves) ui.shelves = rows;
     });
   });
 
-  // Until the new order arrives, the old one over the folders that are still there.
-  const rows = $derived.by(() => {
-    if (!answered) return [];
-    if (answered.library === library) return answered.order.map((at) => library[at]);
-    const was = answered.order.map((at) => answered!.library[at].path);
-    return was.flatMap((path) => library.filter((s) => s.path === path));
+  // A cursor on a row nobody can see is a selection every key still acts on, so it goes to one that shows.
+  $effect(() => {
+    const shown = ui.rows.map((at) => tracks[at]?.index).filter((i): i is number => i !== undefined);
+    const at = app.model.cursor;
+    if (!shown.length || (at !== null && shown.includes(at))) return;
+    const nearest = at === null ? shown[0] : shown.reduce((a, b) => (Math.abs(b - at) < Math.abs(a - at) ? b : a));
+    app.model = { ...app.model, cursor: nearest };
   });
-  const open = $derived(app.model.library.find((s) => s.path === app.model.shelf) ?? null);
-  const header = $derived(app.model.flash ?? app.model.stage);
+  $effect(() => {
+    const paths = ui.shelves.map((at) => library[at]?.path);
+    if (paths.length && !paths.includes(app.model.shelf ?? "")) app.model = { ...app.model, shelf: paths[0] ?? null };
+  });
 
-  function icon(s: Shelf): string {
-    if (s.kind === "Album") return "●";
-    if (s.kind === "Custom") return "≡";
-    // A folder earworm did not download has no URL to sync from.
-    return s.url === null ? "◆" : "▤";
-  }
+  // The window title follows the run, so a window you aren't looking at says how far it got.
+  // Derived as a string, so the window is told only when the words change.
+  const title = $derived.by(() => {
+    const where = m.view === "Library" ? (library.find((s: Shelf) => s.path === m.shelf)?.name ?? "") : m.playlist;
+    const how = m.view === "Library" || !tracks.length ? "" : m.done !== null ? m.stage : `${settledCount(m)}/${tracks.length}`;
+    return ["earworm", where, how].filter(Boolean).join(" · ");
+  });
+  $effect(() => {
+    void getCurrentWindow().setTitle(title);
+  });
 
-  function select(s: Shelf) {
-    app.model = { ...app.model, shelf: s.path };
-  }
+  // Cancelling the first URL prompt ends the session, as it does in the terminal.
+  $effect(() => {
+    if (m.quit) void quit();
+  });
 
-  function step(by: number) {
-    const at = rows.findIndex((s) => s.path === app.model.shelf);
-    const next = rows[Math.max(0, Math.min(rows.length - 1, at + by))];
-    if (next) app.model = { ...app.model, shelf: next.path };
-  }
-
-  // `^z` then `^x` opens the console, as in the terminal; nothing on screen says it exists.
-  let armed = 0;
-  let console = $state<string | null>(null);
+  let code = $state<string | null>(null);
   let field = $state<HTMLInputElement>();
-
-  function key(e: KeyboardEvent) {
-    if (console !== null) return;
-    if (e.ctrlKey && e.key === "t") {
-      e.preventDefault();
-      void walkTheme();
-    } else if (e.ctrlKey && e.key === "z") {
-      armed = Date.now();
-    } else if (e.ctrlKey && e.key === "x" && Date.now() - armed < 1500) {
-      e.preventDefault();
-      console = "";
-      queueMicrotask(() => field?.focus());
-    } else if (e.key === "j" || e.key === "ArrowDown") {
-      step(1);
-    } else if (e.key === "k" || e.key === "ArrowUp") {
-      step(-1);
-    }
-  }
+  consoleHooks.open = () => {
+    code = "";
+    queueMicrotask(() => field?.focus());
+  };
+  consoleHooks.isOpen = () => code !== null;
 
   function consoleKey(e: KeyboardEvent) {
-    if (e.key === "Escape") console = null;
-    else if (e.key === "Enter" && console) {
-      void tryCode(console);
-      console = null;
+    if (e.key === "Escape") code = null;
+    else if (e.key === "Enter" && code) {
+      void tryCode(code);
+      code = null;
     }
   }
 
+  hooks.restart = clearFilter;
   onMount(() => void boot());
 
   // Dev builds report what is on screen, for checks that cannot take a screenshot.
   $effect(() => {
     if (!import.meta.env.DEV) return;
     const report = {
-      rail: rows.map((s) => s.name),
-      selected: open?.name ?? null,
+      view: m.view,
+      first: !!first,
+      dialog: dialog ? Object.keys(dialog)[0] : null,
+      note: m.prompt ? (Object.values(m.prompt.prompt)[0] as { note: string }).note : null,
+      picking: m.picking !== null,
+      rail: ui.shelves.map((at) => library[at]?.name),
+      selected: library.find((s) => s.path === m.shelf)?.name ?? null,
+      tracks: tracks.map((t) => `${t.index}:${t.status}`).join(" "),
+      shown: ui.rows.length,
+      mode: ui.mode,
+      quitting: ui.quitting,
+      filter: ui.filter,
+      marked: m.marked,
       theme: app.theme?.name ?? null,
       accent: app.theme ? getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() : null,
-      railAccent: document.querySelector(".rail li[aria-current='true']") ? getComputedStyle(document.querySelector(".rail li[aria-current='true']")!).backgroundColor : null,
-      header: header,
+      header: m.flash ?? m.stage,
       error: app.error,
     };
     void invoke("probe", { report });
   });
 </script>
 
-<svelte:window onkeydown={key} />
+<!-- A click never leaves a button holding the focus, or the next space or Enter would press it again. -->
+<svelte:window onkeydown={handleKey} onmousedown={(e) => (e.target as HTMLElement).closest("button") && e.preventDefault()} />
 
-<header class="hd" data-tauri-drag-region>
-  <span class="brand" data-tauri-drag-region>earworm</span>
-  {#if open}<span class="sep">·</span><span data-tauri-drag-region>{open.name}</span>{/if}
-  <span class="sep">·</span><span class="stage" data-tauri-drag-region>{header}</span>
-  <span class="right" data-tauri-drag-region>{app.model.settings.text}</span>
-</header>
+<Header />
 
-<main class="app no-detail">
-  <nav class="rail" aria-label="Library">
-    <div class="tabs"><span aria-current="true">folders</span></div>
-    {#if rows.length}
-      <ul role="listbox" aria-label="Folders">
-        {#each rows as s (s.path)}
-          <li
-            role="option"
-            tabindex="-1"
-            aria-selected={s.path === app.model.shelf}
-            aria-current={s.path === app.model.shelf}
-            onclick={() => select(s)}
-            onkeydown={(e) => e.key === "Enter" && select(s)}
-          >
-            <span class="ic" class:album={s.kind === "Album"}>{icon(s)}</span>
-            <span class="nm">{s.name}</span>
-            <span class="ct" class:miss={s.missing > 0}>{s.missing > 0 ? `${s.missing}!` : s.tracks}</span>
-          </li>
-        {/each}
-      </ul>
-    {:else if !app.error}
-      <p class="empty">No folders yet. A synced playlist lands here.</p>
-    {/if}
-    {#if app.theme}
-      <label class="themes">
-        <span><span class="k">^t</span> theme</span>
-        <select value={app.theme.name} onchange={(e) => chooseTheme(e.currentTarget.value)}>
-          {#each app.theme.names as name (name)}<option value={name}>{name}</option>{/each}
-        </select>
-      </label>
-    {/if}
-  </nav>
-
-  <section class="view">
-    {#if app.error}
-      <div class="fail"><h1>earworm could not start</h1><pre>{app.error}</pre></div>
-    {:else if open}
-      <div class="bar"><span class="title" style="color:var(--text)">{open.name}</span><span>{open.tracks} tracks</span>
-        {#if open.missing}<span class="warn">{open.missing} missing</span>{/if}</div>
-      <ul class="files">
-        {#each open.files as [name, here] (name)}
-          <li><span class={here ? "good" : "warn"}>{here ? "on disk" : "missing"}</span><span>{name}</span></li>
-        {/each}
-      </ul>
-    {/if}
-  </section>
+<main class="app" class:no-detail={!detail}>
+  <Rail />
+  {#if app.error}
+    <section class="view"><div class="fail"><h1>earworm could not start</h1><pre>{app.error}</pre></div></section>
+  {:else if first}
+    <FirstLaunch prompt={first as Extract<typeof first, { Input: unknown }>} />
+  {:else if m.picking !== null}
+    <Pick {press} />
+  {:else if m.view === "Tracks" && m.tracks.length}
+    <Run />
+  {:else}
+    <ShelfView />
+  {/if}
+  {#if detail}<Detail {press} />{/if}
 </main>
 
-<footer class="ft">
-  <span class="tally"><span class="muted">{app.model.library.length} folders</span></span>
-  <span class="hints"><span><span class="k">j k</span> move</span><span><span class="k">^t</span> theme</span></span>
-</footer>
+<Footer />
 
-{#if console !== null}
-  <div class="console"><span class="k">&gt;</span><input bind:this={field} bind:value={console} onkeydown={consoleKey} spellcheck="false" /></div>
+{#if dialog}<Dialog prompt={dialog} />{/if}
+{#if ui.quitting}<Quit />{/if}
+{#if code !== null}
+  <div class="console"><span class="k">&gt;</span><input bind:this={field} bind:value={code} onkeydown={consoleKey} spellcheck="false" /></div>
 {/if}

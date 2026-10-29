@@ -2,7 +2,7 @@
 // through `apply`; the effects it returns are core questions, answered here and folded back in.
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Msg, Word } from "./protocol";
+import type { Msg, Reply, SettingRow, Word } from "./protocol";
 import { apply, expire, initial, say, type Effect, type State } from "./reducer";
 
 export interface Theme {
@@ -18,9 +18,18 @@ interface Sent {
   msg: Msg;
 }
 
+export interface Setup {
+  text: string;
+  format: string;
+  rows: SettingRow[];
+  dir: string;
+  key: boolean;
+}
+
 interface Boot {
   theme: Theme;
   statuses: Word[];
+  setup: Setup;
   replay: Sent[];
 }
 
@@ -31,6 +40,7 @@ export const app = $state({
   error: null as string | null,
   /** The worker has dropped its sender. */
   gone: false,
+  setup: null as Setup | null,
 });
 
 // A floor plus reading time, as the terminal's: one length fitted "saved track 12" and not a long error.
@@ -66,7 +76,12 @@ async function run(effect: Effect) {
   }
 }
 
+// What the page's own state does on a message: a new run starts with no filter, or one left over from the
+// last playlist hides most of the next and reads as a broken run. Set by the app shell.
+export const hooks = { restart: () => {} };
+
 export function dispatch(msg: Msg) {
+  if (msg === "Restart") hooks.restart();
   const step = apply(app.model, msg);
   update(step.state);
   for (const effect of step.effects) void run(effect);
@@ -114,12 +129,30 @@ export async function boot() {
   await listen<Sent>("earworm://msg", (e) => (held ? held.push(e.payload) : take(e.payload)));
   await listen("earworm://gone", () => (app.gone = true));
   try {
-    const { theme, statuses, replay } = await invoke<Boot>("start");
-    app.model = { ...app.model, statuses };
+    const { theme, statuses, setup, replay } = await invoke<Boot>("start");
+    app.model = { ...app.model, statuses, settings: { text: setup.text, format: setup.format, rows: setup.rows } };
+    app.setup = setup;
     paint(theme);
     for (const sent of [...replay, ...(held ?? [])]) take(sent);
   } catch (e) {
     app.error = String(e);
   }
   held = null;
+}
+
+/** Answers the question on screen. Taken off the screen first, so a second key cannot answer it twice. */
+export async function reply(r: Reply) {
+  const open = app.model.prompt;
+  if (!open) return;
+  update({ ...app.model, prompt: null });
+  await invoke("answer", { id: open.id, reply: r });
+}
+
+// Answers the pick gate with the marks and nothing else: never the cursor, which would turn "I unmarked
+// everything" into "download the row I happen to be on".
+export async function answerPick(picked: number[]) {
+  const id = app.model.picking;
+  if (id === null) return;
+  update({ ...app.model, picking: null, marked: [], follow: true });
+  await invoke("answer", { id, reply: { Picked: picked } });
 }

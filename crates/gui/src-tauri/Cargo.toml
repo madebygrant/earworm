@@ -21,7 +21,7 @@ clap.workspace = true
 ratatui-core.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["protocol-asset"] }
 
 [dev-dependencies]
 earworm-core = { workspace = true, features = ["test-support"] }

@@ -23,6 +23,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 vi.stubGlobal("document", { documentElement: { style: { setProperty() {}, colorScheme: "" } } });
 
 const theme = { name: "graphite", light: false, names: ["graphite"], vars: {}, said: null };
+const setup = { text: "", format: "opus", rows: [], dir: "~/Music", key: false };
 
 describe("boot", () => {
   beforeEach(() => {
@@ -31,7 +32,7 @@ describe("boot", () => {
   });
 
   it("applies the history, then the held messages it did not hold, each once and in order", async () => {
-    reply = { theme, statuses: [], replay: [{ seq: 0, msg: { Log: "zero" } }, { seq: 1, msg: { Log: "one" } }] };
+    reply = { theme, statuses: [], setup, replay: [{ seq: 0, msg: { Log: "zero" } }, { seq: 1, msg: { Log: "one" } }] };
     const { app, boot } = await import("./store.svelte");
     await boot();
     expect(app.model.logs).toEqual(["zero", "one", "two"]);
@@ -40,11 +41,21 @@ describe("boot", () => {
   });
 
   it("listens once however often it is mounted", async () => {
-    reply = { theme, statuses: [], replay: [] };
+    reply = { theme, statuses: [], setup, replay: [] };
     const { app, boot } = await import("./store.svelte");
     await boot();
     await boot();
     deliver({ seq: 3, msg: { Log: "x" } });
     expect(app.model.logs.filter((l) => l === "x")).toHaveLength(1);
+  });
+
+  it("clears the page's own narrowing when a new run starts", async () => {
+    reply = { theme, statuses: [], setup, replay: [] };
+    const { boot, hooks } = await import("./store.svelte");
+    let cleared = 0;
+    hooks.restart = () => cleared++;
+    await boot();
+    deliver({ seq: 3, msg: "Restart" });
+    expect(cleared).toBe(1);
   });
 });

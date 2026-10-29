@@ -799,8 +799,10 @@ impl App {
                 }
                 self.follow_to(index);
             }
-            Msg::Meta { index, album, year } => {
+            Msg::Meta { index, artist, title, album, year } => {
                 if let Some(t) = self.track_mut(index) {
+                    t.artist = artist;
+                    t.title = title;
                     t.album = album;
                     t.year = year;
                 }
@@ -2640,6 +2642,18 @@ mod tests {
         settled.stage = "finished".into();
         settled.step(true);
         assert_eq!(settled.stage, "finished", "it announced a mode nobody could see");
+    }
+
+    // The track list goes out before the tag pass, so the artist arrives later, on `Msg::Meta`.
+    #[test]
+    fn marking_by_artist_works_on_a_track_the_run_just_tagged() {
+        let mut app = app_with(&[Status::Tagging, Status::Tagging]);
+        for index in [1, 2] {
+            app.apply(Msg::Meta { index, artist: "Neu!".into(), title: "Hallogallo".into(), album: String::new(), year: None });
+        }
+        app.cursor = 0;
+        app.mark_like_artist();
+        assert_eq!(app.marked, [1, 2].into_iter().collect(), "{}", app.stage);
     }
 
     /* A compilation the lookup split across twenty artists, or one artist's

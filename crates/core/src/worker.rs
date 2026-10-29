@@ -3969,6 +3969,8 @@ fn undo(cfg: &Config, tx: &Sender<Msg>, tracks: &mut [Track], held: &mut Option<
 fn offer_meta(tx: &Sender<Msg>, track: &Track) {
     let _ = tx.send(Msg::Meta {
         index: track.index,
+        artist: track.artist.clone(),
+        title: track.title.clone(),
         album: track.album.clone(),
         year: track.year,
     });
@@ -7784,17 +7786,17 @@ pub mod tests {
             None,
         );
 
-        let meta: Vec<(String, Option<u16>)> = rx
+        let meta: Vec<(String, String, String, Option<u16>)> = rx
             .try_iter()
             .filter_map(|m| match m {
-                Msg::Meta { album, year, .. } => Some((album, year)),
+                Msg::Meta { artist, title, album, year, .. } => Some((artist, title, album, year)),
                 _ => None,
             })
             .collect();
         assert_eq!(
             meta,
-            vec![("Neu!".to_string(), Some(1972))],
-            "the run kept the album to itself"
+            vec![("Neu!".to_string(), "Hallogallo".to_string(), "Neu!".to_string(), Some(1972))],
+            "the run kept the tags it read to itself"
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }

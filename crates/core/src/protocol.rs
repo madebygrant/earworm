@@ -568,11 +568,13 @@ pub enum Msg {
         note: Option<String>,
         name: Option<String>,
     },
-    /* Its own message rather than two more fields on `Update`: album and
-       year change only when somebody edits them, where `Update` is sent for
-       every status the run passes through. Same reason `Path` is separate. */
+    // Every tag the row and the tiles show, sent whenever the worker writes or reads them after the track
+    // list went out. Apart from `Update` because that is sent for every status a run passes through, and
+    // because `Update.name` is display text a front end must not take apart to find the artist.
     Meta {
         index: usize,
+        artist: String,
+        title: String,
         album: String,
         year: Option<u16>,
     },
@@ -1149,7 +1151,7 @@ pub mod test_support {
             Msg::Progress { index: 1, percent: 40 },
             Msg::Twin { index: 1, twin: None },
             Msg::Update { index: 1, status: Status::Weak, source: Some("Deezer".into()), note: None, name: Some("n".into()) },
-            Msg::Meta { index: 1, album: "Neu!".into(), year: None },
+            Msg::Meta { index: 1, artist: "Neu!".into(), title: "Hallogallo".into(), album: "Neu!".into(), year: None },
             Msg::Path { index: 1, path: p() },
             Msg::Log("ERROR: x".into()),
             Msg::Library { shelves: vec![shelf], show: true },

@@ -1,0 +1,55 @@
+/* Each screen's own rules, as the mockup pages set them in their heads. */
+
+/* first-launch.html */
+.hero { display: grid; align-content: center; justify-items: start; gap: 18px; padding: 40px clamp(16px, 6vw, 96px); overflow: auto; }
+.hero h1 { font-size: var(--s-22); font-weight: 700; }
+.url { width: min(100%, 72ch); font-size: var(--s-28); border-bottom: 2px solid var(--accent); padding: 6px 0; display: flex; gap: 1ch; }
+.url input { flex: 1; min-width: 0; outline: none; caret-color: var(--accent); }
+.url input::placeholder { color: var(--muted); }
+.url.bad { border-color: var(--error); }
+.hero .note { font-size: var(--s-12); }
+.or { color: var(--muted); }
+.check { font-size: var(--s-13); width: min(100%, 92ch); margin-top: 10px; }
+.check h2 { font-size: var(--s-12); color: var(--muted); font-weight: 400; margin: 12px 0 4px; }
+.check div { display: grid; grid-template-columns: 2ch 10ch 12ch 1fr; gap: 1ch; white-space: nowrap; }
+.check .fix { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.check div > span { overflow: hidden; text-overflow: ellipsis; }
+.copy { color: var(--accent); user-select: text; }
+@media (max-width: 760px) { .url { font-size: var(--s-17); } .check div { grid-template-columns: 2ch 9ch 1fr; } .check .fix { display: none; } }
+
+/* run.html */
+.view.run { display: flex; flex-direction: column; padding: 0; }
+.view.run .scroll { overflow: auto; padding: 12px var(--gutter) 24px; flex: 1; min-height: 0; }
+.log { border-top: 1px solid var(--rule); height: 30%; min-height: 120px; overflow: auto; padding: 8px var(--gutter); font-size: var(--s-12); color: var(--muted); flex: none; user-select: text; }
+.log.tall { height: 50%; }
+.log .warn { color: var(--warn); } .log .error { color: var(--error); }
+.log div { white-space: pre-wrap; word-break: break-all; }
+
+/* pick.html */
+.go { margin-top: 16px; display: flex; gap: 2ch; align-items: center; flex-wrap: wrap; }
+.btn { border: 1px solid var(--accent); padding: 3px 14px; }
+.btn.primary { background: var(--accent); color: var(--ink); font-weight: 700; }
+.twin { color: var(--unsure); }
+
+/* prompts and overlays */
+.dialog input { width: 100%; outline: none; caret-color: var(--accent); }
+.dialog .form .box { padding: 1px 0; }
+.dialog .note { color: var(--muted); }
+.dialog .reason { color: var(--error); margin-top: 8px; font-size: var(--s-12); }
+.menu li { cursor: pointer; }
+
+/* What the rail's filter box looks like while it takes the keys. */
+.rail .q input { width: 100%; outline: none; color: var(--text); caret-color: var(--accent); }
+.rail .q input::placeholder { color: var(--muted); }
+
+.frame .num { font-size: var(--s-22); }
+.tile .w, .r .w { white-space: nowrap; }
+.empty-main { padding: 24px var(--gutter); color: var(--muted); }
+
+/* library.html */
+.detail .files { list-style: none; padding: 0; margin-top: 12px; font-size: var(--s-12); }
+.detail .files li { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.detail .files li.miss { color: var(--warn); }
+.detail dd { user-select: text; }
+
+.band input { flex: 1; min-width: 0; outline: none; color: var(--ink); caret-color: var(--ink); font-weight: 700; }

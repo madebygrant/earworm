@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import recorded from "./msgs.json";
 import type { Msg, Shelf, Track, Word } from "./protocol";
 import { variant } from "./protocol";
-import { VARIANTS, apply, expire, initial, type State } from "./reducer";
+import { VARIANTS, apply, digitChoice, expire, firstScreen, initial, settledCount, type State } from "./reducer";
 
 const msgs = recorded.msgs as Msg[];
 const statuses = recorded.statuses as Word[];
@@ -29,6 +29,50 @@ describe("the reducer", () => {
     let s = initial(statuses);
     for (const m of msgs) s = apply(s, m).state;
     expect(s.quit).toBe(true);
+  });
+
+  it("takes a track's artist and title from Meta, never from the display name", () => {
+    const s = run(
+      { ...initial(statuses), tracks: tracks("Tagging") },
+      { Update: { index: 1, status: "Have", source: null, note: null, name: "Hallogallo - Neu!" } },
+      { Meta: { index: 1, artist: "Neu!", title: "Hallogallo", album: "Neu!", year: 1972 } },
+    );
+    expect([s.tracks[0].artist, s.tracks[0].title, s.tracks[0].album]).toEqual(["Neu!", "Hallogallo", "Neu!"]);
+  });
+
+  it("makes the link question the whole screen only while there is nothing in the library", () => {
+    const link = { Ask: { id: 1, prompt: { Input: { header: "YouTube playlist URL", note: "", value: "", escape: "Quit" as const } } } };
+    expect(firstScreen(run(initial(statuses), link))).toBe(true);
+    // The format question asked straight after the link is a dialog, not the first screen.
+    const format = { Ask: { id: 2, prompt: { Choice: { header: "Format", note: "", options: ["opus"], escape: "Keep" as const } } } };
+    expect(firstScreen(run(initial(statuses), format))).toBe(false);
+    expect(firstScreen(run(initial(statuses), { Library: { shelves: [shelf("Sleep")], show: false } }, link))).toBe(false);
+  });
+
+  it("answers a choice by digit only when that option is there", () => {
+    expect(digitChoice("1", 4)).toBe(0);
+    expect(digitChoice("4", 4)).toBe(3);
+    expect(digitChoice("5", 4)).toBeNull();
+    expect(digitChoice("0", 4)).toBeNull();
+  });
+
+  it("asks again for a thumbnail a cut-short batch never answered, once the worker is idle", () => {
+    const s = run(
+      { ...initial(statuses), thumbsAsked: ["/a.opus", "/b.opus"] },
+      { Thumb: { file: "/a.opus", thumb: null } },
+      "Idle",
+    );
+    expect(s.thumbsAsked).toEqual(["/a.opus"]);
+  });
+
+  it("counts settled tracks by core's word for each status", () => {
+    const s = { ...initial(statuses), tracks: tracks("Ok", "Pending", "Failed", "Downloading") };
+    expect(settledCount(s)).toBe(2);
+  });
+
+  it("drops the thumbnails when a cover changes, so they are asked for again", () => {
+    const s = run(initial(statuses), { Thumb: { file: "/music/a.opus", thumb: "/cache/1.jpg" } }, "Artwork");
+    expect(s.thumbs).toEqual({});
   });
 
   it("lists the library's folders and opens on it when asked", () => {

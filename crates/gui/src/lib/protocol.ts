@@ -13,6 +13,8 @@ export interface Word {
   look: boolean;
   settled: boolean;
   tally: number | null;
+  /** The palette slot it is drawn in, which is also its CSS variable. */
+  slot: string;
 }
 
 export type Kind = "Album" | "Playlist" | "Custom";
@@ -91,7 +93,7 @@ export type Msg =
   | { Progress: { index: number; percent: number } }
   | { Twin: { index: number; twin: string | null } }
   | { Update: { index: number; status: Status; source: string | null; note: string | null; name: string | null } }
-  | { Meta: { index: number; album: string; year: number | null } }
+  | { Meta: { index: number; artist: string; title: string; album: string; year: number | null } }
   | { Path: { index: number; path: string } }
   | { Log: string }
   | { Library: { shelves: Shelf[]; show: boolean } }
@@ -122,6 +124,8 @@ export type Msg =
   | "Artwork"
   | "Quit"
   | { Thumb: { file: string; thumb: string | null } };
+
+export type Reply = { Choice: number } | { Fields: string[] } | { Text: string } | { Picked: number[] } | "Cancel";
 
 /** The variant a message is, as serde tags it. */
 export function variant(msg: Msg): string {

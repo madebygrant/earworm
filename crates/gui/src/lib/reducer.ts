@@ -60,6 +60,8 @@ export interface State {
   settings: { text: string; format: string; rows: SettingRow[] };
   undoable: string | null;
   thumbs: Record<string, string | null>;
+  // Files a `Thumbs` went out for and no reply has come back: asked once, not again on every message.
+  thumbsAsked: string[];
   /** Bumped when a cover changed under a track, so anything showing one reloads it. */
   artwork: number;
   quit: boolean;
@@ -109,9 +111,26 @@ export function initial(statuses: Word[] = []): State {
     settings: { text: "", format: "", rows: [] },
     undoable: null,
     thumbs: {},
+    thumbsAsked: [],
     artwork: 0,
     quit: false,
   };
+}
+
+// The worker's first question with nothing in the library is the link, and then it is the whole screen.
+export function firstScreen(s: State): boolean {
+  return s.prompt !== null && "Input" in s.prompt.prompt && !s.library.length && !s.tracks.length;
+}
+
+// The option a digit answers on a choice of `options`, or none. Bounded by what is on screen: the finish
+// menu's last row is quit, so a digit past the end must do nothing rather than choose the last.
+export function digitChoice(key: string, options: number): number | null {
+  return /^[1-9]$/.test(key) && Number(key) <= options ? Number(key) - 1 : null;
+}
+
+// Tracks that have reached a status the run ends on, by core's `settled`.
+export function settledCount(s: State): number {
+  return s.tracks.filter((t) => word(s, t.status)?.settled).length;
 }
 
 /** Shows a message in the header, or queues it behind the one being read. */
@@ -174,7 +193,7 @@ const handlers: Handlers = {
       })),
       index,
     ),
-  Meta: (s, { index, album, year }) => track(s, index, (t) => ({ ...t, album, year })),
+  Meta: (s, { index, artist, title, album, year }) => track(s, index, (t) => ({ ...t, artist, title, album, year })),
   Path: (s, { index, path }) => track(s, index, (t) => ({ ...t, path })),
   Log: (s, line) => ({ ...s, logs: [...s.logs, line] }),
   Library: (s, { shelves, show }) => {
@@ -224,7 +243,8 @@ const handlers: Handlers = {
     return { ...s, stage: said, resting: said, flash: null, done: result };
   },
   Unmark: (s) => ({ ...s, marked: [] }),
-  Idle: (s) => ({ ...s, busy: false, searching: false }),
+  // A batch the worker cut short at `stop` ends here too, so what it never answered can be asked again.
+  Idle: (s) => ({ ...s, busy: false, searching: false, thumbsAsked: s.thumbsAsked.filter((f) => f in s.thumbs) }),
   Restart: (s) => ({
     ...s,
     searching: false,
@@ -254,7 +274,8 @@ const handlers: Handlers = {
     return { ...s, review: first !== undefined, follow: false, cursor: first ? first.index : s.cursor };
   },
   Focus: (s, index) => (s.tracks.some((t) => t.index === index) ? { ...s, cursor: index, follow: false } : s),
-  Artwork: (s) => ({ ...s, artwork: s.artwork + 1 }),
+  // A cover changed somewhere, and a thumbnail is a copy of one, so every one is asked for again.
+  Artwork: (s) => ({ ...s, artwork: s.artwork + 1, thumbs: {}, thumbsAsked: [] }),
   Quit: (s) => ({ ...s, quit: true }),
   Thumb: (s, { file, thumb }) => ({ ...s, thumbs: { ...s.thumbs, [file]: thumb } }),
 };

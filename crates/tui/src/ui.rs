@@ -35,18 +35,8 @@ const NOW_PLAYING: usize = 28;
 /// The widest the twin column grows, so a long folder name cannot push the tail off.
 const TWIN_MAX: usize = 30;
 
-// Colour is confidence and the word is provenance, so `ok` and `manual` share one: both were
-// confirmed, and telling them apart is the label's job. Nothing unverified wears a settled colour.
 fn status_color(status: Status, p: Palette) -> Color {
-    match status {
-        Status::Ok | Status::Manual => p.cursor,
-        Status::Weak => p.warn,
-        Status::Kept | Status::NoMatch => p.unsure,
-        Status::Failed => p.error,
-        Status::Downloading | Status::Tagging | Status::Downloaded | Status::Converting => p.accent,
-        // Nothing to act on: not downloaded, deliberately left alone, or the user's own file.
-        Status::Pending | Status::Have | Status::Gone | Status::Skipped | Status::Local => p.muted,
-    }
+    crate::theme::status_color(status, p)
 }
 
 /* Columns, not characters. A Korean or Japanese glyph takes two cells and a

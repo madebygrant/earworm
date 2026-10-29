@@ -223,7 +223,9 @@
     {
       "Meta": {
         "album": "Neu!",
+        "artist": "Neu!",
         "index": 1,
+        "title": "Hallogallo",
         "year": null
       }
     },
@@ -456,6 +458,7 @@
       "label": "queued",
       "look": false,
       "settled": false,
+      "slot": "muted",
       "status": "Pending",
       "tally": null
     },
@@ -463,6 +466,7 @@
       "label": "on disk",
       "look": false,
       "settled": true,
+      "slot": "muted",
       "status": "Have",
       "tally": 8
     },
@@ -470,6 +474,7 @@
       "label": "fetching",
       "look": false,
       "settled": false,
+      "slot": "accent",
       "status": "Downloading",
       "tally": null
     },
@@ -477,6 +482,7 @@
       "label": "fetched",
       "look": false,
       "settled": false,
+      "slot": "accent",
       "status": "Downloaded",
       "tally": null
     },
@@ -484,6 +490,7 @@
       "label": "tagging",
       "look": false,
       "settled": false,
+      "slot": "accent",
       "status": "Tagging",
       "tally": null
     },
@@ -491,6 +498,7 @@
       "label": "convert",
       "look": false,
       "settled": false,
+      "slot": "accent",
       "status": "Converting",
       "tally": null
     },
@@ -498,6 +506,7 @@
       "label": "ok",
       "look": false,
       "settled": true,
+      "slot": "cursor",
       "status": "Ok",
       "tally": 0
     },
@@ -505,6 +514,7 @@
       "label": "manual",
       "look": false,
       "settled": true,
+      "slot": "cursor",
       "status": "Manual",
       "tally": 1
     },
@@ -512,6 +522,7 @@
       "label": "guessed",
       "look": true,
       "settled": true,
+      "slot": "unsure",
       "status": "Kept",
       "tally": 2
     },
@@ -519,6 +530,7 @@
       "label": "unsure",
       "look": true,
       "settled": true,
+      "slot": "warn",
       "status": "Weak",
       "tally": 3
     },
@@ -526,6 +538,7 @@
       "label": "no match",
       "look": true,
       "settled": true,
+      "slot": "unsure",
       "status": "NoMatch",
       "tally": 4
     },
@@ -533,6 +546,7 @@
       "label": "failed",
       "look": true,
       "settled": true,
+      "slot": "error",
       "status": "Failed",
       "tally": 5
     },
@@ -540,6 +554,7 @@
       "label": "gone",
       "look": false,
       "settled": true,
+      "slot": "muted",
       "status": "Gone",
       "tally": 6
     },
@@ -547,6 +562,7 @@
       "label": "skipped",
       "look": false,
       "settled": true,
+      "slot": "muted",
       "status": "Skipped",
       "tally": 7
     },
@@ -554,6 +570,7 @@
       "label": "local",
       "look": false,
       "settled": true,
+      "slot": "muted",
       "status": "Local",
       "tally": 9
     }

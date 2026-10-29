@@ -20,7 +20,7 @@ use earworm_core::picker::Hit;
 use earworm_core::protocol::{self, AlbumRow, ArtistRow, Cmd, Msg, Reply, Shelf, Status, Track};
 use earworm_core::theme::{Palette, Themes};
 use earworm_core::view::{self, Narrow, ShelfNarrow, Sort};
-use earworm_core::{lookup, tag, tools, worker, ytdlp};
+use earworm_core::{deps, lookup, tag, tools, worker, ytdlp};
 use ratatui_core::style::Color;
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, RunEvent, State};
@@ -44,7 +44,20 @@ struct Sent {
     msg: serde_json::Value,
 }
 
+/// What the first screens say about the setup before the worker has said anything.
+#[derive(Clone, Default, Serialize)]
+struct Setup {
+    /// The header's right half, as the terminal's describes the run.
+    text: String,
+    format: String,
+    rows: Vec<config::Row>,
+    /// Where playlists land, with the home folder as `~`.
+    dir: String,
+    key: bool,
+}
+
 struct Shell {
+    setup: Setup,
     // Taken by `start`, so the worker starts once the page is listening and its first messages reach it.
     config: Mutex<Option<Result<Config, String>>>,
     /// Every message sent, so a page that reloads rebuilds its state by applying them again.
@@ -128,6 +141,7 @@ impl Shell {
 struct Boot {
     theme: Theme,
     statuses: Vec<Word>,
+    setup: Setup,
     /// Everything the worker has sent so far, minus questions already answered. Empty on a first start.
     replay: Vec<Sent>,
 }
@@ -141,12 +155,14 @@ struct Word {
     settled: bool,
     /// Its column in the tally, or `None` while it is still in flight.
     tally: Option<u8>,
+    /// The palette slot it is drawn in, which is also the CSS variable's name.
+    slot: &'static str,
 }
 
 fn words() -> Vec<Word> {
     protocol::TALLY
         .iter()
-        .map(|s| Word { status: *s, label: s.label(), look: s.wants_a_look(), settled: s.settled(), tally: s.tally() })
+        .map(|s| Word { status: *s, label: s.label(), look: s.wants_a_look(), settled: s.settled(), tally: s.tally(), slot: earworm_core::theme::status_slot(*s) })
         .collect()
 }
 
@@ -184,13 +200,54 @@ fn start(app: tauri::AppHandle, shell: State<Shell>) -> Result<Boot, String> {
     }
     drop(slot);
     let replay = replayable(&shell.history.lock().unwrap(), &shell.answered.lock().unwrap());
-    Ok(Boot { theme: shell.theme(None), statuses: words(), replay })
+    Ok(Boot { theme: shell.theme(None), statuses: words(), setup: shell.setup.clone(), replay })
 }
 
 // A question shows up again on replay only while nobody has answered it.
 fn replayable(history: &[Sent], answered: &HashSet<u64>) -> Vec<Sent> {
     let asked = |msg: &serde_json::Value| ["Ask", "Pick"].iter().find_map(|k| msg.get(k)?.get("id")?.as_u64());
     history.iter().filter(|s| asked(&s.msg).is_none_or(|id| !answered.contains(&id))).cloned().collect()
+}
+
+/// One row of `--check`'s tools table, for the first screen.
+#[derive(Serialize)]
+struct Tool {
+    bin: &'static str,
+    what: &'static str,
+    required: bool,
+    version: Option<String>,
+    at: Option<String>,
+    /// What to run to get it: the Homebrew line, or the `[tools]` path that is not there.
+    fix: String,
+}
+
+fn probe_tools() -> Vec<Tool> {
+    deps::probe_all()
+        .into_iter()
+        .map(|f| Tool {
+            bin: f.dep.bin,
+            what: f.dep.what,
+            required: f.dep.required,
+            fix: match &f.configured {
+                Some(path) if f.at.is_none() => format!("not at {path} · check [tools] in the config"),
+                _ => format!("brew install {}", f.dep.formula),
+            },
+            version: f.version,
+            at: f.at,
+        })
+        .collect()
+}
+
+// Off the main thread: each tool gets up to three seconds to say its version.
+#[tauri::command]
+async fn tools() -> Vec<Tool> {
+    tauri::async_runtime::spawn_blocking(probe_tools).await.unwrap_or_default()
+}
+
+/// Ends the app the way the terminal's `q` does; `shut_down` runs on the way out.
+#[tauri::command]
+fn quit(app: tauri::AppHandle) {
+    app.exit(0);
 }
 
 #[tauri::command]
@@ -367,6 +424,8 @@ fn probe() {}
 // it is blocked on, and give a tag write that has started a moment to finish, since quitting mid-write
 // truncates the file.
 fn shut_down(shell: &Shell) {
+    // Before the stops below, which also end the version probes it runs.
+    record(shell);
     shell.cancel.store(true, Ordering::SeqCst);
     ytdlp::stop();
     lookup::stop();
@@ -377,6 +436,51 @@ fn shut_down(shell: &Shell) {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+// Debug builds with `EARWORM_SESSION` set write the session's messages there on the way out, which is what
+// the page's browser preview replays to draw each screen.
+#[cfg(debug_assertions)]
+fn record(shell: &Shell) {
+    if let Some(path) = std::env::var_os("EARWORM_SESSION") {
+        let msgs: Vec<serde_json::Value> = shell.history.lock().unwrap().iter().map(|s| s.msg.clone()).collect();
+        let session = serde_json::json!({
+            "theme": shell.theme(None),
+            "statuses": words(),
+            "setup": shell.setup,
+            "tools": probe_tools(),
+            "msgs": msgs,
+        });
+        let _ = std::fs::write(path, serde_json::to_string_pretty(&session).unwrap_or_default());
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn record(_: &Shell) {}
+
+// Debug builds with `EARWORM_DRIVE` set run each line appended to that file as JavaScript in the page, so a
+// check can press keys in this window alone rather than typing into whichever app has the focus.
+#[cfg(debug_assertions)]
+fn drive(app: &tauri::AppHandle) {
+    let Some(path) = std::env::var_os("EARWORM_DRIVE") else { return };
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let mut done = 0;
+        loop {
+            std::thread::sleep(Duration::from_millis(100));
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            let lines: Vec<&str> = text.lines().collect();
+            for line in &lines[done.min(lines.len())..] {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.eval(*line);
+                }
+            }
+            done = lines.len();
+        }
+    });
+}
+
+#[cfg(not(debug_assertions))]
+fn drive(_: &tauri::AppHandle) {}
 
 fn main() {
     let matches = Cli::command().get_matches();
@@ -389,6 +493,13 @@ fn main() {
         Ok(cfg) => {
             tools::configure(&cfg.tools);
             Shell {
+                setup: Setup {
+                    text: cfg.describe(),
+                    format: cfg.format.clone(),
+                    rows: cfg.rows(),
+                    dir: tilde(&cfg.dir),
+                    key: cfg.acoustid_key.is_some(),
+                },
                 look: Mutex::new(Look { themes: cfg.themes.clone(), name: cfg.theme_name.clone(), palette: cfg.theme }),
                 config_file: cfg.config_file.clone(),
                 overridden: cfg.theme_overridden,
@@ -401,9 +512,18 @@ fn main() {
     *shell.config.lock().unwrap() = Some(built);
     tauri::Builder::default()
         .manage(shell)
+        // Thumbnails are files on disk, and the webview may read that one folder of them.
+        .setup(|app| {
+            drive(app.handle());
+            if let Some(cache) = tag::thumb_cache() {
+                let _ = std::fs::create_dir_all(&cache);
+                let _ = app.asset_protocol_scope().allow_directory(&cache, false);
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             start, send, answer, stop, theme_next, theme_set, cheat, rows, shelf_rows, search, artist_rows,
-            release_rows, take, flip, invert, gate_marks, counts, next_kind, next_sort, probe
+            release_rows, take, flip, invert, gate_marks, counts, next_kind, next_sort, probe, tools, quit
         ])
         .build(tauri::generate_context!())
         .expect("the window could not be built")
@@ -414,12 +534,21 @@ fn main() {
         });
 }
 
+fn tilde(path: &std::path::Path) -> String {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    match home.as_deref().and_then(|h| path.strip_prefix(h).ok()) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
 impl Shell {
     fn bare() -> Shell {
         let themes = Themes::default();
         let (name, palette) = themes.after("");
         let look = Look { name: name.to_string(), palette, themes };
         Shell {
+            setup: Setup::default(),
             config: Mutex::new(None),
             history: Arc::new(Mutex::new(Vec::new())),
             answered: Mutex::new(HashSet::new()),

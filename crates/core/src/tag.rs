@@ -494,8 +494,12 @@ pub const THUMB_MAX: u16 = 256;
 /// A small copy of a file's embedded cover for a front end to show, or `None` when it has no art.
 /// Only made when a front end asks, since the terminal draws none and each new one is an ffmpeg run.
 pub fn thumbnail(file: &Path) -> Option<PathBuf> {
-    let cache = crate::config::xdg_home("XDG_CACHE_HOME", ".cache")?.join("earworm").join("thumbs");
-    thumbnail_in(&cache, file)
+    thumbnail_in(&thumb_cache()?, file)
+}
+
+/// Where `thumbnail` keeps them, which a webview has to be allowed to read.
+pub fn thumb_cache() -> Option<PathBuf> {
+    Some(crate::config::xdg_home("XDG_CACHE_HOME", ".cache")?.join("earworm").join("thumbs"))
 }
 
 // Named for the cover's own bytes, so a tag write that leaves the art alone reuses it and an album's

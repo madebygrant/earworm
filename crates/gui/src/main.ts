@@ -5,7 +5,15 @@ import "@fontsource/jetbrains-mono/700.css";
 import "../../../docs/mockups/tokens.css";
 import "../../../docs/mockups/base.css";
 import "./app.css";
+import "./screens.css";
 import { mount } from "svelte";
 import App from "./App.svelte";
 
+if (import.meta.env.DEV && !("__TAURI_INTERNALS__" in window)) {
+  const { previewState } = await import("./preview");
+  const { ui } = await import("./lib/ui.svelte");
+  ui.quitting = previewState.quit;
+  ui.logs = previewState.logs;
+  if (previewState.mode) ui.mode = previewState.mode;
+}
 mount(App, { target: document.body });
