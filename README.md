@@ -17,6 +17,12 @@ earworm
 earworm 'https://youtube.com/playlist?list=...'
 ```
 
+There is also a [desktop app](docs/gui.md) for macOS and Linux, with the
+same keys and the same library. Each published
+[release](https://github.com/madebygrant/earworm/releases) carries it, and
+[installing](docs/install.md#the-desktop-app) covers the one-time step
+macOS asks for because the app is not signed.
+
 ## Features
 
 yt-dlp downloads the audio. earworm does the rest, which is what separates a
@@ -93,6 +99,7 @@ turns out to be 361 tracks of seminar recordings.
 | | |
 | --- | --- |
 | [docs/install.md](docs/install.md) | tools, the AcoustID key, `--check` |
+| [docs/gui.md](docs/gui.md) | the desktop app, screen by screen |
 | [docs/configuration.md](docs/configuration.md) | the config file, every flag |
 | [docs/workflow.md](docs/workflow.md) | picks, filters, fixing tags, retry |
 | [docs/formats.md](docs/formats.md) | m4a, opus, mp3, flac, and what converts |

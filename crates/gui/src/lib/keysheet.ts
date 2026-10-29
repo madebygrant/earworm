@@ -42,7 +42,7 @@ export const SHEETS: Record<View, [string, Group[]]> = {
     ["leave", [["esc", "filter, then the library"], ["q ^c", "quit"]]],
   ]],
   Artist: ["artist page", [
-    ["move", [...MOVE, ["tab", "releases, top tracks, related"]]],
+    ["move", [...MOVE, ["tab", "releases, top tracks, related"], ["w", "tiles or list"]]],
     ["page", [["enter", "open a related artist"], ["a", "albums and EPs, or all"], ["o", "their folders"]]],
     ["leave", [["esc", "the page before"], ["q ^c", "quit"]]],
   ]],

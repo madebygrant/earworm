@@ -2,7 +2,7 @@
 // (`EARWORM_SESSION`) with IPC mocked, so each screen can be drawn and captured where the app's own
 // window cannot be. `?file=` names the session, `?upto=` how many of its messages to apply, and `quit`,
 // `logs`, `mode` and `tokens` set the page's own state. Never in a build.
-import { mockConvertFileSrc, mockIPC, mockWindows } from "@tauri-apps/api/mocks";
+import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 
 const q = new URLSearchParams(location.search);
 const session = await fetch(`/@fs${q.get("file")}`).then((r) => r.json());
@@ -14,7 +14,9 @@ const asks = (m: unknown) => typeof m === "object" && m !== null && ("Ask" in m 
 const msgs = upto.filter((m, i) => !asks(m) || i === upto.length - 1);
 
 mockWindows("main");
-mockConvertFileSrc("macos");
+// Vite serves the files `server.fs.allow` names at `/@fs`, so a session's covers draw where `asset:` cannot load.
+const internals = (window as unknown as { __TAURI_INTERNALS__: { convertFileSrc: (path: string) => string } }).__TAURI_INTERNALS__;
+internals.convertFileSrc = (path) => `/@fs${encodeURI(path)}`;
 mockIPC(
   (cmd, args) => {
     const a = args as Record<string, unknown>;

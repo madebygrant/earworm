@@ -391,6 +391,7 @@ async function trackKey(e: KeyboardEvent) {
   else if (k === "n" || k === "N") attention(k === "n");
   else if (k === "l") ui.logs = !ui.logs;
   else if (k === "L" && ui.logs) ui.logsTall = !ui.logsTall;
+  else if ((k === "J" || k === "K") && ui.logs) document.querySelector(".log")?.scrollBy({ top: k === "J" ? 48 : -48 });
   else if (k === "w") ui.mode = ui.mode === "tiles" ? "list" : "tiles";
   else if (k === "M") {
     const got = t ? await take({ ArtistOf: t.index }) : null;

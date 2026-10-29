@@ -238,7 +238,7 @@ flag, opens for a fresh macOS user after Open Anyway and finds the Homebrew
 tools; `codesign -dv` shows the ad-hoc signature; the AppImage runs on a
 stock Ubuntu LTS.
 
-## 10. Docs
+## 10. Docs [done 2026-10-29]
 
 - README: a GUI section and install steps, including the unsigned-app
   first launch on macOS.

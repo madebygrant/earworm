@@ -27,7 +27,8 @@
   (`applies_the_history_then_the_held_messages_it_did_not_hold`). The cost is
   memory: a long session's yt-dlp log is kept twice.
 - **A search clears `stop` when it is sent, as the terminal's does.** Nothing
-  else clears it, so one Esc on a search would end every later one at once.
+  else clears it, so one Esc on a search would end every later one at once
+  (`a_search_clears_the_stop_and_nothing_else_does`).
 - **The reducer is tested against what the worker sends.** `msgs.json` is
   written from `protocol::test_support::every_msg`, the samples the JSON
   round trip uses, and `the_recorded_messages_are_every_message_the_worker_sends`
@@ -46,12 +47,15 @@
   through `Kept::said`.** The same calls the terminal's `^t` makes, so a secret theme is never written and
   `--no-config` keeps the file out; why this write skips the worker is in
   `themes-and-colour.md`.
+  (`a_kept_theme_is_written_unless_it_is_secret_or_the_file_is_out`).
 - **A config that does not build still opens the window.** Launched from the
   Finder there is no terminal to print to, so the error is the window's
-  content, painted in the first built-in.
+  content, painted in the first built-in. Nothing tests it.
 - **The fonts are bundled.** JetBrains Mono comes from `@fontsource` into the
   build; a desktop app that fetched its type would draw in a fallback
   offline.
+  Nothing tests it; the release bundle was checked to carry them and the
+  licence.
 - **A status's colour is core's `theme::status_slot`.** The terminal's
   `status_color` reads the same table, and the page gets the slot name with
   each status's word at start, which is also the CSS variable to paint it in.
@@ -89,6 +93,8 @@
   interval never fired, the list snapped back to the cursor while somebody
   scrolled it, and the whole track list crossed IPC for every line of yt-dlp
   output. Take the field into its own `$derived` first.
+  Nothing tests it; the reducer tests have no DOM, so it was checked in the
+  running app.
 - **A thumbnail is asked for once, and again after an `Idle` that left it
   unanswered.** The screens ask whenever a reply lands, so without
   `thumbsAsked` the files still on their way went out again; a batch the
@@ -98,7 +104,7 @@
 - **Debug builds print a `probe` line per change.** The page reports the
   rail, the theme and the computed accent to stderr, which is how a check
   reads the window where screen capture is not allowed. Release builds
-  compile the command to nothing.
+  compile the command to nothing. Nothing tests it.
 - **Debug builds record a session, and the browser replays it.** With
   `EARWORM_SESSION=<file>` the debug app writes every message, the boot data
   and the tools on the way out (before the stops, which would end the
@@ -107,14 +113,16 @@
   `quit`, `logs`, `mode` and `tokens` set the page's own state, `tokens`
   keeping the stylesheet's graphite for comparing with
   `docs/mockups/shots/`. A question in the history is open only when it is
-  the last message applied, since the page's answers are not in it. Never in
-  a build.
+  the last message applied, since the page's answers are not in it. Covers
+  load through Vite's `/@fs`, so the thumbnail cache is in `server.fs.allow`;
+  a session recorded with another `XDG_CACHE_HOME` needs the preview started
+  with the same one. Never in a build. Nothing tests it.
 - **A check presses keys through `EARWORM_DRIVE`, never the system's
   keyboard.** Debug builds with it set run each line appended to that file
   as JavaScript in this window's page. Synthetic keystrokes go to whichever
   app has the focus, which on a machine somebody is using is not this one:
   the first exit check typed into a browser that way. Release builds compile
-  it to nothing, like `probe`.
+  it to nothing, like `probe`. Nothing tests it.
 - **New releases, the picker's marks and achievements are core's too.** The
   page asks `mark_new` and `unread` as reducer effects, as it asks for the
   pick gate's marks; it keeps the picker's marks as the ordered list and
@@ -132,6 +140,7 @@
   tracked it, the effect was its own trigger and the window spun at full
   CPU. An effect names what it depends on and calls the refresh inside
   `untrack`.
+  Nothing tests it; checked in the running app.
 - **A question can carry pictures and a path kind.** `Prompt::Choice.pictures`
   gives the cover menu's candidates as URLs, drawn as a grid, and
   `Prompt::Input.browse` marks a path question so the dialog offers the
@@ -150,6 +159,7 @@
 - **An achievement toast dismissed by a key is recorded.** Whoever pressed the
   key saw it, as in the terminal; putting it back to wait made it reappear at
   once and swallow the next key, over and over while somebody typed.
+  Nothing tests it; checked through `EARWORM_DRIVE`.
 - **The bundle is ad-hoc signed, never unsigned.** Apple Silicon will not
   run a binary with no signature, and bundling rewrites the app after the
   linker signed it, so `bundle.macOS.signingIdentity` is `"-"` and the

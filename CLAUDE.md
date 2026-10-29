@@ -83,7 +83,10 @@ functions as commands. `src/lib/reducer.ts` is the page's `App::apply`, `src/lib
 screens past the run and the library;
 `src/lib/msgs.json` is recorded from core's samples for its tests. Run it
 with `pnpm dev` in `crates/gui` and `cargo run -p earworm-gui`, or
-`pnpm tauri dev`; `pnpm test` runs the reducer tests.
+`pnpm tauri dev`; `pnpm test` runs the reducer tests. `pnpm tauri build`
+makes the ad-hoc signed `.app` and `.dmg`, and `.github/workflows/desktop.yml`
+builds those and the Linux AppImage and `.deb` for a `v*` tag, attaching
+them to a draft release that is published by hand.
 
 ## Rules
 

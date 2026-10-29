@@ -1618,6 +1618,19 @@ mod tests {
         assert_eq!(cfg.format, "flac", "another setting was lost");
     }
 
+    // A secret theme in the file would stop the next start.
+    #[test]
+    fn a_kept_theme_is_written_unless_it_is_secret_or_the_file_is_out() {
+        let file = temp("keeptheme");
+        std::fs::write(&file.path, "theme = \"warm\"\n").unwrap();
+        let path = std::path::Path::new(&file.path);
+        assert!(matches!(keep_theme(Some(path), crate::theme::SECRETS[0].0), Kept::Secret));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "theme = \"warm\"\n", "a secret theme was written");
+        assert!(matches!(keep_theme(None, "cool"), Kept::Session));
+        assert!(matches!(keep_theme(Some(path), "cool"), Kept::Saved));
+        assert!(std::fs::read_to_string(path).unwrap().contains("theme = \"cool\""));
+    }
+
     /// A file with no `theme` line at all gains one rather than being ignored.
     #[test]
     fn saving_a_theme_into_a_file_that_never_had_one_adds_it() {

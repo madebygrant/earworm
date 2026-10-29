@@ -21,8 +21,9 @@
   const errors = $derived(m.logs.some((l) => l.includes("ERROR")));
 
   const first = $derived(firstScreen(m));
+  const PASTE = navigator.platform.startsWith("Mac") ? "⌘v" : "^v";
   const hints = $derived.by((): [string, string][] => {
-    if (first) return [["enter", "sync"], ["⌘v", "paste"], ["esc", "quit"]];
+    if (first) return [["enter", "sync"], [PASTE, "paste"], ["esc", "quit"]];
     if (m.picking !== null) return [["space", "mark"], ["m", "same status"], ["a", "all"], ["i", "invert"], ["enter", "download"], ["esc", "none"]];
     if (m.view === "Library") return [["enter", "open"], ["n", "new link"], ["N", "new custom playlist"], ["t", "find a track"], ["S", "sync"], ["b", "artists"], [",", "settings"], ["h", "keys"]];
     if (m.view === "Found") return [["enter", "open its folder"], ["tab", "mark"], ["P", "add to playlist"], ["/", "edit"], ["esc", "library"]];

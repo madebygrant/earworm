@@ -277,12 +277,16 @@ fn quit(app: tauri::AppHandle) {
 
 #[tauri::command]
 fn send(cmd: Cmd, shell: State<Shell>) -> bool {
-    // A search clears the stop before it is sent, as the terminal's does, so an Esc cannot land between the
-    // two and a stop from an earlier search does not end this one.
-    if matches!(cmd, Cmd::GetAlbum { .. } | Cmd::GetTop { .. }) {
-        shell.stop.store(false, Ordering::SeqCst);
-    }
+    arm(&cmd, &shell.stop);
     shell.cmds.lock().unwrap().as_ref().is_some_and(|tx| tx.send(cmd).is_ok())
+}
+
+// A search clears the stop before it is sent, as the terminal's does, so an Esc cannot land between the
+// two and a stop from an earlier search does not end this one.
+fn arm(cmd: &Cmd, stop: &AtomicBool) {
+    if matches!(cmd, Cmd::GetAlbum { .. } | Cmd::GetTop { .. }) {
+        stop.store(false, Ordering::SeqCst);
+    }
 }
 
 #[tauri::command]
@@ -781,6 +785,19 @@ mod tests {
         let themes = Themes::default();
         assert!(light(&themes.named("light").unwrap()));
         assert!(!light(&themes.named("graphite").unwrap()));
+    }
+
+    // Nothing else clears it, so one Esc on a search would otherwise end every later one at once.
+    #[test]
+    fn a_search_clears_the_stop_and_nothing_else_does() {
+        let stop = AtomicBool::new(true);
+        arm(&Cmd::Retry, &stop);
+        assert!(stop.load(Ordering::SeqCst), "a command that is not a search cleared the stop");
+        arm(&Cmd::GetTop { artist: "Can".into(), titles: vec!["Vitamin C".into()] }, &stop);
+        assert!(!stop.load(Ordering::SeqCst));
+        stop.store(true, Ordering::SeqCst);
+        arm(&Cmd::GetAlbum { artist: "Can".into(), title: "Ege Bamyasi".into() }, &stop);
+        assert!(!stop.load(Ordering::SeqCst));
     }
 
     // The page asks on every boot, and a reload boots it again.

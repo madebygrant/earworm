@@ -56,7 +56,7 @@ and choosing Open no longer gets past this. Use one of these instead:
 
 Either way you only do it once. The app has no auto-updater, because
 updating itself would need a signed update. When a newer release is out,
-the app says so once, naming the releases page. Turn that off with
+the app says so once each time it starts, naming the releases page. Turn that off with
 `update_check = false`.
 
 ### Linux
