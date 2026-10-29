@@ -3620,7 +3620,7 @@ mod tests {
                 header: "YouTube playlist URL".into(),
                 note: "a playlist, a video or a file of links  ·  esc quits".into(),
                 value: String::new(),
-                escape: crate::protocol::Escape::Quit,
+                escape: crate::protocol::Escape::Quit, browse: None,
             } });
         app.intro_done = true;
         let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
@@ -4850,7 +4850,7 @@ mod tests {
                     "sync another playlist".into(),
                     "quit".into(),
                 ],
-                escape: crate::protocol::Escape::Keep,
+                escape: crate::protocol::Escape::Keep, pictures: Vec::new(),
             } });
 
         let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
@@ -5068,7 +5068,7 @@ mod tests {
                     note: String::new(),
                     header: "Title".into(),
                     value: "Autobahn".into(),
-                    escape: crate::protocol::Escape::Skip,
+                    escape: crate::protocol::Escape::Skip, browse: None,
                 } });
             for _ in 0..back {
                 app.input_move(false);
@@ -5950,7 +5950,7 @@ mod tests {
                 note: String::new(),
                 header: "YouTube playlist URL".into(),
                 value: String::new(),
-                escape: crate::protocol::Escape::Quit,
+                escape: crate::protocol::Escape::Quit, browse: None,
             } });
         assert!(!asked.intro(), "it hid the question the worker is waiting on");
 

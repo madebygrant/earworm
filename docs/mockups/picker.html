@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Track picker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css"><link rel="stylesheet" href="base.css">
+<style>
+.r.pk { grid-template-columns: 2ch 1fr auto; }
+.r.pk .g { color: var(--accent); }
+.r.pk .on { font-weight: 700; }
+.r.pk u { text-decoration-color: var(--accent); text-underline-offset: 3px; }
+.r.pk .src { color: var(--muted); }
+.order { list-style: none; padding: 0; font-size: var(--s-13); margin-top: 8px; counter-reset: o; }
+.order li { counter-increment: o; display: grid; grid-template-columns: 3ch 1fr; }
+.order li::before { content: counter(o); color: var(--muted); }
+.order li.out { color: var(--muted); text-decoration: line-through; }
+</style>
+</head>
+<body>
+<script src="directions/data.js"></script>
+<script src="shell.js"></script>
+<script>
+// `a` on a list reopens the picker with its tracks marked: • stays, − leaves, ✓ joins. Shape, never colour alone.
+const HITS = [["Sowiesoso", "Cluster", "Krautrock", "•", [0, 1, 2, 3]], ["Hollywood", "Cluster", "Ambient 1975", "✓", [1, 2, 3, 4]], ["Rubato", "Cluster", "Ambient 1975", "−", [1, 2, 3, 4]],
+  ["Sowiesoso", "Cluster", "Ambient 1975", "", [0, 1, 2, 3]], ["Caramel", "Cluster", "Zuckerzeit", "", [1, 2, 3, 4]], ["Rote Riki", "Cluster", "Zuckerzeit", "", [1, 2, 3, 4]],
+  ["Hollywood", "Cluster", "Zuckerzeit", "", [1, 2, 3, 4]], ["Caramel", "Cluster", "Chill Evenings", "", [1, 2, 3, 4]]];
+const hl = (s, at) => [...s].map((c, i) => at.includes(i) ? `<u>${esc(c)}</u>` : esc(c)).join("");
+const rows = HITS.map(([title, artist, folder, g, at], i) => `<div class="r pk ${i === 1 ? "cur" : ""}"><span class="g">${g}</span>
+  <span class="t ${g && g !== "−" ? "on" : ""}">${esc(title)} <span class="a">- ${hl(artist, at)}</span></span><span class="src">${esc(folder)}</span></div>`).join("");
+mount({
+  head: { folder: "Late Night", stage: "pick tracks", count: "", right: "9 in list · +1 −1 · 8 of 211" },
+  railOpts: { current: "Late Night", folders: [...FOLDERS.slice(0, 5), { name: "Late Night", kind: "custom", count: 9 }, ...FOLDERS.slice(5)] },
+  main: `<section class="view"><div class="band"><b>add to Late Night</b><span>clus<span class="caret">&nbsp;</span></span><span class="end">9 in list · +1 −1 · 8 of 211</span></div>${rows}</section>`,
+  side: `<h2>Late Night, after Enter</h2><p class="say">Marks join in the order you made them. Unmarking a track the list holds takes it off the list, never off the disk.</p>
+    <ol class="order"><li>Autobahn</li><li>Phaedra</li><li>Sowiesoso</li><li>Aguirre</li><li class="out">Rubato</li><li>Karussell</li><li>Traummaschine</li><li>Electric Junk</li><li>Watussi</li><li>Bayreuth Return</li><li>Hollywood</li></ol>`,
+  foot: { hints: [["enter", "+1 −1"], ["tab", "mark"], ["^a", "all"], ["F2", "marked"], ["esc", "cancel"], ["F1", "keys"]] },
+});
+</script>
+</body>
+</html>

@@ -6,14 +6,14 @@ export type Status =
   | "Pending" | "Have" | "Downloading" | "Downloaded" | "Tagging" | "Converting" | "Ok" | "Manual"
   | "Kept" | "Weak" | "NoMatch" | "Failed" | "Gone" | "Skipped" | "Local";
 
-/** One status's word and rules, sent by core at start so the page keeps no copy of them. */
+// One status's word and rules, sent by core at start so the page keeps no copy of them.
 export interface Word {
   status: Status;
   label: string;
   look: boolean;
   settled: boolean;
   tally: number | null;
-  /** The palette slot it is drawn in, which is also its CSS variable. */
+  // The palette slot it is drawn in, which is also its CSS variable.
   slot: string;
 }
 
@@ -69,10 +69,19 @@ export interface TopRow { title: string; album: string; have: boolean }
 export interface RelatedRow { name: string; fans: number; tracks: number }
 
 export type Escape = "Skip" | "Quit" | "Keep";
+// What a typed path names, for the system's file dialog.
+export type Browse = "Folder" | "File";
 export type Prompt =
-  | { Choice: { header: string; note: string; options: string[]; escape: Escape } }
+  | { Choice: { header: string; note: string; options: string[]; escape: Escape; pictures: (string | null)[] } }
   | { Form: { header: string; note: string; fields: [string, string][]; escape: Escape } }
-  | { Input: { header: string; note: string; value: string; escape: Escape } };
+  | { Input: { header: string; note: string; value: string; escape: Escape; browse: Browse | null } };
+
+// One match from core's picker matcher: where it is in the library and which characters matched.
+export interface Hit { shelf: number; file: number; score: number; at: number[]; folder_at: number[]; label: string }
+// A picker row: the match, the track it names, and its marks.
+export interface PickRow extends Hit { folder: string; name: string; marked: boolean; held: boolean }
+// An achievement as the toast shows it.
+export interface Prize { id: string; label: string; hint: string }
 
 export interface SettingRow {
   key: string;
@@ -127,7 +136,7 @@ export type Msg =
 
 export type Reply = { Choice: number } | { Fields: string[] } | { Text: string } | { Picked: number[] } | "Cancel";
 
-/** The variant a message is, as serde tags it. */
+// The variant a message is, as serde tags it.
 export function variant(msg: Msg): string {
   return typeof msg === "string" ? msg : Object.keys(msg)[0];
 }

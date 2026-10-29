@@ -3,6 +3,7 @@
   import type { Shelf, Status, Track } from "../lib/protocol";
   import { app } from "../lib/store.svelte";
   import { label, names, short, tone } from "../lib/ui.svelte";
+  import { complete, customRow, foundAt, relatedRows, releaseSelected, screens, topRows } from "../lib/screens.svelte";
 
   interface Props {
     /** Runs the key a button stands for, so a click and the key are one action. */
@@ -57,6 +58,14 @@
 
   const kindWord = (s: Shelf) => (s.kind === "Album" ? "● album" : s.kind === "Custom" ? "≡ custom playlist" : s.url ? "▤ playlist" : "◆ local folder");
   const missing = $derived(shelf ? shelf.files.filter(([, here]) => !here).map(([name]) => name) : []);
+  const found = $derived(m.view === "Found" ? foundAt() : null);
+  const entry = $derived(m.view === "Playlist" ? customRow() : undefined);
+  const release = $derived(m.view === "Artist" && screens.section === "Releases" ? releaseSelected() : undefined);
+  const top = $derived(m.view === "Artist" && screens.section === "Top" ? topRows()[screens.topAt] : undefined);
+  const related = $derived(m.view === "Artist" && screens.section === "Related" ? relatedRows()[screens.relatedAt] : undefined);
+  const order = $derived(m.view === "Pick" ? screens.pick.marks.map(([, file]) => file.replace(/\.[^.]+$/, "").replace(/^\d+\s*-\s*/, "")) : []);
+  // Core's answer to what Enter takes off, never worked out here.
+  const leaving = $derived(m.view === "Pick" ? screens.pick.removing : []);
 </script>
 
 <aside class="detail">
@@ -118,5 +127,28 @@
         <button onclick={() => press(key === "enter" ? "Enter" : key)}><span class="kc">{key}</span>{what}</button>
       {/each}
     </div>
+  {:else if found}
+    {@const [s, [file, here]] = found}
+    <h2>{file.replace(/\.[^.]+$/, "")}</h2>
+    <p class="say">{here ? `In ${s.name}. Enter opens it on this track; tab marks it for P.` : "Listed in the folder's manifest, but the file is gone."}</p>
+    <dl class="kv"><dt>folder</dt><dd>{s.name}</dd><dt>file</dt><dd>{short(`${s.path}/${file}`)}</dd></dl>
+  {:else if entry}
+    <h2>{entry.label}</h2>
+    <p class="say">{entry.path ? `From ${entry.folder}. A list holds the track, not the file, so its tags are edited there: Enter goes to it.` : `${entry.file} is not on disk. x takes it off the list.`}</p>
+    <dl class="kv"><dt>folder</dt><dd>{entry.folder}</dd><dt>file</dt><dd>{entry.file}</dd></dl>
+  {:else if m.view === "Pick"}
+    <h2>{screens.pick.name}, after Enter</h2>
+    <p class="say">Marks join in the order you made them. Unmarking a track the list holds takes it off the list, never off the disk.</p>
+    <ol class="order">{#each order as t, i (i)}<li>{t}</li>{/each}{#each leaving as [folder, n] (`${folder}/${n}`)}<li class="out">{n.replace(/\.[^.]+$/, "")}</li>{/each}</ol>
+  {:else if release}
+    <h2>{release.title}</h2>
+    <p class="say">{release.kind}{release.year ? `, ${release.year}` : ""}. {release.have === 0 ? "None of it is here." : complete(release) ? "All of it is here." : release.of === null ? `${release.have} of its tracks are here; Deezer has not said how many it has.` : `${release.have} of its ${release.of} tracks are here.`}{release.new ? " Out since you last looked." : ""}</p>
+    <div class="acts"><button onclick={() => press("o")}><span class="kc">o</span>their folders</button></div>
+  {:else if top}
+    <h2>{top.title}</h2>
+    <p class="say">{top.have ? "Already in the library." : "Not in the library."}{top.album ? ` From ${top.album}.` : ""}</p>
+  {:else if related}
+    <h2>{related.name}</h2>
+    <p class="say">{related.fans.toLocaleString()} fans on Deezer.{related.tracks ? ` ${related.tracks} of their tracks are here.` : ""} Enter opens their page.</p>
   {/if}
 </aside>

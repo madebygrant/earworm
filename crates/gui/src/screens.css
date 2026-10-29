@@ -53,3 +53,61 @@
 .detail dd { user-select: text; }
 
 .band input { flex: 1; min-width: 0; outline: none; color: var(--ink); caret-color: var(--ink); font-weight: 700; }
+
+/* overlays.html: the key sheet and the achievement toast */
+.dialog.keysheet { width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 120px); overflow: auto; }
+.keys { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 3ch; font-size: var(--s-13); }
+.keys h4 { font-size: var(--s-12); color: var(--muted); font-weight: 400; margin-bottom: 2px; }
+.keys dl { display: grid; grid-template-columns: 12ch 1fr; column-gap: 1ch; }
+.keys dt { color: var(--accent); }
+.keys .legend { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 0 2ch; }
+.toast { position: fixed; top: 60px; right: 16px; z-index: 7; border: 1px solid var(--accent); background: var(--surface); padding: 10px 14px; display: grid; grid-template-columns: auto 1fr; gap: 4px 2ch; align-items: center; max-width: 44ch; }
+.toast .big { font-size: var(--s-28); color: var(--accent); line-height: 1; grid-row: span 9; }
+.toast b { color: var(--accent); }
+@media (prefers-reduced-motion: no-preference) { .toast { animation: rise 160ms ease-out; } }
+@keyframes rise { from { transform: translateY(8px); opacity: 0; } }
+
+/* the search, custom.html and picker.html */
+.r.found, .r.list { grid-template-columns: 3ch 1ch 1fr auto; }
+.r .miss { color: var(--warn); }
+.r.pk { grid-template-columns: 2ch 1fr auto; }
+.r.pk .g { color: var(--accent); }
+.r.pk .on { font-weight: 700; }
+.r u { text-decoration-color: var(--accent); text-underline-offset: 3px; }
+
+/* artists.html */
+.tabsrow { display: flex; gap: 3ch; border-bottom: 1px solid var(--rule); margin-bottom: 14px; font-size: var(--s-13); }
+.tabsrow span { padding: 4px 0; color: var(--muted); }
+.tabsrow span[aria-current="true"] { color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); font-weight: 700; }
+.r.rel { grid-template-columns: 12ch 5ch 1fr auto; }
+.rail .star { color: var(--accent); }
+.rail li[aria-current="true"] .star { color: var(--ink); }
+
+/* settings.html */
+.set { display: grid; grid-template-columns: 14ch 10ch 8ch 1fr; gap: 1ch; padding: 2px 8px; position: relative; white-space: nowrap; font-size: var(--s-14); margin-bottom: 2px; cursor: pointer;
+  background: linear-gradient(90deg, color-mix(in srgb, var(--surface) 55%, transparent), transparent); }
+.set.cur { box-shadow: inset 3px 0 0 var(--cursor); }
+.set.cur .key { font-weight: 700; }
+.set .src, .set .what { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.set .v.on { color: var(--cursor); } .set .v.off { color: var(--muted); }
+.set.locked .v { color: var(--warn); }
+@media (max-width: 900px) { .set { grid-template-columns: 12ch 8ch 1fr; } .set .what { display: none; } }
+
+/* covers.html: a choice whose options are pictures */
+.choose { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 14px; margin: 10px 0 6px; }
+.choose .fig { margin: 0; padding: 6px; border: 1px solid var(--rule); cursor: pointer; }
+.choose .fig.cur { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.choose img { width: 100%; aspect-ratio: 1; display: block; object-fit: cover; background: var(--far); }
+.choose .cap { font-size: var(--s-12); margin-top: 6px; display: grid; grid-template-columns: 2ch 1fr; color: var(--muted); }
+.choose .cap .num { color: var(--accent); }
+.dialog.wide { width: min(760px, calc(100vw - 32px)); }
+.browse { border: 1px solid var(--accent); padding: 1px 10px; color: var(--accent); margin-left: 1ch; }
+
+/* picker.html: the list as Enter would leave it */
+.order { list-style: none; padding: 0; font-size: var(--s-13); margin-top: 8px; counter-reset: o; }
+.order li { counter-increment: o; display: grid; grid-template-columns: 3ch 1fr; }
+.order li::before { content: counter(o); color: var(--muted); }
+.order li.out { color: var(--muted); text-decoration: line-through; }
+.order li.out::before { content: ""; }
+/* A release not in the library: nothing is wrong, so dashed in the rule colour rather than the warning one. */
+.frame.unheld { border-style: dashed; border-color: var(--rule); }

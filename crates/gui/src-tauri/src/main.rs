@@ -16,8 +16,9 @@ use clap::{CommandFactory, FromArgMatches};
 use earworm_core::cheats::{self, Feature, Unlocked};
 use earworm_core::config::{self, Cli, Config};
 use earworm_core::manifest::Kind;
-use earworm_core::picker::Hit;
-use earworm_core::protocol::{self, AlbumRow, ArtistRow, Cmd, Msg, Reply, Shelf, Status, Track};
+use earworm_core::achievements::{self, Achievement, Facts};
+use earworm_core::picker::{self, Hit, Marks};
+use earworm_core::protocol::{self, AlbumRow, ArtistRow, Cmd, Msg, Playback, Reply, Shelf, Status, Track};
 use earworm_core::theme::{Palette, Themes};
 use earworm_core::view::{self, Narrow, ShelfNarrow, Sort};
 use earworm_core::{deps, lookup, tag, tools, worker, ytdlp};
@@ -71,6 +72,8 @@ struct Shell {
     config_file: Option<PathBuf>,
     overridden: bool,
     unlocked: Arc<Unlocked>,
+    /// The achievement state file and what it holds, or `None` when achievements are off for the session.
+    achieved: Mutex<Option<(PathBuf, std::collections::BTreeSet<String>)>>,
 }
 
 /// The palette as the page's CSS variables, with the walk's names for the picker.
@@ -144,6 +147,8 @@ struct Boot {
     setup: Setup,
     /// Everything the worker has sent so far, minus questions already answered. Empty on a first start.
     replay: Vec<Sent>,
+    /// The YouTube Music unlock is on, which is what lets the artist page offer a download at all.
+    music: bool,
 }
 
 #[derive(Serialize)]
@@ -200,7 +205,8 @@ fn start(app: tauri::AppHandle, shell: State<Shell>) -> Result<Boot, String> {
     }
     drop(slot);
     let replay = replayable(&shell.history.lock().unwrap(), &shell.answered.lock().unwrap());
-    Ok(Boot { theme: shell.theme(None), statuses: words(), setup: shell.setup.clone(), replay })
+    let music = shell.unlocked.has(Feature::Music);
+    Ok(Boot { theme: shell.theme(None), statuses: words(), setup: shell.setup.clone(), replay, music })
 }
 
 // A question shows up again on replay only while nobody has answered it.
@@ -272,6 +278,24 @@ fn stop(shell: State<Shell>) {
     shell.stop.store(true, Ordering::SeqCst);
 }
 
+/// Who `*` stars for a track's artist credit: the lead, never a featured guest.
+#[tauri::command]
+fn lead_artist(artist: String) -> String {
+    lookup::lead_artist(&artist)
+}
+
+/// The icon set after this one, for the settings row.
+#[tauri::command]
+fn next_icons(icons: earworm_core::icons::Icons) -> earworm_core::icons::Icons {
+    icons.next()
+}
+
+/// The command-line flag that holds a switch, for saying why the settings screen cannot change it.
+#[tauri::command]
+fn switch_flag(key: String) -> String {
+    config::SWITCHES.iter().find(|s| s.key == key).map_or(key.clone(), |s| s.flag.to_string()).replace('_', "-")
+}
+
 #[tauri::command]
 fn theme_next(shell: State<Shell>) -> Theme {
     let name = {
@@ -291,17 +315,17 @@ struct Unlock {
     said: String,
     /// Set when the code was a secret palette, which is switched to at once so the celebration is in it.
     theme: Option<Theme>,
-    /// The URL prompt takes `music.youtube.com` links from now on.
+    /// The YouTube Music unlock is on after this code, whichever code it was.
     music: bool,
 }
 
 #[tauri::command]
 fn cheat(code: String, shell: State<Shell>) -> Unlock {
     let Some(cheat) = cheats::find(&code) else {
-        return Unlock { said: "nothing happens".into(), theme: None, music: false };
+        return Unlock { said: "nothing happens".into(), theme: None, music: shell.unlocked.has(Feature::Music) };
     };
     if !shell.unlocked.grant(cheat.feature) {
-        return Unlock { said: format!("already found  ·  {}", cheat.feature.prize()), theme: None, music: false };
+        return Unlock { said: format!("already found  ·  {}", cheat.feature.prize()), theme: None, music: shell.unlocked.has(Feature::Music) };
     }
     let theme = cheat.feature.theme().map(|name| {
         // A `[themes.*]` already holding the name keeps it: it was there first.
@@ -315,7 +339,7 @@ fn cheat(code: String, shell: State<Shell>) -> Unlock {
         }
         shell.switch(name)
     });
-    Unlock { said: cheat.feature.prize().into(), theme, music: cheat.feature == Feature::Music }
+    Unlock { said: cheat.feature.prize().into(), theme, music: shell.unlocked.has(Feature::Music) }
 }
 
 #[tauri::command]
@@ -327,6 +351,100 @@ fn rows(tracks: Vec<Track>, filter: String, review: bool) -> Vec<usize> {
 fn shelf_rows(library: Vec<Shelf>, filter: String, only: Option<Kind>, folders: Option<Vec<PathBuf>>, sort: Sort) -> Vec<usize> {
     let narrow = ShelfNarrow { filter: &filter, only, folders: folders.as_deref() };
     view::shelf_rows(&library, &narrow, sort)
+}
+
+/// One picker row: the match, the track it names, and whether it is marked and whether the open list holds it.
+#[derive(Serialize)]
+struct PickRow {
+    #[serde(flatten)]
+    hit: Hit,
+    folder: PathBuf,
+    // Not `file`, which the flattened hit already uses for the file's place in its folder.
+    name: String,
+    marked: bool,
+    held: bool,
+}
+
+#[derive(Serialize)]
+struct Picked {
+    rows: Vec<PickRow>,
+    total: usize,
+}
+
+/// The picker's rows for a query, by core's matcher, each with its marks; only the marked ones under F2.
+// The page keeps the marks as the ordered list and nothing else, so `Marks` and its composed-name keys stay core's.
+#[tauri::command]
+fn picker_rows(library: Vec<Shelf>, query: String, marks: Vec<(PathBuf, String)>, held: Vec<(PathBuf, String)>, only_marked: bool) -> Picked {
+    let (marks, held) = (Marks::of(&marks), Marks::of(&held));
+    let mut hits = picker::rows(&library, &query);
+    if only_marked {
+        hits = picker::marked_only(&library, hits, &marks);
+    }
+    let rows = hits
+        .into_iter()
+        .map(|hit| {
+            let (folder, file) = picker::target(&library, &hit);
+            let (marked, held) = (marks.has(folder, file), held.has(folder, file));
+            PickRow { folder: folder.to_path_buf(), name: file.to_string(), marked, held, hit }
+        })
+        .collect();
+    Picked { rows, total: picker::addable(&library) }
+}
+
+/// The marks with these tracks marked, or unmarked when every one of them already is.
+#[tauri::command]
+fn pick_toggle(marks: Vec<(PathBuf, String)>, items: Vec<(PathBuf, String)>) -> Vec<(PathBuf, String)> {
+    let mut marks = Marks::of(&marks);
+    marks.toggle_all(items.iter().map(|(f, n)| (f.as_path(), n.as_str())));
+    marks.picks()
+}
+
+/// What Enter on the picker sends: to add, and, for a list that was open, to take off.
+#[tauri::command]
+fn pick_changes(under: Option<(PathBuf, String)>, marks: Vec<(PathBuf, String)>, held: Option<Vec<(PathBuf, String)>>) -> (Vec<(PathBuf, String)>, Vec<(PathBuf, String)>) {
+    let held = held.map(|h| Marks::of(&h));
+    picker::changes(under.as_ref().map(|(f, n)| (f.as_path(), n.as_str())), &Marks::of(&marks), held.as_ref())
+}
+
+/// An achievement as the toast shows it.
+#[derive(Serialize)]
+struct Prize {
+    id: &'static str,
+    label: &'static str,
+    hint: &'static str,
+}
+
+/// What the session has earned and the state file does not know yet. Nothing when achievements are off,
+/// or the state file could not be read: announcements that cannot be recorded would only repeat.
+#[tauri::command]
+fn earned(library: Vec<Shelf>, tracks: Vec<Track>, done: Option<Result<String, String>>, stage: String, playback: Playback, shell: State<Shell>) -> Vec<Prize> {
+    let achieved = shell.achieved.lock().unwrap();
+    let Some((_, known)) = achieved.as_ref() else {
+        return Vec::new();
+    };
+    let facts = Facts { shelves: &library, tracks: &tracks, done: done.as_ref().map(|d| (d, stage.as_str())), playback: &playback, secrets: shell.unlocked.count() };
+    achievements::earned(&facts)
+        .into_iter()
+        .filter(|a| !known.contains(a.id()))
+        .map(|a| Prize { id: a.id(), label: a.label(), hint: a.hint() })
+        .collect()
+}
+
+/// Records the achievements the page showed.
+#[tauri::command]
+fn shown(ids: Vec<String>, shell: State<Shell>) {
+    let mut achieved = shell.achieved.lock().unwrap();
+    let Some((path, known)) = achieved.as_mut() else {
+        return;
+    };
+    let ids: Vec<&'static str> = ids.iter().filter_map(|id| Achievement::from_id(id)).map(Achievement::id).collect();
+    // Known for the session at once, as the terminal's are, so a file that cannot be written does not mean
+    // announcing them again; written off this thread, which is the window's.
+    known.extend(ids.iter().map(|id| id.to_string()));
+    let path = path.clone();
+    std::thread::spawn(move || {
+        let _ = achievements::merge_at(&path, &ids);
+    });
 }
 
 #[derive(Serialize)]
@@ -391,6 +509,32 @@ fn invert(marked: Vec<usize>, tracks: Vec<usize>) -> Vec<usize> {
 #[tauri::command]
 fn gate_marks(tracks: Vec<Track>, held: Vec<usize>) -> Vec<usize> {
     view::picked(&view::gate_marks(&tracks, &held))
+}
+
+/// The startup check's new releases, less the artists whose page the page has already read.
+#[tauri::command]
+fn unread(found: Vec<(String, u64, String)>, read: Vec<String>) -> Vec<(String, u64, String)> {
+    view::unread(found, &read.into_iter().collect())
+}
+
+/// Each artist row's new releases by title, matched as core matches an artist.
+#[tauri::command]
+fn new_titles(rows: Vec<ArtistRow>, fresh: Vec<(String, u64, String)>) -> Vec<Vec<String>> {
+    view::new_titles(&rows, &fresh)
+}
+
+/// The row for an artist under any spelling of their name.
+#[tauri::command]
+fn artist_at(rows: Vec<ArtistRow>, name: String) -> Option<usize> {
+    view::artist_at(&rows, &name)
+}
+
+/// An artist page's releases marked new, and what is left unread after it.
+#[tauri::command]
+fn mark_new(name: String, mut rows: Vec<AlbumRow>, mut fresh: Vec<(String, u64, String)>, read: Vec<String>) -> (Vec<AlbumRow>, Vec<(String, u64, String)>, Vec<String>) {
+    let mut read: HashSet<String> = read.into_iter().collect();
+    view::mark_new(&name, &mut rows, &mut fresh, &mut read);
+    (rows, fresh, read.into_iter().collect())
 }
 
 #[tauri::command]
@@ -504,6 +648,13 @@ fn main() {
                 config_file: cfg.config_file.clone(),
                 overridden: cfg.theme_overridden,
                 unlocked: Arc::clone(&cfg.unlocked),
+                // Read once at start, as the terminal does: a file that cannot be read turns the feature off.
+                achieved: Mutex::new(
+                    cfg.achievements
+                        .then(achievements::state_path)
+                        .flatten()
+                        .and_then(|path| achievements::read_at(&path).ok().map(|known| (path, known))),
+                ),
                 ..Shell::bare()
             }
         }
@@ -511,6 +662,7 @@ fn main() {
     };
     *shell.config.lock().unwrap() = Some(built);
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(shell)
         // Thumbnails are files on disk, and the webview may read that one folder of them.
         .setup(|app| {
@@ -523,7 +675,8 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             start, send, answer, stop, theme_next, theme_set, cheat, rows, shelf_rows, search, artist_rows,
-            release_rows, take, flip, invert, gate_marks, counts, next_kind, next_sort, probe, tools, quit
+            release_rows, take, flip, invert, gate_marks, unread, mark_new, counts, picker_rows, pick_toggle,
+            pick_changes, earned, shown, next_icons, switch_flag, lead_artist, new_titles, artist_at, next_kind, next_sort, probe, tools, quit
         ])
         .build(tauri::generate_context!())
         .expect("the window could not be built")
@@ -559,6 +712,7 @@ impl Shell {
             config_file: None,
             overridden: false,
             unlocked: Arc::new(Unlocked::default()),
+            achieved: Mutex::new(None),
         }
     }
 }

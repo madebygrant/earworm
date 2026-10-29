@@ -1,13 +1,24 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { clearFilter, consoleHooks, handleKey, press } from "./lib/keys";
   import type { Shelf } from "./lib/protocol";
   import { firstScreen, settledCount } from "./lib/reducer";
   import { app, boot, hooks, tryCode } from "./lib/store.svelte";
   import { quit, trackRows, ui } from "./lib/ui.svelte";
+  import * as sc from "./lib/screens.svelte";
+  import { screens } from "./lib/screens.svelte";
+  import ArtistPage from "./screens/ArtistPage.svelte";
+  import Artists from "./screens/Artists.svelte";
+  import Custom from "./screens/Custom.svelte";
   import Detail from "./screens/Detail.svelte";
+  import Discard from "./screens/Discard.svelte";
+  import Help from "./screens/Help.svelte";
+  import Picker from "./screens/Picker.svelte";
+  import Search from "./screens/Search.svelte";
+  import Settings from "./screens/Settings.svelte";
+  import Toast from "./screens/Toast.svelte";
   import Dialog from "./screens/Dialog.svelte";
   import FirstLaunch from "./screens/FirstLaunch.svelte";
   import Footer from "./screens/Footer.svelte";
@@ -23,7 +34,59 @@
   const library = $derived(m.library);
   const first = $derived(firstScreen(m) ? m.prompt!.prompt : null);
   const dialog = $derived(m.prompt && !first ? m.prompt.prompt : null);
-  const detail = $derived(!first && (m.view === "Tracks" ? m.tracks.length > 0 : m.library.length > 0));
+  const detail = $derived(
+    !first &&
+      (m.view === "Tracks" ? m.tracks.length > 0
+      : m.view === "Library" ? m.library.length > 0
+      : m.view === "Found" ? screens.hits.length > 0
+      : m.view === "Playlist" ? m.custom.rows.length > 0
+      : m.view === "Pick" || m.view === "Artist"),
+  );
+
+  // `N` named a list: the worker carries on and the picker is the page's, so it opens here, once.
+  $effect(() => {
+    const name = m.pickTracks;
+    if (name === null) return;
+    untrack(() => {
+      app.model = { ...app.model, pickTracks: null };
+      sc.openPicker(name);
+    });
+  });
+  // Core's answers for each screen's list, asked again only when what they read changes. Untracked, or the
+  // state a refresh reads and then writes would make the effect its own trigger.
+  const view = $derived(m.view);
+  $effect(() => {
+    void [library, ui.filter, ui.only];
+    if (view === "Found") untrack(() => void sc.searchRefresh());
+  });
+  $effect(() => {
+    void library;
+    if (view === "Pick") untrack(() => void sc.pickRefresh());
+  });
+  const artistRows = $derived(m.artists.rows);
+  const newReleases = $derived(m.newReleases);
+  $effect(() => {
+    void [artistRows, screens.artistQuery, newReleases];
+    untrack(() => void sc.artistsRefresh());
+  });
+  const releases = $derived(m.page.rows);
+  $effect(() => {
+    void [releases, screens.allKinds];
+    untrack(() => void sc.releasesRefresh());
+  });
+  // What could earn an achievement changed; a toast waits for a calm screen.
+  // A string of what the rules read, so a progress tick, which changes no status, asks nothing.
+  const facts = $derived(
+    JSON.stringify([library.map((s) => [s.path, s.tracks, s.kind, s.url !== null]), tracks.map((t) => t.status), m.done, m.resting, m.playback]),
+  );
+  $effect(() => {
+    void facts;
+    untrack(() => void sc.checkPrizes());
+  });
+  $effect(() => {
+    void [screens.waiting.length, sc.calm()];
+    untrack(() => sc.showPrizes());
+  });
 
   // Core's answers to what each list shows, asked again only when what they depend on changes. A reply is
   // kept only while it still answers the latest question.
@@ -38,8 +101,8 @@
   });
   let askedShelves = 0;
   $effect(() => {
-    const [lib, filter, only, sort, id] = [library, ui.filter, ui.only, ui.sort, ++askedShelves];
-    void invoke<number[]>("shelf_rows", { library: lib, filter, only, folders: null, sort }).then((rows) => {
+    const [lib, filter, only, sort, folders, id] = [library, ui.filter, ui.only, ui.sort, ui.byArtist?.[1] ?? null, ++askedShelves];
+    void invoke<number[]>("shelf_rows", { library: lib, filter, only, folders, sort }).then((rows) => {
       if (id === askedShelves) ui.shelves = rows;
     });
   });
@@ -107,6 +170,18 @@
       shown: ui.rows.length,
       mode: ui.mode,
       quitting: ui.quitting,
+      help: screens.help,
+      toast: screens.toast?.prizes.map((p) => p.id) ?? null,
+      hits: screens.hits.length,
+      found: screens.found?.[1] ?? null,
+      pick: m.view === "Pick" ? { name: screens.pick.name, rows: screens.pick.rows.length, marks: screens.pick.marks.length, add: screens.pick.add, remove: screens.pick.remove } : null,
+      custom: m.view === "Playlist" ? m.custom.rows.map((r) => r.label) : null,
+      artists: m.view === "Artists" || m.view === "Artist" ? screens.artistRows.length : null,
+      artist: screens.artist,
+      page: m.view === "Artist" ? { name: m.page.name, section: screens.section, releases: screens.releaseRows.length, error: m.page.error } : null,
+      settingsAt: m.view === "Settings" ? m.settings.rows[screens.settingsAt]?.key : null,
+      hints: [...document.querySelectorAll(".ft .hints > span")].map((e) => e.textContent?.trim()).join(" | "),
+      byArtist: ui.byArtist?.[0] ?? null,
       filter: ui.filter,
       marked: m.marked,
       theme: app.theme?.name ?? null,
@@ -131,6 +206,18 @@
     <FirstLaunch prompt={first as Extract<typeof first, { Input: unknown }>} />
   {:else if m.picking !== null}
     <Pick {press} />
+  {:else if m.view === "Found"}
+    <Search />
+  {:else if m.view === "Playlist"}
+    <Custom />
+  {:else if m.view === "Pick"}
+    <Picker />
+  {:else if m.view === "Artists"}
+    <Artists />
+  {:else if m.view === "Artist"}
+    <ArtistPage />
+  {:else if m.view === "Settings"}
+    <Settings />
   {:else if m.view === "Tracks" && m.tracks.length}
     <Run />
   {:else}
@@ -143,6 +230,9 @@
 
 {#if dialog}<Dialog prompt={dialog} />{/if}
 {#if ui.quitting}<Quit />{/if}
+{#if screens.help}<Help />{/if}
+{#if screens.discard}<Discard />{/if}
+<Toast />
 {#if code !== null}
   <div class="console"><span class="k">&gt;</span><input bind:this={field} bind:value={code} onkeydown={consoleKey} spellcheck="false" /></div>
 {/if}

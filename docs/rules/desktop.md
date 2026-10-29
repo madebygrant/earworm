@@ -115,3 +115,38 @@
   app has the focus, which on a machine somebody is using is not this one:
   the first exit check typed into a browser that way. Release builds compile
   it to nothing, like `probe`.
+- **New releases, the picker's marks and achievements are core's too.** The
+  page asks `mark_new` and `unread` as reducer effects, as it asks for the
+  pick gate's marks; it keeps the picker's marks as the ordered list and
+  core's `Marks` answers which rows are marked and what Enter changes, since
+  matching marks on composed names is a rule; and `earned` says what is new,
+  with the page deciding only when the screen is calm enough for the toast
+  (`asks core which releases are new rather than marking them itself`).
+- **Locked, the artist page lists and never offers a download.** `app.music`
+  comes from `start` and every cheat answer; off, Enter on a release or the
+  top tracks does nothing and says nothing, and no hint names a fetch, for
+  the reason `discovery.md` gives (`locked, offers no download and Enter on
+  a release or the top tracks sends nothing`).
+- **A screen's refresh runs untracked.** `pickRefresh` reads `screens.pick`
+  before it awaits and writes it after, so called from an effect that
+  tracked it, the effect was its own trigger and the window spun at full
+  CPU. An effect names what it depends on and calls the refresh inside
+  `untrack`.
+- **A question can carry pictures and a path kind.** `Prompt::Choice.pictures`
+  gives the cover menu's candidates as URLs, drawn as a grid, and
+  `Prompt::Input.browse` marks a path question so the dialog offers the
+  system's file dialog beside the box. The terminal ignores both
+  (`every_row_maps_back_to_its_own_source`). The CSP allows `https:` images,
+  since the cover hosts redirect between each other.
+- **`busy` goes up before the send, not after it returns.** A quick command's
+  `Idle` reached the page before the send call came back, so setting `busy`
+  afterwards left it on for good and every screen gated on it went dead
+  (`is not left busy when the worker finishes before the send returns`).
+- **Effects that change shared state run one at a time, on the state as it
+  is.** `Unread` and `MarkNew` each computed from a snapshot and wrote back
+  whole, so a page read while the startup check answered wiped every other
+  artist's new releases (`keeps new releases for other artists when a page is
+  read while the check answers`).
+- **An achievement toast dismissed by a key is recorded.** Whoever pressed the
+  key saw it, as in the terminal; putting it back to wait made it reappear at
+  once and swallow the next key, over and over while somebody typed.

@@ -481,6 +481,10 @@ pub enum Prompt {
         note: String,
         options: Vec<String>,
         escape: Escape,
+        /// A picture for each option, by URL, for a front end that can draw them: the cover menu's
+        /// candidates are pictures, and their labels only describe them. Empty for every other menu.
+        #[serde(default)]
+        pictures: Vec<Option<String>>,
     },
     /// Several labelled boxes answered together. Artist and title were two
     /// prompts in a row, which made the commonest edit in the tool two
@@ -503,7 +507,17 @@ pub enum Prompt {
         /// What Esc does here, since it is the only key whose effect changes
         /// between prompts: every other one leaves the track alone.
         escape: Escape,
+        /// The answer is a path, so a front end with the system's file dialog can offer it.
+        #[serde(default)]
+        browse: Option<Browse>,
     },
+}
+
+/// What a typed path names, for the system dialog that picks one.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum Browse {
+    Folder,
+    File,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
@@ -769,13 +783,18 @@ impl Asker {
     }
 
     pub fn choose(&self, header: &str, options: Vec<String>) -> Option<usize> {
-        self.pick(header, "", options, Escape::Skip)
+        self.pick(header, "", options, Escape::Skip, Vec::new())
+    }
+
+    /// `choose` with a picture beside each option, where one exists.
+    pub fn choose_pictured(&self, header: &str, options: Vec<String>, pictures: Vec<Option<String>>) -> Option<usize> {
+        self.pick(header, "", options, Escape::Skip, pictures)
     }
 
     /// A menu that reports something before it asks, and that backing out of
     /// leaves the session where it was rather than skipping or quitting.
     pub fn choose_noted(&self, header: &str, note: &str, options: Vec<String>) -> Option<usize> {
-        self.pick(header, note, options, Escape::Keep)
+        self.pick(header, note, options, Escape::Keep, Vec::new())
     }
 
     fn pick(
@@ -784,6 +803,7 @@ impl Asker {
         note: &str,
         options: Vec<String>,
         escape: Escape,
+        pictures: Vec<Option<String>>,
     ) -> Option<usize> {
         if !self.enabled {
             return None;
@@ -793,6 +813,7 @@ impl Asker {
             note: note.into(),
             options,
             escape,
+            pictures,
         }) {
             Reply::Choice(i) => Some(i),
             _ => None,
@@ -826,7 +847,12 @@ impl Asker {
     /// None means the user cancelled. An empty string is a real answer the
     /// caller has to judge, so clearing a field cannot look like an escape.
     pub fn input(&self, header: &str, value: &str) -> Option<String> {
-        self.prompt(header, "", value, Escape::Skip)
+        self.prompt(header, "", value, Escape::Skip, None)
+    }
+
+    /// A question whose answer is a path, which a front end may answer with the system's dialog.
+    pub fn input_path(&self, header: &str, note: &str, escape: Escape, browse: Browse) -> Option<String> {
+        self.prompt(header, note, "", escape, Some(browse))
     }
 
     /* With a line above the box saying what an answer looks like, and for a
@@ -839,10 +865,10 @@ impl Asker {
         value: &str,
         escape: Escape,
     ) -> Option<String> {
-        self.prompt(header, note, value, escape)
+        self.prompt(header, note, value, escape, None)
     }
 
-    fn prompt(&self, header: &str, note: &str, value: &str, escape: Escape) -> Option<String> {
+    fn prompt(&self, header: &str, note: &str, value: &str, escape: Escape, browse: Option<Browse>) -> Option<String> {
         if !self.enabled {
             return None;
         }
@@ -851,6 +877,7 @@ impl Asker {
             note: note.into(),
             value: value.into(),
             escape,
+            browse,
         }) {
             Reply::Text(t) => Some(t.trim().to_string()),
             _ => None,

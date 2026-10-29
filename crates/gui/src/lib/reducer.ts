@@ -43,6 +43,8 @@ export interface State {
   artists: { rows: ArtistRow[]; loaded: boolean; focus: string | null };
   page: Page;
   newReleases: [string, number, string][];
+  // Artists whose page was read this session, by core's `artists::key`, which a late check must not mark again.
+  pagesRead: string[];
   /** The track the cursor is on, by index; `follow` lets progress move it. */
   cursor: number | null;
   follow: boolean;
@@ -67,7 +69,10 @@ export interface State {
   quit: boolean;
 }
 
-export type Effect = { GateMarks: { tracks: Track[]; held: number[] } };
+export type Effect =
+  | { GateMarks: { tracks: Track[]; held: number[] } }
+  | { Unread: { found: [string, number, string][]; read: string[] } }
+  | { MarkNew: { name: string; rows: AlbumRow[]; fresh: [string, number, string][]; read: string[] } };
 
 export interface Step {
   state: State;
@@ -96,6 +101,7 @@ export function initial(statuses: Word[] = []): State {
     artists: { rows: [], loaded: false, focus: null },
     page: { name: "", found: null, rows: [], error: null, loaded: false, top: null, related: null },
     newReleases: [],
+    pagesRead: [],
     cursor: null,
     follow: true,
     review: false,
@@ -218,15 +224,20 @@ const handlers: Handlers = {
   Select: (s, path) => (s.library.some((x) => x.path === path) ? { ...s, shelf: path } : s),
   FoundUnmark: (s) => ({ ...s, foundMarks: [] }),
   Artists: (s, { rows, focus }) => ({ ...s, artists: { rows, loaded: true, focus: focus ?? s.artists.focus } }),
+  // Which releases are new is core's to mark, with `artists::key`, as the list arrives.
   Discography: (s, { name, found, rows }) => {
     if (s.page.name !== name) return s;
     const page = { ...s.page, found, loaded: true };
-    return "Ok" in rows ? { ...s, page: { ...page, rows: rows.Ok } } : { ...s, page: { ...page, error: rows.Err } };
+    if (!("Ok" in rows)) return { ...s, page: { ...page, error: rows.Err } };
+    return {
+      state: { ...s, page: { ...page, rows: rows.Ok } },
+      effects: [{ MarkNew: { name, rows: rows.Ok, fresh: s.newReleases, read: s.pagesRead } }],
+    };
   },
   PickHeld: (s, held) => ({ ...s, pickHeld: held }),
   Top: (s, { name, rows }) => (s.page.name === name ? { ...s, page: { ...s.page, top: rows } } : s),
   Related: (s, { name, rows }) => (s.page.name === name ? { ...s, page: { ...s.page, related: rows } } : s),
-  NewReleases: (s, found) => ({ ...s, newReleases: found }),
+  NewReleases: (s, found) => ({ state: s, effects: [{ Unread: { found, read: s.pagesRead } }] }),
   Counted: (s, { name, id, of }) =>
     s.page.name === name ? { ...s, page: { ...s.page, rows: s.page.rows.map((r) => (r.id === id ? { ...r, of } : r)) } } : s,
   PickTracks: (s, name) => ({ ...s, pickTracks: name, view: "Pick" }),

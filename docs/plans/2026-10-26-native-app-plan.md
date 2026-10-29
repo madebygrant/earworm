@@ -194,7 +194,7 @@ answered pick gate downloads only what was marked. Each screen, captured at
 1440 wide in graphite, matches its picture in `docs/mockups/shots/` in layout
 and colour.
 
-## 8. The remaining screens
+## 8. The remaining screens [done 2026-10-29]
 
 - Search (`t`), custom playlists and the picker, export, tag edit and undo,
   covers (plain `<img>`, no kitty graphics), settings, help.

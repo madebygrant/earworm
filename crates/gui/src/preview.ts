@@ -28,6 +28,31 @@ mockIPC(
         return (a.tracks as unknown[]).map((_, i) => i);
       case "shelf_rows":
         return (a.library as unknown[]).map((_, i) => i);
+      // Close enough to core's for a picture of each screen. A plain substring, where core's is fuzzy.
+      case "search": {
+        const lib = a.library as { name: string; files: [string, boolean][]; kind: string | null }[];
+        const q = String(a.query).toLowerCase();
+        const hits = lib.flatMap((s, shelf) => s.kind === "Custom" || !q ? [] : s.files.map(([f], file) => ({ shelf, file, score: 0, at: [], folder_at: [], label: f.replace(/\.[^.]+$/, "").replace(/^\d+\s*-\s*/, "") }))).filter((h) => h.label.toLowerCase().includes(q));
+        return { hits, total: lib.reduce((n, s) => n + s.files.length, 0) };
+      }
+      case "picker_rows": {
+        const lib = a.library as { name: string; path: string; files: [string, boolean][]; kind: string | null }[];
+        const marks = a.marks as [string, string][];
+        const held = a.held as [string, string][];
+        const has = (l: [string, string][], f: string, n: string) => l.some(([g, m]) => g === f && m === n);
+        const rows = lib.flatMap((s, shelf) => s.kind === "Custom" ? [] : s.files.filter(([, here]) => here).map(([f], file) => ({ shelf, file, score: 0, at: [], folder_at: [], label: f.replace(/\.[^.]+$/, "").replace(/^\d+\s*-\s*/, ""), folder: s.path, name: f, marked: has(marks, s.path, f), held: has(held, s.path, f) })));
+        return { rows, total: rows.length };
+      }
+      case "pick_toggle":
+        return [...(a.marks as unknown[]), ...(a.items as unknown[])];
+      case "pick_changes":
+        return [a.marks, []];
+      case "artist_rows":
+        return (a.rows as unknown[]).map((_, i) => i);
+      case "release_rows":
+        return (a.rows as { kind: string }[]).map((r, i) => (a.allKinds || ["album", "ep"].includes(r.kind) ? i : -1)).filter((i) => i >= 0);
+      case "earned":
+        return [];
       // Close enough to core's for a picture: everything still to fetch.
       case "gate_marks":
         return (a.tracks as { index: number; status: string }[]).filter((t) => t.status === "Pending").map((t) => t.index);

@@ -838,13 +838,7 @@ impl App {
                     match rows {
                         // Marked once, here: the worker has just recorded them as seen, so they leave the count.
                         Ok(mut rows) => {
-                            let key = crate::artists::key(&name);
-                            let fresh: Vec<u64> = self.new_releases.iter().filter(|(a, ..)| crate::artists::key(a) == key).map(|(_, id, _)| *id).collect();
-                            for row in rows.iter_mut() {
-                                row.new = fresh.contains(&row.id);
-                            }
-                            self.new_releases.retain(|(a, ..)| crate::artists::key(a) != key);
-                            self.pages_read.insert(key);
+                            view::mark_new(&name, &mut rows, &mut self.new_releases, &mut self.pages_read);
                             self.page.rows = rows;
                         }
                         Err(why) => self.page.error = Some(why),
@@ -869,7 +863,7 @@ impl App {
             }
             // A page read while the check was still going recorded those releases seen; its stale copy must not bring them back.
             Msg::NewReleases(found) => {
-                self.new_releases = found.into_iter().filter(|(a, ..)| !self.pages_read.contains(&crate::artists::key(a))).collect();
+                self.new_releases = view::unread(found, &self.pages_read);
             }
             Msg::Counted { name, id, of } => {
                 if self.page.name == name {
@@ -1932,7 +1926,8 @@ impl App {
     // nothing is marked. An open list starts with its own tracks marked, so only the difference counts.
     pub fn pick_changes(&self) -> (Vec<(PathBuf, String)>, Vec<(PathBuf, String)>) {
         let held = self.pick.existing.then_some(&self.pick.held);
-        crate::picker::changes(&self.library, self.pick.hits.get(self.pick.cursor), &self.pick.marks, held)
+        let under = self.pick.hits.get(self.pick.cursor).map(|h| self.pick_target(h));
+        crate::picker::changes(under, &self.pick.marks, held)
     }
 
     /// The result under the cursor, or `None` when the list is empty.
@@ -3308,7 +3303,7 @@ mod tests {
                 header: "q".into(),
                 note: String::new(),
                 value: String::new(),
-                escape: Escape::Keep,
+                escape: Escape::Keep, browse: None,
             } });
         answers
     }
@@ -4087,7 +4082,7 @@ mod tests {
                 note: String::new(),
                 header: "Title".into(),
                 value: "Café del Mar".into(),
-                escape: Escape::Skip,
+                escape: Escape::Skip, browse: None,
             } });
         assert_eq!(app.caret, 12, "the caret starts behind the prefilled text");
 

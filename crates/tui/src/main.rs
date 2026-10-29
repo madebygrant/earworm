@@ -1579,7 +1579,7 @@ mod tests {
                 header: cheats::LOCKED.into(),
                 note: String::new(),
                 value: "music.youtube.com/playlist?list=PL1".into(),
-                escape: crate::protocol::Escape::Quit,
+                escape: crate::protocol::Escape::Quit, browse: None,
             } });
 
         open_console(&mut app);
@@ -2485,7 +2485,7 @@ mod tests {
                     header: "finished".into(),
                     note: String::new(),
                     options: (0..options).map(|n| format!("option {n}")).collect(),
-                    escape: crate::protocol::Escape::Keep,
+                    escape: crate::protocol::Escape::Keep, pictures: Vec::new(),
                 },
                 reply,
             ));
@@ -2509,7 +2509,7 @@ mod tests {
                 note: String::new(),
                 header: "Title".into(),
                 value: String::new(),
-                escape: crate::protocol::Escape::Skip,
+                escape: crate::protocol::Escape::Skip, browse: None,
             },
             crate::protocol::open_question().0,
         ));

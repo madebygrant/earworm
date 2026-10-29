@@ -123,6 +123,13 @@ fn key(folder: &Path, file: &str) -> (PathBuf, String) {
 }
 
 impl Marks {
+    /// The marks a front end held as their ordered list, which is all of them it needs to keep.
+    pub fn of(order: &[(PathBuf, String)]) -> Marks {
+        let mut marks = Marks::default();
+        marks.toggle_all(order.iter().map(|(f, n)| (f.as_path(), n.as_str())));
+        marks
+    }
+
     pub fn has(&self, folder: &Path, file: &str) -> bool {
         self.keys.contains(&key(folder, file))
     }
@@ -195,8 +202,7 @@ pub fn addable(library: &[Shelf]) -> usize {
 // What Enter sends: tracks to add and tracks to take off. A new list adds the marks, or the cursor row when
 // nothing is marked. An open list starts with its own tracks marked as `held`, so only the difference counts.
 pub fn changes(
-    library: &[Shelf],
-    under: Option<&Hit>,
+    under: Option<(&Path, &str)>,
     marks: &Marks,
     held: Option<&Marks>,
 ) -> (Vec<(PathBuf, String)>, Vec<(PathBuf, String)>) {
@@ -208,8 +214,7 @@ pub fn changes(
     if marks.len() > 0 {
         return (marks.picks(), Vec::new());
     }
-    let cursor = under.map(|h| target(library, h));
-    (cursor.map(|(f, n)| vec![(f.to_path_buf(), n.to_string())]).unwrap_or_default(), Vec::new())
+    (under.map(|(f, n)| vec![(f.to_path_buf(), n.to_string())]).unwrap_or_default(), Vec::new())
 }
 
 #[cfg(test)]

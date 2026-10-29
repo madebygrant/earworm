@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Prompt } from "../lib/protocol";
+  import { open } from "@tauri-apps/plugin-dialog";
   import { digitChoice } from "../lib/reducer";
   import { reply } from "../lib/store.svelte";
 
@@ -12,7 +13,28 @@
 
   const ESC = { Skip: "skip", Quit: "quit", Keep: "dismiss" };
   const kind = $derived(Object.keys(prompt)[0] as "Choice" | "Form" | "Input");
-  const body = $derived(Object.values(prompt)[0] as { header: string; note: string; escape: "Skip" | "Quit" | "Keep"; options?: string[]; fields?: [string, string][]; value?: string });
+  const body = $derived(
+    Object.values(prompt)[0] as {
+      header: string;
+      note: string;
+      escape: "Skip" | "Quit" | "Keep";
+      options?: string[];
+      fields?: [string, string][];
+      value?: string;
+      pictures?: (string | null)[];
+      browse?: "Folder" | "File" | null;
+    },
+  );
+  // The options with a picture are drawn as one, and the rest stay rows under them.
+  const pictured = $derived((body.options ?? []).map((label, i) => [i, label, body.pictures?.[i] ?? null] as const));
+  const hasPictures = $derived(pictured.some(([, , pic]) => pic));
+
+  // The system's dialog fills the box; Enter still answers, so the path can be read first.
+  async function browse() {
+    const picked = await open({ directory: body.browse === "Folder", multiple: false });
+    if (typeof picked === "string") values[0] = picked;
+    inputs[0]?.focus();
+  }
   let values = $state<string[]>([]);
   let choice = $state(0);
   let inputs: HTMLInputElement[] = $state([]);
@@ -38,8 +60,8 @@
     if (e.key === "Escape") return void reply("Cancel");
     if (options) {
       if (e.key === "Enter") return void reply({ Choice: choice });
-      if (["ArrowDown", "j", "Tab"].includes(e.key)) choice = (choice + 1) % options;
-      else if (["ArrowUp", "k"].includes(e.key)) choice = (choice + options - 1) % options;
+      if (["ArrowDown", "ArrowRight", "j", "Tab"].includes(e.key)) choice = (choice + 1) % options;
+      else if (["ArrowUp", "ArrowLeft", "k"].includes(e.key)) choice = (choice + options - 1) % options;
       else if (digitChoice(e.key, options) !== null) return void reply({ Choice: digitChoice(e.key, options)! });
       else return;
       e.preventDefault();
@@ -68,10 +90,25 @@
 <svelte:window onkeydown={key} />
 
 <div class="scrim">
-  <div class="dialog">
+  <div class="dialog" class:wide={hasPictures}>
     <span class="t">{body.header}</span>
     {#if body.note}<p class="note">{body.note}</p>{/if}
-    {#if kind === "Choice"}
+    {#if kind === "Choice" && hasPictures}
+      <div class="choose">
+        {#each pictured.filter(([, , pic]) => pic) as [i, label, pic] (i)}
+          <div class="fig" class:cur={i === choice} onclick={() => reply({ Choice: i })} onkeydown={() => {}} role="option" tabindex="-1" aria-selected={i === choice}>
+            <img src={pic} alt="" /><span class="cap"><span class="num">{i + 1}</span><span>{label}</span></span>
+          </div>
+        {/each}
+      </div>
+      <ul class="menu">
+        {#each pictured.filter(([, , pic]) => !pic) as [i, label] (i)}
+          <li class:cur={i === choice} onclick={() => reply({ Choice: i })} onkeydown={() => {}} role="option" aria-selected={i === choice}>
+            <span class="num">{i + 1}</span><span>{label}</span>
+          </li>
+        {/each}
+      </ul>
+    {:else if kind === "Choice"}
       <ul class="menu">
         {#each body.options! as option, i (i)}
           <li class:cur={i === choice} onclick={() => reply({ Choice: i })} onkeydown={() => {}} role="option" aria-selected={i === choice}>
@@ -89,12 +126,13 @@
         {/each}
       </div>
     {:else}
-      <div class="form" style="grid-template-columns:1fr">
+      <div class="form" style="grid-template-columns:{body.browse ? '1fr auto' : '1fr'}">
         <div class="box focus"><input bind:this={inputs[0]} bind:value={values[0]} spellcheck="false" /></div>
+        {#if body.browse}<button class="browse" onclick={browse}>Choose…</button>{/if}
       </div>
     {/if}
     <p class="foot">
-      {#if kind === "Choice"}<span><span class="k">1-{body.options!.length}</span> answer</span><span><span class="k">enter</span> choose</span>
+      {#if kind === "Choice"}<span><span class="k">1-{body.options!.length}</span> answer</span>{#if hasPictures}<span><span class="k">← →</span> move</span>{/if}<span><span class="k">enter</span> choose</span>
       {:else if kind === "Form"}<span><span class="k">tab</span> field</span>{#if swap}<span><span class="k">^s</span> swap artist and title</span>{/if}<span><span class="k">enter</span> save</span>
       {:else}<span><span class="k">enter</span> answer</span><span><span class="k">^u</span> clear</span>{/if}
       <span><span class="k">esc</span> {ESC[body.escape]}</span>

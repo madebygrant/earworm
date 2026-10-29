@@ -25,6 +25,8 @@ export const ui = $state({
   typing: false,
   sort: "Name" as Sort,
   only: null as Kind | null,
+  // The library narrowed to one artist's folders by `o`, named in the band and cleared with the others.
+  byArtist: null as [string, string[]] | null,
   tools: null as Tool[] | null,
   /** The first screen has sent a link, so the next link question is a refusal of it, empty link included. */
   linkSent: false,
@@ -53,9 +55,10 @@ export function canBrowse(): boolean {
 }
 
 // Marked busy when sent, not when the worker reports it: the gap is long enough for a second press to queue
-// a duplicate, and a duplicated swap silently undoes the first.
+// a duplicate. Before the send rather than after, or a quick command's `Idle` lands first and busy sticks.
 export async function send(cmd: Cmd) {
-  if (await invoke<boolean>("send", { cmd })) app.model = { ...app.model, busy: true };
+  app.model = { ...app.model, busy: true };
+  if (!(await invoke<boolean>("send", { cmd }))) app.model = { ...app.model, busy: false };
 }
 
 /** Covers for the files given, which arrive as `Msg::Thumb`. Not a command anyone waits on, so not busy. */

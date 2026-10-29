@@ -2,6 +2,16 @@
   import type { Shelf } from "../lib/protocol";
   import { app, chooseTheme } from "../lib/store.svelte";
   import { say, ui, working } from "../lib/ui.svelte";
+  import { openPage, screens } from "../lib/screens.svelte";
+
+  const artistView = $derived(app.model.view === "Artists" || app.model.view === "Artist");
+  const artists = $derived(screens.artistRows.map((at) => app.model.artists.rows[at]).filter(Boolean));
+  // By row, from core, which matches an artist under any spelling.
+  const fresh = (name: string) => screens.artistNew[app.model.artists.rows.findIndex((r) => r.name === name)]?.length ?? 0;
+  let query = $state<HTMLInputElement>();
+  $effect(() => {
+    if (screens.artistTyping) query?.focus();
+  });
 
   const rows = $derived(ui.shelves.map((at) => app.model.library[at]).filter(Boolean));
   const SORT = { Name: "name", Synced: "last synced", Missing: "most missing" };
@@ -31,13 +41,32 @@
 </script>
 
 <nav class="rail" aria-label="Library">
-  <div class="tabs"><span aria-current="true">folders</span></div>
-  {#if app.model.library.length}
-    <div class="q" class:on={app.model.view === "Library" && (ui.typing || ui.filter)}>
+  <div class="tabs"><span aria-current={!artistView}>folders</span><span aria-current={artistView}><span class="k">b</span> artists</span></div>
+  {#if artistView}
+    <div class="q" class:on={screens.artistTyping || screens.artistQuery}>
+      {#if screens.artistTyping}
+        <input bind:this={query} bind:value={screens.artistQuery} placeholder="filter artists" spellcheck="false" />
+      {:else}
+        <span class="k">/</span> {screens.artistQuery || "filter artists"}
+      {/if}
+    </div>
+    <ul role="listbox" aria-label="Artists">
+      {#each artists as a (a.name)}
+        <li role="option" tabindex="-1" aria-selected={a.name === screens.artist} aria-current={a.name === screens.artist}
+          class:focus={a.name === screens.artist && app.model.view === "Artists"}
+          onclick={() => (screens.artist = a.name)} ondblclick={openPage} onkeydown={() => {}}>
+          <span class="star">{a.starred ? "★" : ""}</span><span class="nm">{a.name}</span>
+          <span class="ct" class:live={fresh(a.name) > 0}>{fresh(a.name) ? `+${fresh(a.name)} new` : a.tracks}</span>
+        </li>
+      {/each}
+    </ul>
+    {#if !artists.length}<p class="empty">{app.model.artists.loaded ? "No artist matches. Esc clears the filter." : "Reading the artists off the tags."}</p>{/if}
+  {:else if app.model.library.length}
+    <div class="q" class:on={app.model.view === "Library" && (ui.typing || ui.filter || ui.byArtist)}>
       {#if ui.typing && app.model.view === "Library"}
         <input bind:this={box} bind:value={ui.filter} placeholder="filter folders" spellcheck="false" />
       {:else}
-        <span class="k">/</span> {(app.model.view === "Library" && ui.filter) || "filter folders"}
+        <span class="k">/</span> {(app.model.view === "Library" && ui.filter) || (ui.byArtist ? `${ui.byArtist[0]}'s folders · esc` : "filter folders")}
       {/if}
     </div>
     <div class="opts">
@@ -45,7 +74,7 @@
       <span><span class="k">a</span> <b>{ui.only ? KIND[ui.only] : "all"}</b></span>
     </div>
   {/if}
-  {#if rows.length}
+  {#if !artistView && rows.length}
     <ul role="listbox" aria-label="Folders">
       {#each rows as s (s.path)}
         <li
@@ -63,9 +92,9 @@
         </li>
       {/each}
     </ul>
-  {:else if app.model.library.length}
+  {:else if !artistView && app.model.library.length}
     <p class="empty">Nothing matches. Esc clears the filter.</p>
-  {:else if !app.error}
+  {:else if !artistView && !app.error}
     <p class="empty">No folders yet. A synced playlist lands here.</p>
   {/if}
   {#if app.theme}

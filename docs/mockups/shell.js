@@ -1,6 +1,6 @@
 // Draws the chrome every screen shares, so each page only writes its own main area.
 const THEMES = ["graphite", "light", "warm", "cool", "neon"];
-const ICON = { album: "●", playlist: "▤", local: "◆" };
+const ICON = { album: "●", playlist: "▤", local: "◆", custom: "≡" };
 const SETTINGS = 'format <b>opus</b> · lookup <b>on</b> · cover <b>on</b> · m3u8 <b>on</b> · rename <b>on</b>';
 const hasArt = st => !["queued", "fetching", "fetched", "tagging", "failed", "missing"].includes(st);
 const pad = n => String(n).padStart(2, "0");

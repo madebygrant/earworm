@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Export</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css"><link rel="stylesheet" href="base.css">
+<style>.dialog { width: 100%; } .gallery { grid-template-columns: repeat(auto-fill, minmax(min(100%, 460px), 1fr)); } .case { padding-top: 10px; }
+.btn { border: 1px solid var(--accent); padding: 1px 10px; color: var(--accent); margin-left: 1ch; }</style>
+</head>
+<body>
+<script src="directions/data.js"></script>
+<script src="shell.js"></script>
+<script>
+// E on a folder or a custom list: the worker's questions, in the order it asks them. Copies only; nothing on disk
+// in the library changes, and a file is removed from the device only after a question that names it.
+const cases = [
+  ["First, where to. It has to exist and sit outside the library. Choose opens the system's folder picker; typing works too.", `
+  <div class="dialog"><span class="t">export Late Night</span><p class="muted">a folder outside the library, such as a phone or a USB stick</p>
+  <div class="form" style="grid-template-columns:4ch 1fr auto"><label>to</label><div class="box focus">/Volumes/WALKMAN/MUSIC<span class="caret">&nbsp;</span></div><button class="btn">Choose…</button></div>
+  <p class="foot"><span><span class="k">enter</span> next</span><span><span class="k">esc</span> cancel</span></p></div>`],
+  ["How accented names are spelled on the device. iPhone compares bytes.", `
+  <div class="dialog"><span class="t">Spell accented names</span><p class="muted">iPhone compares bytes and needs decomposed · most other players want composed</p>
+  <ul class="menu"><li class="cur"><span class="num">1</span><span>Composed · Android, Windows, most players</span></li><li><span class="num">2</span><span>Decomposed · iPhone</span></li></ul>
+  <p class="foot"><span><span class="k">1-2</span> answer</span><span><span class="k">esc</span> cancel</span></p></div>`],
+  ["The format on the device. As they are is a straight copy.", `
+  <div class="dialog"><span class="t">Audio format on the device</span><p class="muted">for a player that cannot read what is on disk · a converted copy is a generation further from the source</p>
+  <ul class="menu"><li class="cur"><span class="num">1</span><span>As they are</span></li><li><span class="num">2</span><span>m4a · .m4a</span></li><li><span class="num">3</span><span>opus · .opus</span></li><li><span class="num">4</span><span>mp3 · .mp3</span></li></ul>
+  <p class="foot"><span><span class="k">1-7</span> answer</span><span><span class="k">esc</span> cancel</span></p></div>`],
+  ["A list only: one folder of copies, or each track under its own folder.", `
+  <div class="dialog"><span class="t">Lay the playlist out</span><p class="muted">copies repeat audio the folders already hold</p>
+  <ul class="menu"><li class="cur"><span class="num">1</span><span>One folder of copies · plays anywhere</span></li><li><span class="num">2</span><span>Each track in its own folder · no repeats</span></li></ul>
+  <p class="foot"><span><span class="k">1-2</span> answer</span><span><span class="k">esc</span> cancel</span></p></div>`],
+  ["Exporting again: files the last export left that this one would not write. Every name is shown.", `
+  <div class="dialog" style="border-color:var(--warn)"><span class="t" style="color:var(--warn)">Remove 2 files from the device?</span>
+  <p>07 - Cluster - Rubato.opus, 11 - Fripp &amp; Eno - Heavenly Music Corporation.opus · no longer in this export, and this cannot be undone</p>
+  <ul class="menu"><li class="cur"><span class="num">1</span><span>keep them</span></li><li><span class="num">2</span><span>remove 2 files</span></li></ul>
+  <p class="foot"><span><span class="k">1-2</span> answer</span><span><span class="k">esc</span> keep them</span></p></div>`],
+  ["Then the copy runs in the header like any command, and the flash says what landed where.", `
+  <div class="dialog"><span class="t">exported</span><p>9 tracks to /Volumes/WALKMAN/MUSIC/Late Night, playlist Late Night.m3u8 · 2 removed</p></div>`],
+];
+mount({
+  head: { folder: "Late Night", stage: "exporting", count: "", spin: true },
+  railOpts: { current: "Late Night", folders: [...FOLDERS.slice(0, 5), { name: "Late Night", kind: "custom", count: 9 }, ...FOLDERS.slice(5)] },
+  main: `<section class="view"><p class="sub">Export copies a folder or a list somewhere outside the library. It asks four things, each a dialog.</p>
+    <div class="gallery">${cases.map(([l, h]) => `<div class="case"><p class="label">${l}</p>${h}</div>`).join("")}</div></section>`,
+  noDetail: true,
+  foot: { hints: [["1-9", "answer"], ["esc", "cancel"]] },
+});
+</script>
+</body>
+</html>

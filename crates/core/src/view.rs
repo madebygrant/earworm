@@ -253,6 +253,40 @@ pub fn picked(marked: &HashSet<usize>) -> Vec<usize> {
     picked
 }
 
+/// What the startup check found, less the artists whose page was read this session. The check works from
+/// the seen file as it was when it started, so a page read meanwhile would otherwise come back as new.
+pub fn unread(found: Vec<(String, u64, String)>, read: &HashSet<String>) -> Vec<(String, u64, String)> {
+    found.into_iter().filter(|(artist, ..)| !read.contains(&crate::artists::key(artist))).collect()
+}
+
+/// Marks the releases on `name`'s page the check called new, takes them off `fresh` and records the page
+/// as read. Once, as the page's list arrives: the worker has just recorded them as seen.
+pub fn mark_new(name: &str, rows: &mut [AlbumRow], fresh: &mut Vec<(String, u64, String)>, read: &mut HashSet<String>) {
+    let key = crate::artists::key(name);
+    let ids: Vec<u64> = fresh.iter().filter(|(a, ..)| crate::artists::key(a) == key).map(|(_, id, _)| *id).collect();
+    for row in rows.iter_mut() {
+        row.new = ids.contains(&row.id);
+    }
+    fresh.retain(|(a, ..)| crate::artists::key(a) != key);
+    read.insert(key);
+}
+
+/// Each artist row's releases the check called new, by title, matched on `artists::key` as `mark_new` matches.
+pub fn new_titles(rows: &[ArtistRow], fresh: &[(String, u64, String)]) -> Vec<Vec<String>> {
+    rows.iter()
+        .map(|row| {
+            let key = crate::artists::key(&row.name);
+            fresh.iter().filter(|(a, ..)| crate::artists::key(a) == key).map(|(.., title)| title.clone()).collect()
+        })
+        .collect()
+}
+
+/// The row for an artist under any spelling of their name.
+pub fn artist_at(rows: &[ArtistRow], name: &str) -> Option<usize> {
+    let key = crate::artists::key(name);
+    rows.iter().position(|row| crate::artists::key(&row.name) == key)
+}
+
 /// What the pick gate opens with: everything it could fetch, so Enter is the whole playlist and the work
 /// is unmarking. `held` is what the run asked to leave unmarked.
 // Nothing on disk, departed, or a file the playlist never had: the gate has nothing to ask about those.
@@ -572,5 +606,34 @@ mod tests {
     fn the_tally_counts_each_status_in_its_column_order() {
         let tracks = with(&[Status::Failed, Status::Ok, Status::Failed, Status::Manual]);
         assert_eq!(counts(&tracks), [(Status::Ok, 1), (Status::Manual, 1), (Status::Failed, 2)]);
+    }
+
+    fn release(id: u64) -> AlbumRow {
+        AlbumRow { id, title: "t".into(), year: None, kind: "album".into(), have: 0, of: None, new: false }
+    }
+
+    // A release stays new until its artist's page is opened, under any spelling of the name.
+    #[test]
+    fn a_new_release_is_marked_on_its_page_and_then_no_longer_counted() {
+        let mut fresh = vec![("Björk".to_string(), 2, "Fossora".to_string()), ("Can".to_string(), 9, "Live".to_string())];
+        let mut read = HashSet::new();
+        let mut rows = vec![release(1), release(2)];
+        mark_new("bjork", &mut rows, &mut fresh, &mut read);
+        assert_eq!(rows.iter().map(|r| r.new).collect::<Vec<_>>(), [false, true]);
+        assert_eq!(fresh.len(), 1, "the page's releases are still counted as new");
+        assert_eq!(fresh[0].0, "Can");
+        // A late answer from the check does not bring back what the page just marked seen.
+        assert_eq!(unread(vec![("Björk".into(), 2, "Fossora".into()), ("Can".into(), 9, "Live".into())], &read).len(), 1);
+    }
+
+    // The page asks these by key, so "Bjork" on a row and "Björk" in the check are one artist.
+    #[test]
+    fn an_artists_new_releases_and_row_are_found_under_any_spelling() {
+        let row = |name: &str| ArtistRow { name: name.into(), tracks: 1, albums: 1, starred: false, folders: Vec::new() };
+        let rows = vec![row("Bjork"), row("Can")];
+        let fresh = vec![("Björk".to_string(), 2, "Fossora".to_string())];
+        assert_eq!(new_titles(&rows, &fresh), [vec!["Fossora".to_string()], vec![]]);
+        assert_eq!(artist_at(&rows, "BJÖRK"), Some(0));
+        assert_eq!(artist_at(&rows, "Neu!"), None);
     }
 }

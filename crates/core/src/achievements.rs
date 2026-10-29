@@ -61,7 +61,7 @@ impl Achievement {
         }
     }
 
-    #[cfg(test)]
+    /// The achievement an id names, for a front end recording what it showed by id.
     pub fn from_id(id: &str) -> Option<Achievement> {
         ALL.into_iter().find(|a| a.id() == id)
     }

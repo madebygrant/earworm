@@ -578,7 +578,7 @@ fn destination(asker: &Asker, dir: &Path) -> Result<Option<PathBuf>> {
     } else {
         format!("a folder on a stick, card or synced drive  ·  mounted: {}", found.join("  "))
     };
-    let Some(answer) = asker.input_noted("Export to", &note, "", crate::protocol::Escape::Keep) else {
+    let Some(answer) = asker.input_path("Export to", &note, crate::protocol::Escape::Keep, crate::protocol::Browse::Folder) else {
         return Ok(None);
     };
     let answer = answer.trim();

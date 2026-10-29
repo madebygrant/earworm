@@ -2,7 +2,7 @@
 // through `apply`; the effects it returns are core questions, answered here and folded back in.
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Msg, Reply, SettingRow, Word } from "./protocol";
+import type { AlbumRow, Msg, Reply, SettingRow, Word } from "./protocol";
 import { apply, expire, initial, say, type Effect, type State } from "./reducer";
 
 export interface Theme {
@@ -31,16 +31,19 @@ interface Boot {
   statuses: Word[];
   setup: Setup;
   replay: Sent[];
+  music: boolean;
 }
 
 export const app = $state({
   model: initial() as State,
   theme: null as Theme | null,
-  /** Why the config would not build, shown where somebody launched from the Finder will see it. */
+  // Why the config would not build, shown where somebody launched from the Finder will see it.
   error: null as string | null,
-  /** The worker has dropped its sender. */
+  // The worker has dropped its sender.
   gone: false,
   setup: null as Setup | null,
+  // The YouTube Music unlock. Off, the artist page lists and never offers a download, and says nothing of it.
+  music: false,
 });
 
 // A floor plus reading time, as the terminal's: one length fitted "saved track 12" and not a long error.
@@ -69,10 +72,27 @@ export function flash(text: string) {
   update(say(app.model, text));
 }
 
-async function run(effect: Effect) {
+// One at a time and in order, each reading the state as it is when it runs: two run side by side from
+// snapshots took the new releases and the pages read from before each other and overwrote one another.
+let effects = Promise.resolve();
+function run(effect: Effect) {
+  effects = effects.then(() => runNow(effect)).catch(() => {});
+}
+
+async function runNow(effect: Effect) {
   if ("GateMarks" in effect) {
     const marked = await invoke<number[]>("gate_marks", effect.GateMarks);
     update({ ...app.model, marked });
+  } else if ("Unread" in effect) {
+    const newReleases = await invoke<[string, number, string][]>("unread", { found: effect.Unread.found, read: app.model.pagesRead });
+    update({ ...app.model, newReleases });
+  } else if ("MarkNew" in effect) {
+    const { name } = effect.MarkNew;
+    const asked = { ...effect.MarkNew, fresh: app.model.newReleases, read: app.model.pagesRead };
+    const [rows, newReleases, pagesRead] = await invoke<[AlbumRow[], [string, number, string][], string[]]>("mark_new", asked);
+    // Only onto the page it was asked for: a quick Esc to another artist has moved on.
+    const page = app.model.page.name === name ? { ...app.model.page, rows } : app.model.page;
+    update({ ...app.model, page, newReleases, pagesRead });
   }
 }
 
@@ -87,7 +107,7 @@ export function dispatch(msg: Msg) {
   for (const effect of step.effects) void run(effect);
 }
 
-/** Paints the palette core sent as the stylesheets' variables, and flashes what became of the switch. */
+// Paints the palette core sent as the stylesheets' variables, and flashes what became of the switch.
 export function paint(theme: Theme) {
   for (const [name, value] of Object.entries(theme.vars)) {
     document.documentElement.style.setProperty(`--${name}`, value);
@@ -108,6 +128,7 @@ export async function chooseTheme(name: string) {
 export async function tryCode(code: string) {
   const found = await invoke<{ said: string; theme: Theme | null; music: boolean }>("cheat", { code });
   if (found.theme) paint({ ...found.theme, said: null });
+  app.music = found.music;
   flash(found.said);
 }
 
@@ -129,7 +150,8 @@ export async function boot() {
   await listen<Sent>("earworm://msg", (e) => (held ? held.push(e.payload) : take(e.payload)));
   await listen("earworm://gone", () => (app.gone = true));
   try {
-    const { theme, statuses, setup, replay } = await invoke<Boot>("start");
+    const { theme, statuses, setup, replay, music } = await invoke<Boot>("start");
+    app.music = music;
     app.model = { ...app.model, statuses, settings: { text: setup.text, format: setup.format, rows: setup.rows } };
     app.setup = setup;
     paint(theme);
@@ -140,7 +162,7 @@ export async function boot() {
   held = null;
 }
 
-/** Answers the question on screen. Taken off the screen first, so a second key cannot answer it twice. */
+// Answers the question on screen. Taken off the screen first, so a second key cannot answer it twice.
 export async function reply(r: Reply) {
   const open = app.model.prompt;
   if (!open) return;

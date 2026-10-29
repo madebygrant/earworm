@@ -41,10 +41,10 @@ describe("the reducer", () => {
   });
 
   it("makes the link question the whole screen only while there is nothing in the library", () => {
-    const link = { Ask: { id: 1, prompt: { Input: { header: "YouTube playlist URL", note: "", value: "", escape: "Quit" as const } } } };
+    const link = { Ask: { id: 1, prompt: { Input: { header: "YouTube playlist URL", note: "", value: "", escape: "Quit" as const, browse: null } } } };
     expect(firstScreen(run(initial(statuses), link))).toBe(true);
     // The format question asked straight after the link is a dialog, not the first screen.
-    const format = { Ask: { id: 2, prompt: { Choice: { header: "Format", note: "", options: ["opus"], escape: "Keep" as const } } } };
+    const format = { Ask: { id: 2, prompt: { Choice: { header: "Format", note: "", options: ["opus"], escape: "Keep" as const, pictures: [] } } } };
     expect(firstScreen(run(initial(statuses), format))).toBe(false);
     expect(firstScreen(run(initial(statuses), { Library: { shelves: [shelf("Sleep")], show: false } }, link))).toBe(false);
   });
@@ -68,6 +68,15 @@ describe("the reducer", () => {
   it("counts settled tracks by core's word for each status", () => {
     const s = { ...initial(statuses), tracks: tracks("Ok", "Pending", "Failed", "Downloading") };
     expect(settledCount(s)).toBe(2);
+  });
+
+  it("asks core which releases are new rather than marking them itself", () => {
+    const rows = [{ id: 2, title: "Fossora", year: 2022, kind: "album", have: 0, of: null, new: false }];
+    const opened = { ...initial(statuses), page: { ...initial().page, name: "Björk" }, newReleases: [["Björk", 2, "Fossora"]] as [string, number, string][] };
+    const step = apply(opened, { Discography: { name: "Björk", found: null, rows: { Ok: rows } } });
+    expect(step.effects).toEqual([{ MarkNew: { name: "Björk", rows, fresh: [["Björk", 2, "Fossora"]], read: [] } }]);
+    const late = apply({ ...opened, pagesRead: ["bjork"] }, { NewReleases: [["Björk", 2, "Fossora"]] });
+    expect(late.effects).toEqual([{ Unread: { found: [["Björk", 2, "Fossora"]], read: ["bjork"] } }]);
   });
 
   it("drops the thumbnails when a cover changes, so they are asked for again", () => {

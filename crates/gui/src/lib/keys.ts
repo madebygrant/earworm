@@ -3,6 +3,8 @@
 // `w` is the one this app adds. Which rows a marking key takes is core's, asked over IPC.
 import { invoke } from "@tauri-apps/api/core";
 import type { Kind, Sort, Status } from "./protocol";
+import * as sc from "./screens.svelte";
+import { screens } from "./screens.svelte";
 import { answerPick, app, walkTheme } from "./store.svelte";
 import { canBrowse, canCommand, quit, say, send, ui, working } from "./ui.svelte";
 
@@ -25,6 +27,11 @@ export async function handleKey(e: KeyboardEvent) {
   // ⌘c copies and ⌘r is not retry: the platform's shortcuts are left to the platform.
   if (e.metaKey || e.altKey) return;
   if (consoleHooks.isOpen()) return;
+  // Dismissed by any key, which goes no further; ^c is the exception, since it arrived unasked.
+  if (screens.toast && !(e.ctrlKey && e.key === "c")) {
+    e.preventDefault();
+    return sc.endPrizes();
+  }
   // `^z` then `^x`: two keys, because each alone is a quit reflex, and any key in between disarms it.
   const wasArmed = armed;
   armed = 0;
@@ -39,6 +46,24 @@ export async function handleKey(e: KeyboardEvent) {
   // The dialog and the first screen take their own keys while the worker is asking.
   if (app.model.prompt) return;
   if (ui.quitting) return quitKey(e);
+  if (screens.discard) return discardKey(e);
+  // The sheet swallows the key that closes it, or closing it would be a guess about what the key also did.
+  if (screens.help && e.key !== "q") {
+    e.preventDefault();
+    screens.help = false;
+    return;
+  }
+  const view = app.model.view;
+  if (view === "Settings") return settingsKey(e);
+  // Never where it would be a typed comma: a query box or the picker.
+  // Not over the pick gate, which the worker is blocked on and which would stay drawn over the settings.
+  if (e.key === "," && !ui.typing && !screens.artistTyping && view !== "Pick" && app.model.picking === null) {
+    e.preventDefault();
+    return sc.openSettings();
+  }
+  // Letters type in the picker, so its keys come before every guard on a focused input.
+  if (view === "Pick") return pickerKey(e);
+  if (view === "Artists" && screens.artistTyping) return artistQueryKey(e);
   if (ui.typing) return filterKey(e);
   if (e.ctrlKey && !CTRL.includes(e.key)) return;
   // A focused control keeps its own keys: arrows on the theme picker are not cursor moves, and space or
@@ -46,9 +71,155 @@ export async function handleKey(e: KeyboardEvent) {
   const target = e.target as HTMLElement | null;
   if (target instanceof HTMLSelectElement || target instanceof HTMLInputElement) return;
   if (target instanceof HTMLButtonElement && (e.key === " " || e.key === "Enter")) return;
+  if (view === "Found") return foundKey(e);
+  if (view === "Library" && app.model.picking === null) return libraryKey(e);
+  if (view === "Artist") return pageKey(e);
+  if (view === "Artists") return artistsKey(e);
+  if (view === "Playlist") return playlistKey(e);
   if (app.model.picking !== null) return pickKey(e);
-  if (app.model.view === "Library") return libraryKey(e);
-  if (app.model.view === "Tracks") return trackKey(e);
+  if (view === "Tracks") return trackKey(e);
+}
+
+// The picker's own question: y or Enter drops the marks, Esc keeps picking, as on the quit question.
+function discardKey(e: KeyboardEvent) {
+  e.preventDefault();
+  screens.discard = false;
+  if (["y", "Y", "Enter"].includes(e.key)) sc.closePicker();
+  else if (e.ctrlKey && e.key === "c") void quit();
+}
+
+const help = (e: KeyboardEvent) => (e.key === "h" || e.key === "?") && (screens.help = true);
+
+// Letters type into the box, so help is F1, the marked view F2 and quitting ^c.
+function pickerKey(e: KeyboardEvent) {
+  const k = e.key;
+  const done = () => e.preventDefault();
+  if (e.ctrlKey && k === "c") return void quit();
+  if (k === "F1") return done(), void (screens.help = true);
+  if (k === "F2") return done(), sc.pickMarkedOnly();
+  if (k === "Escape") return done(), sc.pickHasChanges() ? void (screens.discard = true) : sc.closePicker();
+  if (k === "Enter") return done(), void sc.pickEnter();
+  if (k === "Tab") return done(), sc.pickMark();
+  if (k === "ArrowDown" || (e.ctrlKey && k === "n")) return done(), sc.pickMove(1);
+  if (k === "ArrowUp" || (e.ctrlKey && k === "p")) return done(), sc.pickMove(-1);
+  if (k === "PageDown") return done(), sc.pickMove(page());
+  if (k === "PageUp") return done(), sc.pickMove(-page());
+  if (e.ctrlKey && k === "a") return done(), sc.pickMarkAll();
+}
+
+function artistQueryKey(e: KeyboardEvent) {
+  if (e.key === "Escape") {
+    e.preventDefault();
+    screens.artistTyping = false;
+    screens.artistQuery = "";
+  } else if (e.key === "Enter") {
+    e.preventDefault();
+    screens.artistTyping = false;
+  } else if (e.key === "ArrowDown") sc.artistMove(1);
+  else if (e.key === "ArrowUp") sc.artistMove(-1);
+}
+
+// The common movement keys for a list that is not the tracks, as one step function.
+function listMove(e: KeyboardEvent, move: (by: number | "first" | "last") => void): boolean {
+  const k = e.key;
+  const by = k === "j" || k === "ArrowDown" ? 1 : k === "k" || k === "ArrowUp" ? -1 : k === "g" ? "first" : k === "G" ? "last"
+    : k === "PageDown" || (e.ctrlKey && k === "d") ? page() : k === "PageUp" || (e.ctrlKey && k === "u") ? -page() : null;
+  if (by === null) return false;
+  e.preventDefault();
+  move(by);
+  return true;
+}
+
+// Enter opens the folder a result is in, on the track; Esc goes back to the library and keeps the query.
+function foundKey(e: KeyboardEvent) {
+  const k = e.key;
+  if (listMove(e, sc.foundMove) || help(e)) return;
+  if (k === "q" || (e.ctrlKey && k === "c")) return askQuit();
+  if (k === "Escape") return void (app.model = { ...app.model, view: "Library" });
+  if (k === "/") return e.preventDefault(), void (ui.typing = true);
+  if (k === "l") return void (ui.logs = !ui.logs);
+  if (k === "Tab" || k === " ") return e.preventDefault(), void sc.foundMark();
+  if (app.model.busy || app.model.prompt) return;
+  if (k === "Enter") sc.openFound();
+  else if (k === "P") {
+    const picks = sc.foundPicks();
+    if (picks.length) void send({ AddToPlaylist: [picks, null] });
+  }
+}
+
+function artistsKey(e: KeyboardEvent) {
+  const k = e.key;
+  if (listMove(e, sc.artistMove) || help(e)) return;
+  if (k === "q" || (e.ctrlKey && k === "c")) return askQuit();
+  if (k === "Escape") {
+    if (screens.artistQuery) screens.artistQuery = "";
+    else app.model = { ...app.model, view: "Library" };
+    return;
+  }
+  if (k === "/") return e.preventDefault(), void (screens.artistTyping = true);
+  if (k === "l") return void (ui.logs = !ui.logs);
+  if (app.model.busy) return;
+  const row = sc.artistSelected();
+  if (k === "*" && row) void send({ Star: row.name });
+  else if (k === "Enter") sc.openPage();
+  else if (k === "o") void sc.artistFolders();
+}
+
+// Not gated on busy: switching lists needs no worker. Locked, Enter on a release or a top track is silent.
+function pageKey(e: KeyboardEvent) {
+  const k = e.key;
+  if (listMove(e, sc.pageMove) || help(e)) return;
+  if (k === "q" || (e.ctrlKey && k === "c")) return askQuit();
+  if (k === "Escape") return app.model.searching ? void sc.stopSearch() : sc.leavePage();
+  if (k === "l") return void (ui.logs = !ui.logs);
+  if (k === "Tab") return e.preventDefault(), sc.pageSection();
+  if (k === "w") return void (ui.mode = ui.mode === "tiles" ? "list" : "tiles");
+  if (k === "a" && screens.section === "Releases") {
+    screens.allKinds = !screens.allKinds;
+    return;
+  }
+  if (app.model.busy || app.model.prompt) return;
+  if (k === "o") void sc.artistFolders();
+  else if (k === "Enter") sc.pageEnter();
+}
+
+// Its rows are ids resolved to files in other folders, so none of the track list's keys apply: Enter goes
+// to the source, which is where a track's tags are edited.
+function playlistKey(e: KeyboardEvent) {
+  const k = e.key;
+  const name = app.model.custom.name;
+  if (listMove(e, sc.customMove) || help(e)) return;
+  if (k === "q" || (e.ctrlKey && k === "c")) return askQuit();
+  if (k === "Escape") return void (app.model = { ...app.model, view: "Library" });
+  if (k === "l") return void (ui.logs = !ui.logs);
+  if (app.model.busy || app.model.prompt) return;
+  const row = sc.customRow();
+  if ((k === "J" || k === "K") && row) void send({ MoveEntry: { name, id: row.id, up: k === "K" } });
+  else if ((k === "x" || k === "Delete") && row) void send({ RemoveEntry: { name, id: row.id } });
+  else if (k === "P") sc.reopenPicker();
+  else if (k === "p" && app.model.playback.player === "Running") void send({ PlayPlaylist: name });
+  else if (k === "Enter" && row) {
+    if (!row.path) return say(`${row.file} is not on disk  ·  x takes it off the list`);
+    sc.screens.fromFound = false;
+    void send({ Open: [row.path.slice(0, row.path.lastIndexOf("/")), row.file] });
+  }
+}
+
+function settingsKey(e: KeyboardEvent) {
+  const k = e.key;
+  const rows = app.model.settings.rows.length;
+  if (help(e)) return;
+  if (k === "q" || (e.ctrlKey && k === "c")) return askQuit();
+  if (k === "Escape" || k === ",") return e.preventDefault(), sc.leaveSettings();
+  if (k === "l") return void (ui.logs = !ui.logs);
+  if (listMove(e, (by) => {
+    const at = screens.settingsAt;
+    screens.settingsAt = by === "first" ? 0 : by === "last" ? rows - 1 : Math.min(rows - 1, Math.max(0, at + by));
+  })) return;
+  if (k === "Enter" || k === " ") {
+    e.preventDefault();
+    void sc.changeSetting(walkTheme);
+  }
 }
 
 // Only a named key confirms, so an unrecognised one can never be an accidental yes; `qq` quits unread.
@@ -78,6 +249,7 @@ export function clearFilter() {
   ui.filter = "";
   ui.typing = false;
   ui.only = null;
+  ui.byArtist = null;
   app.model = { ...app.model, review: false };
 }
 
@@ -183,6 +355,14 @@ async function pickKey(e: KeyboardEvent) {
   else if (e.key === "q") askQuit();
 }
 
+// The marked tracks, or the one under the cursor, as folder and filename: the worker works out the id.
+function picks(): [string, string][] {
+  return targets()
+    .map((i) => app.model.tracks.find((t) => t.index === i)?.path)
+    .filter((p): p is string => !!p)
+    .map((p) => [p.slice(0, p.lastIndexOf("/")), p.slice(p.lastIndexOf("/") + 1)]);
+}
+
 function targets(): number[] {
   const m = app.model;
   if (m.marked.length) return [...m.marked].sort((a, b) => a - b);
@@ -201,6 +381,7 @@ async function trackKey(e: KeyboardEvent) {
   const t = cursorTrack();
   const k = e.key;
   if (k === "q" || (e.ctrlKey && k === "c")) return askQuit();
+  if (help(e)) return;
   if (k === "Escape") return escapeTracks();
   if (k === "/") {
     e.preventDefault();
@@ -226,6 +407,12 @@ async function trackKey(e: KeyboardEvent) {
   else if (k === "p" && m.playback.player === "Running" && m.folder) void send({ Play: m.folder });
   else if (k === "s") void send({ Swap: targets() });
   else if (k === "A") void send({ Artist: targets() });
+  else if (k === "P") void send({ AddToPlaylist: [picks(), null] });
+  else if (k === "*" && t) {
+    const lead = await invoke<string>("lead_artist", { artist: t.artist });
+    if (!lead) say("this track has no artist to star  ·  e sets one");
+    else void send({ Star: lead });
+  }
 }
 
 // The filter first, then the marks, then the library, and never out of the app.
@@ -239,7 +426,10 @@ function escapeTracks() {
   }
   if (working()) return say("still working  ·  q quits");
   if (!m.library.length) return say("nothing behind this  ·  q quits");
-  app.model = { ...m, view: "Library" };
+  // A folder opened from a search result goes back to the results.
+  const back = sc.screens.fromFound && ui.filter.trim() ? "Found" : "Library";
+  sc.screens.fromFound = false;
+  app.model = { ...m, view: back };
 }
 
 async function review() {
@@ -267,6 +457,15 @@ function attention(forward: boolean) {
   app.model = { ...app.model, cursor: next };
 }
 
+function customKey(k: string, name: string, playing: boolean) {
+  if (k === "Enter") void send({ OpenPlaylist: name });
+  else if (k === "e") void send({ RenamePlaylist: name });
+  else if (k === "D") void send({ DeletePlaylist: name });
+  else if (k === "E") void send({ Export: { List: name } });
+  else if (k === "p" && playing) void send({ PlayPlaylist: name });
+  else if (k === "S") say("a custom playlist is built here  ·  there is nothing upstream to sync");
+}
+
 function shelfOrder(): string[] {
   return ui.shelves.map((at) => app.model.library[at]?.path).filter((p) => p !== undefined);
 }
@@ -285,8 +484,9 @@ async function libraryKey(e: KeyboardEvent) {
   else if (k === "PageDown" || (e.ctrlKey && k === "d")) go(at + 10);
   else if (k === "PageUp" || (e.ctrlKey && k === "u")) go(at - 10);
   else if (k === "q" || (e.ctrlKey && k === "c")) askQuit();
+  else if (help(e)) return;
   else if (k === "Escape") {
-    if (ui.filter || ui.only) clearFilter();
+    if (ui.filter || ui.only || ui.byArtist) clearFilter();
     else say("this is the top  ·  q quits");
   } else if (k === "/") {
     e.preventDefault();
@@ -304,10 +504,18 @@ async function libraryKey(e: KeyboardEvent) {
   else if (!canBrowse()) return;
   else if (k === "R") void send("ResyncAll");
   else if (k === "n") void send("Url");
+  else if (k === "N") void send("NewPlaylist");
+  else if (k === "t") void sc.findTracks();
+  else if (k === "b") sc.openArtists();
   else if (k === " " && m.playback.player === "Running") void send("Toggle");
   else if (!shelf) return;
-  else if (shelf.kind === "Custom") say("a custom playlist has no screen in the desktop app yet");
-  else if (k === "Enter") void send({ Open: [shelf.path, null] });
+  // A list's row carries its file as the path, so it goes by name and never to a folder command.
+  else if (shelf.kind === "Custom") customKey(k, shelf.name, m.playback.player === "Running");
+  else if (k === "E") void send({ Export: { Folder: shelf.path } });
+  else if (k === "Enter") {
+    sc.screens.fromFound = false;
+    void send({ Open: [shelf.path, null] });
+  }
   else if (k === "S") void send({ Sync: shelf.path });
   else if (k === "O") void send({ Reveal: shelf.path });
   else if (k === "e") void send({ Rename: shelf.path });

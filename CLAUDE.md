@@ -78,7 +78,9 @@ turns on.
 through Vite. `src-tauri/src/main.rs` (package `earworm-gui`, binary
 `earworm-desktop`) starts the worker, sends every `Msg` to the page on the
 `earworm://msg` event, and exposes `send`, `answer`, the theme and `view`
-functions as commands. `src/lib/reducer.ts` is the page's `App::apply`;
+functions as commands. `src/lib/reducer.ts` is the page's `App::apply`, `src/lib/keys.ts` its
+`handle_key` and `src/lib/screens.svelte.ts` the cursors and actions of the
+screens past the run and the library;
 `src/lib/msgs.json` is recorded from core's samples for its tests. Run it
 with `pnpm dev` in `crates/gui` and `cargo run -p earworm-gui`, or
 `pnpm tauri dev`; `pnpm test` runs the reducer tests.

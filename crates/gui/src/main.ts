@@ -13,6 +13,10 @@ if (import.meta.env.DEV && !("__TAURI_INTERNALS__" in window)) {
   const { previewState } = await import("./preview");
   const { ui } = await import("./lib/ui.svelte");
   ui.quitting = previewState.quit;
+  // A handle for putting the page on a screen no message reaches, such as an artist's page, to capture it.
+  const { screens } = await import("./lib/screens.svelte");
+  const { app } = await import("./lib/store.svelte");
+  Object.assign(window, { earworm: { app, ui, screens } });
   ui.logs = previewState.logs;
   if (previewState.mode) ui.mode = previewState.mode;
 }

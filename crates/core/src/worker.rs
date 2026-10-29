@@ -4370,6 +4370,12 @@ fn cover_options(found: &[lookup::Artwork], current: Option<String>) -> Vec<(Str
     rows
 }
 
+// The picture beside each row, one per row so an index means the same row in both lists. Only a found
+// cover has one: the others are about what the folder already has.
+fn cover_pictures(options: &[(String, Pick)]) -> Vec<Option<String>> {
+    options.iter().map(|(_, pick)| if let Pick::Url(url) = pick { Some(url.clone()) } else { None }).collect()
+}
+
 /// Either extension can be the folder cover, so both are candidates for the
 /// "keep" row and both are cleared before a new one is written.
 const COVER_NAMES: [&str; 2] = ["cover.jpg", "cover.png"];
@@ -4610,11 +4616,12 @@ fn cover(
     );
     let options = cover_options(&found, current_cover(&folder));
     let labels: Vec<String> = options.iter().map(|(label, _)| label.clone()).collect();
+    let pictures = cover_pictures(&options);
 
     // The candidates come from the selected track, so the header has to say so.
     let name = folder.file_name().unwrap_or_default().to_string_lossy();
     let header = format!("Cover for {name}   matches for {}", tracks[pos].name);
-    let Some(pick) = asker.choose(&header, labels) else {
+    let Some(pick) = asker.choose_pictured(&header, labels, pictures) else {
         return cancelled(tx);
     };
     let Some((label, source)) = options.get(pick) else {
@@ -4629,7 +4636,7 @@ fn cover(
         Pick::Keep => return cancelled(tx),
         Pick::Restore => return restore_art(tx, tracks, asker, cancel, &folder, apple),
         Pick::OwnFile => {
-            let Some(typed) = asker.input("Image file", "") else {
+            let Some(typed) = asker.input_path("Image file", "", crate::protocol::Escape::Skip, crate::protocol::Browse::File) else {
                 return cancelled(tx);
             };
             if typed.is_empty() {
@@ -8777,6 +8784,11 @@ pub mod tests {
         assert_eq!(rows[2].1, Pick::Keep);
         assert_eq!(rows[3].1, Pick::Restore);
         assert_eq!(rows[4].1, Pick::OwnFile);
+        assert_eq!(
+            cover_pictures(&rows),
+            [Some("http://a".to_string()), Some("http://b".to_string()), None, None, None],
+            "a picture landed beside the wrong row"
+        );
     }
 
     /// The empty case is the one that breaks silently: with nothing found,
