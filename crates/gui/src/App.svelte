@@ -150,6 +150,9 @@
   consoleHooks.isOpen = () => code !== null;
 
   function consoleKey(e: KeyboardEvent) {
+    // The key that closes the console is the console's: by the time it reaches the window the console is shut,
+    // and the screen under it would take it as its own Enter or Esc.
+    if (e.key === "Escape" || e.key === "Enter") e.stopPropagation();
     if (e.key === "Escape") code = null;
     else if (e.key === "Enter" && code) {
       void tryCode(code).then(sc.celebrate);
