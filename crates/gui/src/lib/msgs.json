@@ -190,6 +190,7 @@
           "note": "",
           "path": "/music/Krautrock/01 - Neu! - Hallogallo.opus",
           "percent": 0,
+          "score": null,
           "source": "",
           "status": "Pending",
           "title": "",
@@ -209,6 +210,12 @@
       "Twin": {
         "index": 1,
         "twin": null
+      }
+    },
+    {
+      "Score": {
+        "index": 1,
+        "score": 0.93
       }
     },
     {

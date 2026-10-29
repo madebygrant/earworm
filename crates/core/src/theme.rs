@@ -269,6 +269,11 @@ pub fn contrast(a: (u8, u8, u8), b: (u8, u8, u8)) -> f64 {
     (x.max(y) + 0.05) / (x.min(y) + 0.05)
 }
 
+/// `a` moved `t` of the way to `b`, channel by channel, as CSS's `color-mix` in sRGB mixes.
+pub fn blend(a: (u8, u8, u8), b: (u8, u8, u8), t: f32) -> (u8, u8, u8) {
+    (mix(a.0, b.0, t), mix(a.1, b.1, t), mix(a.2, b.2, t))
+}
+
 /* Every palette this run can reach: the built-ins, then whatever
    `[themes.<name>]` defined, resolved once at startup.
 
@@ -413,13 +418,22 @@ impl Palette {
        A warning, never a refusal: it is the user's screen and their eyes, and
        a warning that blocks is one people learn to route around. */
     pub fn unreadable(&self) -> Vec<String> {
+        self.measure(|slot| self.grounds(slot))
+    }
+
+    /// The same for the grounds only the desktop paints, kept apart so the terminal never warns about them.
+    pub fn desktop_unreadable(&self) -> Vec<String> {
+        self.measure(|slot| self.desktop_grounds(slot))
+    }
+
+    fn measure(&self, grounds: impl Fn(&str) -> Vec<(&'static str, (u8, u8, u8))>) -> Vec<String> {
         let mut out = Vec::new();
         for (slot, color) in self.slots() {
             let Some(want) = wants(slot) else { continue };
             let Color::Rgb(r, g, b) = color else {
                 continue;
             };
-            for (where_, ground) in self.grounds(slot) {
+            for (where_, ground) in grounds(slot) {
                 let ratio = contrast((r, g, b), ground);
                 if ratio < want {
                     out.push(format!("{slot} on {where_} is {ratio:.1}:1, wants {want}:1"));
@@ -446,6 +460,27 @@ impl Palette {
         let mut out = vec![("the gradient", self.near), ("the gradient", self.far)];
         out.extend(rgb(self.surface).map(|s| ("popups", s)));
         out
+    }
+
+    // The bar is `surface` at 82% over the gradient, so it is measured composited on each end. Text over a
+    // sleeve's scrim is over a picture and cannot be measured.
+    fn desktop_grounds(&self, slot: &str) -> Vec<(&'static str, (u8, u8, u8))> {
+        let (Color::Rgb(r, g, b), true) = (self.surface, slot != "ink") else {
+            return Vec::new();
+        };
+        let mut out: Vec<_> = self.card2().map(|c| ("card wells", c)).into_iter().collect();
+        out.extend([self.near, self.far].map(|end| ("the bar", blend(end, (r, g, b), 0.82))));
+        out
+    }
+
+    /// The desktop's well inside a card: the active pill, a stat tile, a key badge in the bar. `surface`
+    /// halfway to `far`, sunk rather than lifted toward `text`, which put warm's `muted` at 3.7:1.
+    // Measured as a ground of its own: a light surface over a dark gradient passes both ends and fails between.
+    pub fn card2(&self) -> Option<(u8, u8, u8)> {
+        match self.surface {
+            Color::Rgb(r, g, b) => Some(blend((r, g, b), self.far, 0.5)),
+            _ => None,
+        }
     }
 }
 
@@ -513,7 +548,8 @@ impl Palette {
             // A repainted slot that is not RGB has nothing to fade between.
             return self.accent;
         };
-        Color::Rgb(mix(ar, br, t), mix(ag, bg, t), mix(ab, bb, t))
+        let (r, g, b) = blend((ar, ag, ab), (br, bg, bb), t);
+        Color::Rgb(r, g, b)
     }
 }
 
@@ -744,7 +780,7 @@ mod tests {
         for (theme, palette) in BUILT_INS.into_iter().chain(SECRETS) {
             for (slot, color) in palette.slots() {
                 let Some(want) = wants(slot) else { continue };
-                for (ground, bg) in palette.grounds(slot) {
+                for (ground, bg) in palette.grounds(slot).into_iter().chain(palette.desktop_grounds(slot)) {
                     let ratio = contrast(rgb(color), bg);
                     assert!(
                         ratio >= want,
@@ -882,6 +918,19 @@ mod tests {
         palette.muted = Color::Rgb(58, 58, 58);
         let notes = palette.unreadable();
         assert!(notes.iter().any(|n| n.contains("gradient")), "{notes:?}");
+    }
+
+    #[test]
+    fn muted_is_measured_on_the_desktops_card_wells() {
+        let mut palette = WARM;
+        // White popups over a black gradient: a mid-grey muted clears both and not the grey well between.
+        (palette.near, palette.far) = ((0, 0, 0), (0, 0, 0));
+        palette.surface = Color::Rgb(255, 255, 255);
+        palette.muted = Color::Rgb(0x76, 0x76, 0x76);
+        let notes = palette.desktop_unreadable();
+        assert_eq!(notes.iter().filter(|n| n.starts_with("muted")).collect::<Vec<_>>(), ["muted on card wells is 1.2:1, wants 4.5:1"]);
+        assert!(!palette.unreadable().iter().any(|n| n.contains("card wells")), "the terminal was told about a desktop ground");
+        assert_eq!(WARM.card2(), Some((0x20, 0x15, 0x1C)));
     }
 
     /* The band's ink is read on the band and nowhere else. Measured against

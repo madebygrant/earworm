@@ -19,7 +19,7 @@ use earworm_core::manifest::Kind;
 use earworm_core::achievements::{self, Achievement, Facts};
 use earworm_core::picker::{self, Hit, Marks};
 use earworm_core::protocol::{self, AlbumRow, ArtistRow, Cmd, Msg, Playback, Reply, Shelf, Status, Track};
-use earworm_core::theme::{Palette, Themes};
+use earworm_core::theme::{blend, Palette, Themes};
 use earworm_core::view::{self, Narrow, ShelfNarrow, Sort};
 use earworm_core::{deps, lookup, tag, tools, update, worker, ytdlp};
 use ratatui_core::style::Color;
@@ -105,12 +105,28 @@ fn light(p: &Palette) -> bool {
     earworm_core::theme::contrast(p.near, (0, 0, 0)) > earworm_core::theme::contrast(p.near, (255, 255, 255))
 }
 
-// Every slot by its role name, which is also the stylesheets' variable name, plus the gradient's ends.
+fn rgba((r, g, b): (u8, u8, u8), alpha: f32) -> String {
+    format!("rgba({r}, {g}, {b}, {alpha})")
+}
+
+// Every slot by its role name, which is also the stylesheets' variable name, plus the gradient's ends and
+// the tones look.css derives from them. Mixed here rather than with `color-mix()`, which WebKit lacks before
+// macOS 13.1 and the bundle runs from 11.
 fn vars(p: &Palette) -> BTreeMap<&'static str, String> {
     let mut vars: BTreeMap<&'static str, String> = p.slots().into_iter().map(|(name, c)| (name, hex(c))).collect();
-    vars.insert("near", hex(Color::Rgb(p.near.0, p.near.1, p.near.2)));
-    vars.insert("far", hex(Color::Rgb(p.far.0, p.far.1, p.far.2)));
+    let rgb = |c: Color| match c {
+        Color::Rgb(r, g, b) => (r, g, b),
+        other => panic!("a palette slot is not RGB: {other:?}"),
+    };
+    let tone = |(r, g, b): (u8, u8, u8)| hex(Color::Rgb(r, g, b));
+    vars.insert("near", tone(p.near));
+    vars.insert("far", tone(p.far));
     vars.insert("stop", format!("{:.0}%", p.stop * 100.0));
+    vars.insert("card2", tone(p.card2().expect("surface is RGB, as hex requires of every slot")));
+    vars.insert("glass", rgba(rgb(p.surface), 0.82));
+    vars.insert("accent2", tone(blend(rgb(p.accent), p.far, 0.35)));
+    vars.insert("glow", rgba(rgb(p.accent), 0.22));
+    vars.insert("scrim", rgba(p.far, 0.78));
     vars
 }
 
@@ -769,8 +785,14 @@ mod tests {
     fn the_palette_paints_exactly_the_colours_the_stylesheets_use() {
         let tokens = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../../docs/mockups/tokens.css")).unwrap();
         let block = tokens.split("[data-theme=\"graphite\"]").nth(1).unwrap().split('}').next().unwrap();
-        let used: std::collections::BTreeSet<&str> =
+        let mut used: std::collections::BTreeSet<&str> =
             block.split("--").skip(1).map(|v| v.split(':').next().unwrap().trim()).collect();
+        // look.css defines its aliases and reads every other variable it names from the palette.
+        let look = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../src/look.css")).unwrap();
+        let named = |s: &str| s.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').count();
+        let defined: std::collections::BTreeSet<&str> =
+            look.split("  --").chain(look.split("; --")).skip(1).map(|v| &v[..named(v)]).collect();
+        used.extend(look.split("var(--").skip(1).map(|v| &v[..named(v)]).filter(|v| !defined.contains(v)));
         let themes = Themes::default();
         for name in themes.list() {
             let vars = vars(&themes.named(name).unwrap());

@@ -2612,6 +2612,7 @@ fn tag_tracks(
                 track.artist = out.artist;
                 track.title = out.title;
                 track.mbid = out.mbid;
+                set_score(tx, track, out.score);
                 let info = tag::read(&path).ok();
                 // The file is the truth, so a line for a recording it no longer holds goes.
                 let isrc = info.as_ref().map_or(out.isrc, |i| i.isrc.clone());
@@ -2673,6 +2674,7 @@ fn tag_tracks(
             }
             Err(err) => {
                 track.status = Status::Failed;
+                set_score(tx, track, None);
                 let _ = tx.send(Msg::Update {
                     index: track.index,
                     status: Status::Failed,
@@ -3966,6 +3968,12 @@ fn undo(cfg: &Config, tx: &Sender<Msg>, tracks: &mut [Track], held: &mut Option<
    them in has to send it: the worker's copy of a track is not the one the
    detail pane draws, and a run that skipped this showed no album until the
    folder was reopened from the library. */
+// Every path that changes how a track was matched goes through here, or a typed tag keeps AcoustID's score.
+fn set_score(tx: &Sender<Msg>, track: &mut Track, score: Option<f64>) {
+    track.score = score;
+    let _ = tx.send(Msg::Score { index: track.index, score });
+}
+
 fn offer_meta(tx: &Sender<Msg>, track: &Track) {
     let _ = tx.send(Msg::Meta {
         index: track.index,
@@ -4027,6 +4035,7 @@ fn write_track(
     track.status = status;
     track.source = source.into();
     track.note.clear();
+    set_score(tx, track, None);
     if !departed {
         track.listed = true;
     }
@@ -4295,6 +4304,7 @@ fn search(
     track.source = m.source.into();
     track.note = std::mem::take(&mut note);
     track.mbid = m.mbid.clone();
+    set_score(tx, track, m.score);
     let isrc = written.as_ref().and_then(|i| i.isrc.clone());
     if isrc.is_none()
         && track.isrc.is_some()
@@ -7345,6 +7355,32 @@ pub mod tests {
        the old filename, `write_playlist` in a folder with no URL finds a file
        it does not recognise and refuses for good: earworm stops updating its
        own playlist after the rename, silently, for good. */
+    // A typed tag was matched by nobody, so it must not keep the fingerprint's confidence.
+    #[test]
+    fn a_hand_edit_clears_the_match_score() {
+        let root = scratch("edit-score");
+        let dir = root.join("Mix");
+        std::fs::create_dir_all(&dir).unwrap();
+        if tiny_opus(&dir.join("01 - A.opus")).is_none() {
+            eprintln!("no ffmpeg, skipping");
+            let _ = std::fs::remove_dir_all(&root);
+            return;
+        }
+        let mut cfg = config(false);
+        cfg.dir = root.clone();
+        let shelf = library(&root).into_iter().find(|s| s.path == dir).unwrap();
+        let mut tracks = Vec::new();
+        open_shelf(&mut cfg, &channel().0, &mut tracks, &shelf).unwrap();
+        tracks[0].score = Some(0.93);
+
+        let (tx, rx) = channel();
+        write_track(&cfg, &tx, &mut tracks, 0, named("Neu!", "Hallogallo"), "typed").unwrap();
+        assert_eq!(tracks[0].score, None);
+        let index = tracks[0].index;
+        assert!(rx.try_iter().any(|m| matches!(m, Msg::Score { index: i, score: None } if i == index)), "the screen kept the score");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     #[test]
     fn renaming_an_adopted_folder_keeps_earworms_claim_on_its_playlist() {
         let root = scratch("rename-m3u8");

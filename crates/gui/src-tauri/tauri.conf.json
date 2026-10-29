@@ -47,7 +47,8 @@
     "category": "Music",
     "shortDescription": "Downloads a YouTube playlist as a tagged music library",
     "resources": {
-      "../node_modules/@fontsource/jetbrains-mono/LICENSE": "licenses/JetBrains-Mono-OFL.txt"
+      "../node_modules/@fontsource/jetbrains-mono/LICENSE": "licenses/JetBrains-Mono-OFL.txt",
+      "../node_modules/@fontsource/manrope/LICENSE": "licenses/Manrope-OFL.txt"
     },
     "macOS": {
       "signingIdentity": "-",

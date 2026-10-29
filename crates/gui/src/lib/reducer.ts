@@ -193,6 +193,7 @@ const handlers: Handlers = {
   Progress: (s, { index, percent }) =>
     followTo(track(s, index, (t) => ({ ...t, percent, status: "Downloading" })), index),
   Twin: (s, { index, twin }) => track(s, index, (t) => ({ ...t, twin })),
+  Score: (s, { index, score }) => track(s, index, (t) => ({ ...t, score })),
   Update: (s, { index, status, source, note, name }) =>
     followTo(
       track(s, index, (t) => ({

@@ -28,6 +28,7 @@
   import Rail from "./screens/Rail.svelte";
   import Run from "./screens/Run.svelte";
   import ShelfView from "./screens/ShelfView.svelte";
+  import sprite from "./icons.svg?raw";
 
   const m = $derived(app.model);
   const tracks = $derived(m.tracks);
@@ -195,6 +196,9 @@
 
 <!-- A click never leaves a button holding the focus, or the next space or Enter would press it again. -->
 <svelte:window onkeydown={handleKey} onmousedown={(e) => (e.target as HTMLElement).closest("button") && e.preventDefault()} />
+
+<!-- Once, for every Icon's <use>; positioned out of the body's grid. -->
+{@html sprite}
 
 <Header />
 

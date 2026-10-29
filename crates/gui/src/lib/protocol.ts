@@ -41,6 +41,7 @@ export interface Track {
   departure_proven: boolean;
   isrc: string | null;
   twin: string | null;
+  score: number | null;
 }
 
 export interface Shelf {
@@ -101,6 +102,7 @@ export type Msg =
   | { Tracks: Track[] }
   | { Progress: { index: number; percent: number } }
   | { Twin: { index: number; twin: string | null } }
+  | { Score: { index: number; score: number | null } }
   | { Update: { index: number; status: Status; source: string | null; note: string | null; name: string | null } }
   | { Meta: { index: number; artist: string; title: string; album: string; year: number | null } }
   | { Path: { index: number; path: string } }

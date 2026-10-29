@@ -1,0 +1,113 @@
+/* docs/mockups/ideas/6-wall-and-room-icons.html, scoped to `.look` while the old screens use base.css.
+   No color-mix(): macOS 11's WebKit lacks it, so main.rs derives card2, glass, accent2, glow and scrim. */
+.look {
+  --card: var(--surface); --card-2: var(--card2); --line: var(--rule); --ok: var(--cursor); --accent-2: var(--accent2);
+  --font: "Manrope", system-ui, sans-serif; --mono: "JetBrains Mono", ui-monospace, monospace;
+  --r: 18px; --r-s: 12px;
+  font: 14px/1.45 var(--font); color: var(--text);
+}
+/* base.css styles these names for the old screens. */
+.look :where(.acts, .bar, .cap, .kv, .log, .sheet, .tile, .sub, .go), .look :where(.acts, .bar, .cap, .kv, .log, .sheet, .tile, .sub, .go) * { all: revert; }
+.look * { box-sizing: border-box; }
+/* Glow is light only: muted on it measures 3:1 on warm, so no text sits on it. */
+.look .stage { background: radial-gradient(900px 400px at 70% -10%, var(--glow), transparent 60%); }
+.look kbd { font: 11px var(--mono); color: var(--accent); background: var(--card-2); padding: 1px 6px; border-radius: 6px; }
+
+.look .i { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+
+.look header { display: flex; align-items: center; gap: 24px; padding: 4px 0 16px; }
+.look .logo { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 20px; letter-spacing: -.02em; }
+.look .logo i { width: 30px; height: 30px; border-radius: 9px; background: linear-gradient(135deg, var(--accent), var(--cursor)); }
+.look .crumb { color: var(--muted); font-weight: 600; }
+.look .crumb b { color: var(--text); }
+
+.look nav.pills { margin: 0 auto; display: flex; gap: 4px; padding: 4px; background: var(--card); border: 1px solid var(--line); border-radius: 999px; }
+.look nav.pills a { color: var(--muted); text-decoration: none; padding: 8px 16px; border-radius: 999px; font-weight: 600; display: flex; gap: 8px; align-items: center; }
+.look nav.pills a .i { width: 17px; height: 17px; }
+.look nav.pills a.on { background: var(--card-2); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
+.look .tools { display: flex; gap: 8px; }
+.look .tools > * { background: var(--card); border: 1px solid var(--line); color: var(--text); border-radius: 999px; height: 38px; padding: 0 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.look .tools .search { width: 240px; color: var(--muted); }
+.look .tools .search kbd { margin-left: auto; }
+.look .tools .icon { width: 38px; padding: 0; justify-content: center; }
+
+.look .seg3 { display: flex; gap: 2px; padding: 4px; background: var(--card); border: 1px solid var(--line); border-radius: 999px; align-items: center; }
+.look .seg3 > * { width: 34px; height: 30px; border-radius: 999px; display: grid; place-items: center; color: var(--muted); }
+.look .seg3 > .on { background: var(--card-2); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
+.look .filters { display: flex; gap: 4px; padding: 4px; background: var(--card); border: 1px solid var(--line); border-radius: 999px; }
+.look .filters > * { padding: 7px 14px; border-radius: 999px; color: var(--muted); font-weight: 600; }
+.look .filters > .on { background: var(--card-2); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
+
+.look footer.bar { display: flex; align-items: center; gap: 18px; padding: 12px 18px; background: var(--glass); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-weight: 600; }
+.look footer.bar kbd { color: var(--text); background: var(--card-2); border: 1px solid var(--line); margin-right: 6px; }
+.look footer.bar .grow { flex: 1; }
+.look footer.bar .tally { color: var(--text); }
+.look .progress { height: 6px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.look .progress i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent-2), var(--accent)); }
+
+.look .wall { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 18px; }
+.look .s { aspect-ratio: 1; border-radius: 16px; position: relative; overflow: hidden; display: grid; place-items: center; font-weight: 800; font-size: 28px; color: var(--ink); box-shadow: 0 10px 30px var(--scrim); }
+.look .s img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.look .s .cap { position: absolute; left: 0; right: 0; bottom: 0; padding: 38px 14px 12px; background: linear-gradient(transparent, var(--scrim) 55%); color: var(--text); font-size: 13px; text-align: left; font-weight: 700; }
+.look .s .cap small { display: block; color: var(--muted); font-weight: 500; }
+.look .s .st { position: absolute; top: 10px; left: 10px; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 999px; background: var(--scrim); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); color: var(--muted); }
+.look .s .kind { position: absolute; top: 10px; right: 10px; padding: 5px; display: grid; place-items: center; border-radius: 999px; background: var(--scrim); color: var(--text); }
+.look .s .kind .i { width: 14px; height: 14px; }
+/* Named by palette slot, so a pill takes theme::status_slot's answer as its class. */
+.look .st.cursor { color: var(--cursor); }
+.look .st.warn { color: var(--warn); }
+.look .st.error { color: var(--error); }
+.look .st.unsure { color: var(--unsure); }
+.look .st.accent { color: var(--accent); }
+.look .s.cur { outline: 3px solid var(--accent); outline-offset: 3px; }
+.look .s.empty { background: var(--card); border: 1px dashed var(--line); color: var(--muted); font-size: 22px; box-shadow: none; }
+.look .s.empty.error { border-color: var(--error); color: var(--error); }
+.look .s.mosaic { grid-template-columns: 1fr 1fr; gap: 3px; place-items: stretch; background: var(--line); }
+.look .s.mosaic > i { display: block; position: relative; overflow: hidden; }
+
+.look .sheet { width: 330px; background: var(--card); border: 1px solid var(--line); border-radius: var(--r); padding: 22px; display: flex; flex-direction: column; gap: 14px; }
+.look .sheet .big { width: 100%; height: 170px; flex: none; border-radius: 14px; background: var(--card-2); border: 1px dashed var(--line); display: grid; place-items: center; color: var(--muted); overflow: hidden; }
+.look .sheet .big.mosaic { grid-template-columns: 1fr 1fr; place-items: stretch; gap: 3px; border: 0; background: var(--line); }
+.look .sheet h3 { margin: 0; font-size: 18px; font-weight: 800; letter-spacing: -.02em; }
+.look .sheet .why { font-weight: 600; color: var(--muted); }
+.look .sheet .why.warn { color: var(--warn); }
+.look .sheet dl { margin: 0; display: grid; grid-template-columns: 22px 1fr; align-items: start; gap: 8px 12px; font-size: 13px; }
+.look .sheet dt { color: var(--muted); }
+.look .sheet dt .i { width: 16px; height: 16px; margin-top: 1px; }
+.look .sheet dd { margin: 0; word-break: break-word; }
+.look .sheet .acts { margin-top: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+.look .sheet .acts > * { flex: 1; min-width: 60px; padding: 10px 6px; border-radius: 12px; border: 1px solid var(--line); background: none; font: 600 11px var(--font); color: var(--muted); display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 4px; cursor: pointer; }
+.look .sheet .acts > * .i { width: 20px; height: 20px; }
+.look .sheet .acts > .go { flex-basis: 100%; flex-direction: row; font-size: 14px; background: var(--accent); color: var(--ink); border: none; }
+
+.look .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--r); padding: 20px 22px; }
+.look .card h2 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -.01em; }
+.look .head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+.look .head .sub { color: var(--muted); font-weight: 500; margin-left: 10px; }
+.look .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+.look .tile { background: var(--card-2); border: 1px solid var(--line); border-radius: var(--r-s); padding: 16px; min-height: 130px; display: flex; flex-direction: column; justify-content: space-between; }
+.look .tile .top { display: flex; justify-content: space-between; align-items: flex-start; }
+.look .tile .n { font-size: 30px; font-weight: 800; letter-spacing: -.03em; line-height: 1; font-variant-numeric: tabular-nums; }
+.look .tile .l { color: var(--muted); font-weight: 600; margin-top: 4px; }
+.look .tile .ic { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; color: var(--ink); }
+.look table { width: 100%; border-collapse: collapse; }
+.look th { text-align: left; color: var(--muted); font-weight: 600; font-size: 13px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.look td { padding: 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.look tr.cur td { background: var(--card-2); }
+.look tr.cur td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.look td .t { font-weight: 700; }
+.look td .a { color: var(--muted); font-size: 13px; }
+.look .sleeve { width: 36px; height: 36px; border-radius: 9px; display: inline-grid; place-items: center; overflow: hidden; font-weight: 800; font-size: 12px; color: var(--ink); margin-right: 12px; vertical-align: middle; }
+.look .seg { display: inline-flex; gap: 2px; vertical-align: middle; margin-right: 10px; }
+.look .seg i { width: 6px; height: 14px; border-radius: 2px; background: var(--line); transform: skewX(-14deg); }
+.look .seg i.f { background: var(--accent); }
+.look .status { font-weight: 700; }
+.look .src { color: var(--muted); font: 12px var(--mono); }
+.look .gauge { display: grid; place-items: center; padding: 6px 0 0; }
+.look .gauge .big { font-size: 38px; font-weight: 800; letter-spacing: -.04em; line-height: 1; }
+.look .gauge .cap { color: var(--muted); font-weight: 600; }
+.look .kv { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 20px; margin-top: 16px; }
+.look .kv b { display: block; font-size: 22px; font-weight: 800; letter-spacing: -.02em; }
+.look .kv span { color: var(--muted); font-weight: 600; font-size: 13px; }
+.look .log { font: 12px/1.6 var(--mono); color: var(--muted); margin-top: 4px; }
+.look .log .e { color: var(--error); }

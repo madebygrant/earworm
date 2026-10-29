@@ -118,6 +118,7 @@ pub struct Outcome {
     pub title: String,
     pub mbid: Option<String>,
     pub isrc: Option<String>,
+    pub score: Option<f64>,
 }
 
 fn with_tag<F: FnOnce(&mut Tag)>(path: &Path, edit: F) -> Result<()> {
@@ -867,6 +868,7 @@ pub fn identify(
         title: info.title.clone(),
         mbid: None,
         isrc: None,
+        score: None,
     };
 
     let mut found: Option<Match> = None;
@@ -909,6 +911,7 @@ pub fn identify(
         out.source = m.source.into();
         out.mbid = m.mbid.clone();
         out.isrc = m.isrc.clone();
+        out.score = m.score;
         if let Some(score) = m.score {
             out.note = format!("score {score:.2}");
         }

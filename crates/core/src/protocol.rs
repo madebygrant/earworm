@@ -180,6 +180,8 @@ pub struct Track {
     /// the row. A field and not a `Status`: a duplicate is not a tagging
     /// outcome, and a status has to pass `settled()` and `tally()`.
     pub twin: Option<String>,
+    /// AcoustID's confidence in the match that tagged it, 0 to 1. Deezer, Apple and a typed tag give none.
+    pub score: Option<f64>,
 }
 
 impl Track {
@@ -204,6 +206,7 @@ impl Track {
             departure_proven: false,
             isrc: None,
             twin: None,
+            score: None,
         }
     }
 }
@@ -574,6 +577,11 @@ pub enum Msg {
     Twin {
         index: usize,
         twin: Option<String>,
+    },
+    /// The tag pass's confidence in a track's match, or `None` to clear it.
+    Score {
+        index: usize,
+        score: Option<f64>,
     },
     Update {
         index: usize,
@@ -1179,6 +1187,7 @@ pub mod test_support {
             Msg::Tracks(vec![track]),
             Msg::Progress { index: 1, percent: 40 },
             Msg::Twin { index: 1, twin: None },
+            Msg::Score { index: 1, score: Some(0.93) },
             Msg::Update { index: 1, status: Status::Weak, source: Some("Deezer".into()), note: None, name: Some("n".into()) },
             Msg::Meta { index: 1, artist: "Neu!".into(), title: "Hallogallo".into(), album: "Neu!".into(), year: None },
             Msg::Path { index: 1, path: p() },

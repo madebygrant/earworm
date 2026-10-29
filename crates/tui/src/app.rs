@@ -816,6 +816,11 @@ impl App {
                     t.twin = twin;
                 }
             }
+            Msg::Score { index, score } => {
+                if let Some(t) = self.track_mut(index) {
+                    t.score = score;
+                }
+            }
             Msg::Path { index, path } => {
                 if let Some(t) = self.track_mut(index) {
                     t.path = Some(path);
