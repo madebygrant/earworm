@@ -11,27 +11,51 @@
   with cover art and an <code>.m3u8</code>, ready for any player.
 </p>
 
-![A playlist open in earworm: the track list on the left, the selected track's
-tags and file path in a pane on the right, and the run's settings along the
-header](docs/images/earworm.png)
+## Two ways to run it
 
-## Try it
+earworm comes as a **desktop app** and a **terminal app**. They share one
+library, one config and the same keys, so you can switch between them
+whenever you like. Both need three tools first:
 
 ```sh
-brew install yt-dlp ffmpeg chromaprint
-cargo install --git https://github.com/madebygrant/earworm --tag v0.6.0
+brew install yt-dlp ffmpeg chromaprint      # or your package manager's equivalents
+```
+
+### 🖥️ Desktop app
+
+For when you want covers in front of you. Your library is shown as album
+sleeves, a run fills in track by track, and the common actions have buttons as
+well as keys. It runs on macOS (Apple Silicon) and Linux.
+
+![The desktop app's library: a playlist shown as a tile of four sleeves, with
+its details and actions in a sheet on the right and the keys along the bottom](docs/images/desktop/library.jpg)
+
+- **Download:** the `.dmg`, AppImage or `.deb` from the
+  [latest release](https://github.com/madebygrant/earworm/releases/latest).
+  The Mac app isn't signed, so macOS asks once on first launch:
+  [here's how to get past it](docs/install.md#first-launch-on-macos).
+- **Or build it** from a clone with `scripts/install-desktop.sh`.
+- **Tour:** [the desktop app, screen by screen](docs/gui.md).
+
+### ⌨️ Terminal app
+
+For when you live in a terminal, or work over SSH. It's fast and drives
+entirely from the keyboard, and it can run unattended in a script.
+
+![A playlist open in the terminal app: the track list on the left, the selected
+track's tags and file path in a pane on the right, and the run's settings along
+the header](docs/images/earworm.png)
+
+```sh
+cargo install --git https://github.com/madebygrant/earworm --tag v1.0.0
 
 earworm                                            # open the app
 earworm 'https://youtube.com/playlist?list=...'    # or go straight to a playlist
 ```
 
-Prefer a window? The **[desktop app](docs/gui.md)** for macOS and Linux runs
-the same library with the same keys. Grab it from the
-[releases](https://github.com/madebygrant/earworm/releases), or see
-[installing](docs/install.md) for everything else.
-
-![The desktop app's library: a playlist shown as a tile of four sleeves, with
-its details and actions in a sheet on the right and the keys along the bottom](docs/images/desktop/library.jpg)
+- **Every key:** [keys](docs/keys.md).
+- **For scripts:** `--list` and `--check` answer in plain text, and
+  [every flag](docs/configuration.md) is documented.
 
 ## Why earworm
 
@@ -70,8 +94,8 @@ The full list, with the details, is in **[features](docs/features.md)**.
 | [Installing](docs/install.md) | tools, the AcoustID key, `--check` |
 | [Features](docs/features.md) | everything earworm does, in detail |
 | [Workflow](docs/workflow.md) | picks, filters, fixing tags, retry |
-| [Keys](docs/keys.md) | every key and what the status words mean |
 | [Desktop app](docs/gui.md) | the window, screen by screen |
+| [Keys](docs/keys.md) | every key in both apps, and what the status words mean |
 
 | Going deeper | |
 | --- | --- |
@@ -88,9 +112,8 @@ The full list, with the details, is in **[features](docs/features.md)**.
 ## Who it's for
 
 Anyone who has downloaded a playlist and then renamed the files by hand.
-earworm never deletes anything you didn't ask it to, tells you when it isn't
-sure about a tag, and answers `--list` and `--check` in plain text, so
-scripts can use them too.
+earworm never deletes anything you didn't ask it to, and tells you when it
+isn't sure about a tag.
 
 ## Licence
 
