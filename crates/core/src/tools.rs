@@ -45,8 +45,39 @@ pub fn bin(name: &str) -> String {
 /// runs another (yt-dlp running ffmpeg) finds it the way earworm did.
 pub fn command(name: &str) -> Command {
     let mut cmd = Command::new(bin(name));
-    cmd.env("PATH", path());
+    environ(&mut cmd);
     cmd
+}
+
+/// What every child earworm starts gets: `path()` as its PATH and, inside an AppImage, none of the
+/// bundle's own folders in its other variables. The AppImage's launcher points the GTK and library
+/// variables and PATH into the bundle, and a host tool that inherits them loads the bundle's libraries.
+pub fn environ(cmd: &mut Command) -> &mut Command {
+    cmd.env("PATH", path());
+    if let Some(appdir) = std::env::var_os("APPDIR").filter(|d| !d.is_empty()) {
+        let vars = std::env::vars_os().filter(|(key, _)| key != "PATH").chain([("PATH".into(), path())]);
+        for (key, value) in outside(vars, Path::new(&appdir)) {
+            match value {
+                Some(value) => cmd.env(key, value),
+                None => cmd.env_remove(key),
+            };
+        }
+    }
+    cmd
+}
+
+// Each variable that names somewhere inside `appdir`, with those entries taken out, or `None` when
+// nothing is left. Kept apart from the environment so it is testable without being in an AppImage.
+fn outside(vars: impl Iterator<Item = (OsString, OsString)>, appdir: &Path) -> Vec<(OsString, Option<OsString>)> {
+    vars.filter_map(|(key, value)| {
+            let entries: Vec<PathBuf> = std::env::split_paths(&value).collect();
+            if !entries.iter().any(|e| e.starts_with(appdir)) {
+                return None;
+            }
+            let kept: Vec<PathBuf> = entries.into_iter().filter(|e| !e.starts_with(appdir) && !e.as_os_str().is_empty()).collect();
+            Some((key, (!kept.is_empty()).then(|| std::env::join_paths(kept).unwrap_or_default())))
+        })
+        .collect()
 }
 
 /// The PATH every tool earworm starts gets: the one earworm was given, then the package folders, then
@@ -76,9 +107,9 @@ fn home() -> Option<PathBuf> {
     std::env::var_os("HOME").filter(|h| !h.is_empty()).map(PathBuf::from)
 }
 
-// Searched after PATH, where Homebrew and pipx put things.
+// Searched after PATH, where Homebrew (on a Mac and on Linux) and pipx put things.
 fn fallbacks(home: Option<&Path>) -> Vec<PathBuf> {
-    let mut dirs = vec![PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin")];
+    let mut dirs = vec![PathBuf::from("/opt/homebrew/bin"), PathBuf::from("/usr/local/bin"), PathBuf::from("/home/linuxbrew/.linuxbrew/bin")];
     dirs.extend(home.map(|h| h.join(".local/bin")));
     dirs
 }
@@ -149,8 +180,28 @@ mod tests {
         let dirs: Vec<PathBuf> = std::env::split_paths(&joined).collect();
         assert_eq!(
             dirs,
-            ["/usr/bin", "/bin", "/opt/homebrew/bin", "/usr/local/bin", "/home/me/.local/bin", "/opt/ffmpeg-7"]
+            ["/usr/bin", "/bin", "/opt/homebrew/bin", "/usr/local/bin", "/home/linuxbrew/.linuxbrew/bin", "/home/me/.local/bin", "/opt/ffmpeg-7"]
                 .map(PathBuf::from),
+        );
+    }
+
+    // Inside an AppImage the launcher's variables point into the bundle, and a host tool that inherits
+    // them loads the bundle's libraries. Only those entries go; the host's own stay.
+    #[test]
+    fn a_tool_started_from_an_appimage_keeps_none_of_its_folders() {
+        let var = |k: &str, v: &str| (OsString::from(k), OsString::from(v));
+        let vars = vec![
+            var("XDG_DATA_DIRS", "/tmp/.mount_x/usr/share:/usr/share"),
+            var("GDK_PIXBUF_MODULE_FILE", "/tmp/.mount_x/usr/lib/loaders.cache"),
+            var("HOME", "/home/me"),
+            var("PATH", "/tmp/.mount_x/usr/bin:/usr/bin"),
+        ];
+        let mut changed = outside(vars.into_iter(), Path::new("/tmp/.mount_x"));
+        changed.sort();
+        let some = |k: &str, v: &str| (OsString::from(k), Some(OsString::from(v)));
+        assert_eq!(
+            changed,
+            vec![(OsString::from("GDK_PIXBUF_MODULE_FILE"), None), some("PATH", "/usr/bin"), some("XDG_DATA_DIRS", "/usr/share")],
         );
     }
 

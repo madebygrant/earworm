@@ -33,6 +33,40 @@ Drop the `--tag` to build from the newest code instead, and see
 [releases](https://github.com/madebygrant/earworm/releases) for the current
 version.
 
+## The desktop app
+
+Each [release](https://github.com/madebygrant/earworm/releases) has a `.dmg`
+for Apple Silicon Macs, and an AppImage and a `.deb` for Linux. The app uses
+the same tools, config and library as the terminal one, so install the tools
+above first.
+
+### First launch on macOS
+
+The app is not signed with an Apple Developer ID or notarised, so macOS
+blocks it the first time you open it. On macOS 15 and later, right-clicking
+and choosing Open no longer gets past this. Use one of these instead:
+
+- Open it once, dismiss the warning, then go to System Settings > Privacy &
+  Security and click Open Anyway next to earworm.
+- Or clear the download flag macOS put on it, from a terminal:
+
+  ```sh
+  xattr -dr com.apple.quarantine /Applications/earworm.app
+  ```
+
+Either way you only do it once. The app has no auto-updater, because
+updating itself would need a signed update. When a newer release is out,
+the app says so once, naming the releases page. Turn that off with
+`update_check = false`.
+
+### Linux
+
+The AppImage runs as it is: `chmod +x earworm_*.AppImage` and start it. The
+`.deb` installs with `sudo apt install ./earworm_*.deb`, which brings in
+WebKitGTK. Tools installed with Homebrew on Linux are found in
+`/home/linuxbrew/.linuxbrew/bin` without your shell's PATH, as on a Mac.
+Opening a folder in the file manager goes through `xdg-open`.
+
 ## Fingerprinting wants a key
 
 Free, one line, from

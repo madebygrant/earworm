@@ -7,6 +7,8 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
 const RELEASES_URL: &str = "https://api.github.com/repos/madebygrant/earworm/releases/latest";
+/// Where a release is downloaded from, for a front end that cannot update itself.
+pub const RELEASES_PAGE: &str = "https://github.com/madebygrant/earworm/releases";
 /// Once a day is plenty for a personal tool; a release sits there for hours.
 const MAX_AGE: Duration = Duration::from_secs(24 * 60 * 60);
 /// The shared lookup agent already times out; this bounds the whole probe

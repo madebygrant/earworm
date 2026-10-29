@@ -1,10 +1,11 @@
 // The boot order is what keeps a reloaded page from losing or doubling messages: live ones that arrive
 // while `start` is answering wait, then the history and the held ones apply once each, in order.
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 let handlers: ((e: { payload: unknown }) => void)[] = [];
 const deliver = (payload: unknown) => handlers.forEach((h) => h({ payload }));
 let reply: unknown;
+let news: string | null = null;
 vi.mock("@tauri-apps/api/event", () => ({
   listen: async (name: string, handler: (e: { payload: unknown }) => void) => {
     if (name === "earworm://msg") handlers.push(handler);
@@ -16,6 +17,7 @@ vi.mock("@tauri-apps/api/core", () => ({
     // Core's two, reduced to what the test needs: unread drops the pages read, mark_new reads one page.
     if (name === "unread") return (args.found as [string][]).filter(([a]) => !(args.read as string[]).includes(a));
     if (name === "mark_new") return [args.rows, (args.fresh as [string][]).filter(([a]) => a !== args.name), [...(args.read as string[]), args.name]];
+    if (name === "latest") return news;
     if (name !== "start") return [];
     // A live message lands while `start` is still answering, one the history also holds.
     deliver({ seq: 1, msg: { Log: "one" } });
@@ -32,6 +34,10 @@ describe("boot", () => {
   beforeEach(() => {
     vi.resetModules();
     handlers = [];
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+    news = null;
   });
 
   it("applies the history, then the held messages it did not hold, each once and in order", async () => {
@@ -60,6 +66,22 @@ describe("boot", () => {
     await boot();
     deliver({ seq: 3, msg: "Restart" });
     expect(cleared).toBe(1);
+  });
+
+  // Three flashes queued at boot is a full queue, and the news is said once a session.
+  it("waits for room to say a newer release is out rather than dropping it", async () => {
+    vi.useFakeTimers();
+    reply = { theme, statuses: [], setup, replay: [] };
+    news = "earworm v9.9.9 is out";
+    const { app, boot } = await import("./store.svelte");
+    const { expire } = await import("./reducer");
+    app.model = { ...app.model, flash: "a", waiting: ["b", "c", "d"] };
+    await boot();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(app.model.waiting).not.toContain(news);
+    app.model = expire(app.model);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(app.model.waiting).toContain(news);
   });
 
   // Run side by side from snapshots, the page's read wiped the startup check's answer for every other artist.

@@ -3,7 +3,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { AlbumRow, Msg, Reply, SettingRow, Word } from "./protocol";
-import { apply, expire, initial, say, type Effect, type State } from "./reducer";
+import { apply, expire, hasRoom, initial, say, type Effect, type State } from "./reducer";
 
 export interface Theme {
   name: string;
@@ -71,6 +71,11 @@ function update(next: State) {
 
 export function flash(text: string) {
   update(say(app.model, text));
+}
+
+function tell(text: string) {
+  if (hasRoom(app.model)) flash(text);
+  else setTimeout(() => tell(text), 1000);
 }
 
 // One at a time and in order, each reading the state as it is when it runs: two run side by side from
@@ -157,6 +162,9 @@ export async function boot() {
     app.setup = setup;
     paint(theme);
     for (const sent of [...replay, ...(held ?? [])]) take(sent);
+    // The shell answers once a session and `null` when the check is off, so this waits for room in the
+    // queue rather than being dropped from it at a busy start.
+    invoke<string | null>("latest").then((news) => news && tell(news)).catch(() => {});
   } catch (e) {
     app.error = String(e);
   }

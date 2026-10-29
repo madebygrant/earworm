@@ -147,6 +147,11 @@ export function say(s: State, text: string): State {
   return { ...s, flash: text };
 }
 
+/** Whether `say` would keep a flash rather than drop it from a full queue. */
+export function hasRoom(s: State): boolean {
+  return s.flash === null || s.waiting.length < QUEUE;
+}
+
 /** The flash has been read: the next queued one, or back to what the run last said. */
 export function expire(s: State): State {
   if (s.flash === null) return s;

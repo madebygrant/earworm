@@ -20,7 +20,8 @@
   app started from Finder gets a PATH without Homebrew's folders, so a bare
   `Command::new("ffmpeg")` reads as missing on a machine that has it. `bin`
   tries the config's `[tools]` path, then PATH, then `/opt/homebrew/bin`,
-  `/usr/local/bin` and `~/.local/bin`, and falls back to the bare name so a
+  `/usr/local/bin`, Linuxbrew's `/home/linuxbrew/.linuxbrew/bin` and
+  `~/.local/bin`, and falls back to the bare name so a
   launch still fails with `NotFound` and an install line. PATH comes first,
   so a tool somebody put there on purpose beats a package manager's copy
   (`path_wins_and_the_package_folders_catch_what_it_misses`). Only test
@@ -36,6 +37,12 @@
   (`yt_dlp_is_told_where_ffmpeg_is`, `a_launched_tool_sees_the_folders_earworm_searched`).
   Per child, never on the process: changing the environment while other
   threads run is undefined.
+- **A tool started from the AppImage gets none of the bundle's folders.**
+  The AppImage's launcher points PATH, the GTK variables and the library
+  paths into the mounted bundle, and a host tool that inherits them loads
+  the bundle's libraries instead of its own. `tools::environ`, which every
+  child goes through, takes those entries out when `APPDIR` is set and
+  leaves the host's (`a_tool_started_from_an_appimage_keeps_none_of_its_folders`).
 - **`[tools]` is set once, process-wide, by the front end.** ffmpeg runs deep
   in tagging with no `Config` in reach, so `main` calls `tools::configure`
   right after `Config::build`, before anything (`--check` included) runs a

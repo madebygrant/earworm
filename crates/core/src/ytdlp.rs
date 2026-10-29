@@ -203,7 +203,7 @@ fn flat(bin: &str, args: &[&str]) -> Result<String, String> {
 
 fn read(bin: &str, args: &[&str]) -> Result<String, String> {
     let mut cmd = Command::new(bin);
-    cmd.env("PATH", crate::tools::path());
+    crate::tools::environ(&mut cmd);
     cmd.args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     let out = crate::lookup::run_bounded(&mut cmd, ALBUM_LOOKUP).ok_or("yt-dlp did not answer in time")?;
     if !out.status.success() {
@@ -248,8 +248,7 @@ pub fn scan(cfg: &Config) -> Result<Listing> {
 /// scan, and a test of the helper that builds the template passes whatever
 /// the call site chooses to do with it.
 pub(crate) fn scan_with(bin: &str, cfg: &Config) -> Result<Listing> {
-    let out = Command::new(bin)
-        .env("PATH", crate::tools::path())
+    let out = crate::tools::environ(&mut Command::new(bin))
         .args([
             "--skip-download",
             "--quiet",
@@ -464,7 +463,7 @@ fn run_with(
     }
 
     let mut cmd = Command::new(bin);
-    cmd.env("PATH", crate::tools::path());
+    crate::tools::environ(&mut cmd);
     // Named outright as well as on PATH, since converting the audio is the step that needs it.
     let ffmpeg = crate::tools::bin("ffmpeg");
     if Path::new(&ffmpeg).is_absolute() {

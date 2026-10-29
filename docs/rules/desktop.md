@@ -150,3 +150,20 @@
 - **An achievement toast dismissed by a key is recorded.** Whoever pressed the
   key saw it, as in the terminal; putting it back to wait made it reappear at
   once and swallow the next key, over and over while somebody typed.
+- **The bundle is ad-hoc signed, never unsigned.** Apple Silicon will not
+  run a binary with no signature, and bundling rewrites the app after the
+  linker signed it, so `bundle.macOS.signingIdentity` is `"-"` and the
+  bundler signs the finished `.app`. There is no Developer ID, so Gatekeeper
+  still blocks a downloaded copy once; `docs/install.md` says how to get past
+  it. The release workflow checks `codesign -dv` says `Signature=adhoc`
+  before it uploads anything, so an unsigned `.dmg` never reaches the draft.
+- **The update notice points at the release page, and is asked for off the
+  main thread.** An unsigned app cannot verify an update, so there is no
+  updater, and the terminal's `cargo install` hint is wrong for a `.dmg`.
+  `latest` runs `update::available` on a blocking thread, since a stale cache
+  asks GitHub and a sync command would hold the window. The shell answers
+  once a session, since a reload boots the page again
+  (`the_update_news_is_given_once_a_session_and_never_when_the_check_is_off`),
+  and the page waits for room in the flash queue rather than being dropped
+  from a full one at a busy start (`waits for room to say a newer release is
+  out rather than dropping it`).

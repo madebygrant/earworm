@@ -21,7 +21,7 @@ use earworm_core::picker::{self, Hit, Marks};
 use earworm_core::protocol::{self, AlbumRow, ArtistRow, Cmd, Msg, Playback, Reply, Shelf, Status, Track};
 use earworm_core::theme::{Palette, Themes};
 use earworm_core::view::{self, Narrow, ShelfNarrow, Sort};
-use earworm_core::{deps, lookup, tag, tools, worker, ytdlp};
+use earworm_core::{deps, lookup, tag, tools, update, worker, ytdlp};
 use ratatui_core::style::Color;
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, RunEvent, State};
@@ -75,6 +75,9 @@ struct Shell {
     unlocked: Arc<Unlocked>,
     /// The achievement state file and what it holds, or `None` when achievements are off for the session.
     achieved: Mutex<Option<(PathBuf, std::collections::BTreeSet<String>)>>,
+    update_check: bool,
+    /// Whether `latest` has answered, so a reloaded page is not told twice.
+    told: AtomicBool,
 }
 
 /// The palette as the page's CSS variables, with the walk's names for the picker.
@@ -249,6 +252,21 @@ fn probe_tools() -> Vec<Tool> {
 #[tauri::command]
 async fn tools() -> Vec<Tool> {
     tauri::async_runtime::spawn_blocking(probe_tools).await.unwrap_or_default()
+}
+
+// Off the main thread, since a stale cache asks GitHub. The app has no updater, as an unsigned build cannot
+// verify one, so the news points at the release page rather than at cargo.
+#[tauri::command]
+async fn latest(shell: State<'_, Shell>) -> Result<Option<String>, ()> {
+    if !first_ask(shell.update_check, &shell.told) {
+        return Ok(None);
+    }
+    let latest = tauri::async_runtime::spawn_blocking(update::available).await.ok().flatten();
+    Ok(latest.map(|v| format!("earworm v{v} is out at {}", update::RELEASES_PAGE)))
+}
+
+fn first_ask(on: bool, told: &AtomicBool) -> bool {
+    on && !told.swap(true, Ordering::SeqCst)
 }
 
 /// Ends the app the way the terminal's `q` does; `shut_down` runs on the way out.
@@ -657,6 +675,7 @@ fn main() {
                         .flatten()
                         .and_then(|path| achievements::read_at(&path).ok().map(|known| (path, known))),
                 ),
+                update_check: cfg.update_check,
                 ..Shell::bare()
             }
         }
@@ -678,7 +697,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             start, send, answer, stop, theme_next, theme_set, cheat, rows, shelf_rows, search, artist_rows,
             release_rows, take, flip, invert, gate_marks, unread, mark_new, counts, picker_rows, pick_toggle,
-            pick_changes, earned, shown, next_icons, switch_flag, lead_artist, new_titles, artist_at, next_kind, next_sort, probe, tools, quit
+            pick_changes, earned, shown, next_icons, switch_flag, lead_artist, new_titles, artist_at, next_kind, next_sort, probe, tools, latest, quit
         ])
         .build(tauri::generate_context!())
         .expect("the window could not be built")
@@ -715,6 +734,8 @@ impl Shell {
             overridden: false,
             unlocked: Arc::new(Unlocked::default()),
             achieved: Mutex::new(None),
+            update_check: false,
+            told: AtomicBool::new(false),
         }
     }
 }
@@ -760,6 +781,15 @@ mod tests {
         let themes = Themes::default();
         assert!(light(&themes.named("light").unwrap()));
         assert!(!light(&themes.named("graphite").unwrap()));
+    }
+
+    // The page asks on every boot, and a reload boots it again.
+    #[test]
+    fn the_update_news_is_given_once_a_session_and_never_when_the_check_is_off() {
+        let told = AtomicBool::new(false);
+        assert!(!first_ask(false, &told));
+        assert!(first_ask(true, &told));
+        assert!(!first_ask(true, &told));
     }
 
     // A reloaded page is handed the history; a question it already answered must not be asked again.

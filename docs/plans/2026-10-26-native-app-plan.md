@@ -214,7 +214,7 @@ and colour.
 Exit: every TUI screen has a GUI counterpart, and the discovery rules hold
 in the GUI (the locked page offers no download).
 
-## 9. Packaging for macOS and Linux
+## 9. Packaging for macOS and Linux [done 2026-10-29]
 
 - macOS: `.app` and `.dmg`, **unsigned**: no Developer ID, no notarisation.
   - Apple Silicon refuses to run code with no signature at all, so the build

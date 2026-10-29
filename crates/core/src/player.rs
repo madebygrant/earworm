@@ -86,8 +86,7 @@ fn stored(folder: &Path) -> String {
 
 fn cliamp(bin: &str, limit: Duration, args: &[&str]) -> Option<(bool, String)> {
     let out = lookup::run_bounded(
-        Command::new(bin)
-            .env("PATH", crate::tools::path())
+        crate::tools::environ(&mut Command::new(bin))
             .args(args)
             // Or the child takes keystrokes out from under the event loop.
             .stdin(Stdio::null())
@@ -186,7 +185,7 @@ fn reveal_with(bin: &str, folder: &Path) -> Result<String> {
         .file_name()
         .map_or_else(|| folder.display().to_string(), |n| n.to_string_lossy().into());
     match lookup::run_bounded(
-        Command::new(bin)
+        crate::tools::environ(&mut Command::new(bin))
             .arg(folder)
             .stdout(Stdio::null())
             .stderr(Stdio::piped()),
