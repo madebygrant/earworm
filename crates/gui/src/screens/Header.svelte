@@ -23,7 +23,7 @@
     requestAnimationFrame(() => (fits = !!rightEl && rightEl.scrollWidth <= rightEl.clientWidth));
   }
   $effect(() => {
-    void right;
+    void [right, brief];
     measure();
   });
   const open = $derived(
@@ -39,7 +39,9 @@
   const count = $derived(m.view !== "Tracks" || !m.tracks.length ? "" : `${settledCount(m)}/${m.tracks.length}`);
   // Nothing synced yet, which is a different question from whether the first screen is showing.
   const empty = $derived(!m.library.length && !m.tracks.length);
-  const right = $derived(empty ? `${app.setup?.dir ?? ""} · nothing synced yet` : m.view === "Library" ? libraryLine() : m.settings.text);
+  const right = $derived(empty ? `${app.setup?.dir ?? ""} · nothing synced yet` : m.view === "Library" ? libraryLine() : "");
+  // A run's own settings as core's brief, values bold as the mockup draws them; the settings screen has the rest.
+  const brief = $derived(!right && m.view !== "Library" ? m.settings.brief : []);
 
   function libraryLine(): string {
     const folders = m.library.filter((s) => s.kind !== "Custom");
@@ -57,5 +59,7 @@
   {#if busy && !m.flash}<span class="spin">{SPIN[tick % SPIN.length]}</span>{/if}
   <span class="stage" data-tauri-drag-region>{word}</span>
   {#if count}<span class="sep">·</span><span data-tauri-drag-region>{count}</span>{/if}
-  <span class="right" data-tauri-drag-region bind:this={rightEl} style:visibility={fits ? "visible" : "hidden"}>{right}</span>
+  <span class="right" data-tauri-drag-region bind:this={rightEl} style:visibility={fits ? "visible" : "hidden"}
+    >{#if brief.length}{#each brief as [name, value], i (name)}{i ? " · " : ""}{name} <b>{value}</b>{/each}{:else}{right}{/if}</span
+  >
 </header>

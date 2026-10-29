@@ -417,6 +417,12 @@
     "Restart",
     {
       "Settings": {
+        "brief": [
+          [
+            "format",
+            "opus"
+          ]
+        ],
         "format": "opus",
         "rows": [
           {

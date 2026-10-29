@@ -200,7 +200,7 @@ function playlistKey(e: KeyboardEvent) {
   else if (k === "p" && app.model.playback.player === "Running") void send({ PlayPlaylist: name });
   else if (k === "Enter" && row) {
     if (!row.path) return say(`${row.file} is not on disk  ·  x takes it off the list`);
-    sc.screens.fromFound = false;
+    sc.screens.fromFound = null;
     void send({ Open: [row.path.slice(0, row.path.lastIndexOf("/")), row.file] });
   }
 }
@@ -427,8 +427,10 @@ function escapeTracks() {
   if (working()) return say("still working  ·  q quits");
   if (!m.library.length) return say("nothing behind this  ·  q quits");
   // A folder opened from a search result goes back to the results.
-  const back = sc.screens.fromFound && ui.filter.trim() ? "Found" : "Library";
-  sc.screens.fromFound = false;
+  const query = sc.screens.fromFound;
+  sc.screens.fromFound = null;
+  if (query?.trim()) ui.filter = query;
+  const back = query?.trim() ? "Found" : "Library";
   app.model = { ...m, view: back };
 }
 
@@ -513,7 +515,7 @@ async function libraryKey(e: KeyboardEvent) {
   else if (shelf.kind === "Custom") customKey(k, shelf.name, m.playback.player === "Running");
   else if (k === "E") void send({ Export: { Folder: shelf.path } });
   else if (k === "Enter") {
-    sc.screens.fromFound = false;
+    sc.screens.fromFound = null;
     void send({ Open: [shelf.path, null] });
   }
   else if (k === "S") void send({ Sync: shelf.path });

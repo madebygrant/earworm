@@ -59,7 +59,7 @@ export interface State {
   done: Result<string, string> | null;
   busy: boolean;
   searching: boolean;
-  settings: { text: string; format: string; rows: SettingRow[] };
+  settings: { text: string; format: string; rows: SettingRow[]; brief: [string, string][] };
   undoable: string | null;
   thumbs: Record<string, string | null>;
   // Files a `Thumbs` went out for and no reply has come back: asked once, not again on every message.
@@ -114,7 +114,7 @@ export function initial(statuses: Word[] = []): State {
     done: null,
     busy: false,
     searching: false,
-    settings: { text: "", format: "", rows: [] },
+    settings: { text: "", format: "", rows: [], brief: [] },
     undoable: null,
     thumbs: {},
     thumbsAsked: [],
@@ -271,7 +271,7 @@ const handlers: Handlers = {
     // Whatever is starting has tracks, and they are the point.
     view: "Tracks",
   }),
-  Settings: (s, { text, format, rows }) => ({ ...s, settings: { text, format, rows } }),
+  Settings: (s, { text, format, rows, brief }) => ({ ...s, settings: { text, format, rows, brief } }),
   Undoable: (s, undoable) => ({ ...s, undoable }),
   Dropped: (s, gone) => ({
     ...s,

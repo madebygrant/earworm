@@ -661,6 +661,8 @@ pub enum Msg {
         /// would be a second place the two could disagree.
         format: String,
         rows: Vec<crate::config::Row>,
+        /// `Config::brief`, for a header with room for a few settings rather than all of them.
+        brief: Vec<(String, String)>,
     },
     /// What `u` would put back, or `None` when there is nothing to undo. The
     /// worker holds the old values, so the UI cannot work this out for
@@ -1201,7 +1203,7 @@ pub mod test_support {
             Msg::Unmark,
             Msg::Idle,
             Msg::Restart,
-            Msg::Settings { text: "format opus".into(), format: "opus".into(), rows: vec![row] },
+            Msg::Settings { text: "format opus".into(), format: "opus".into(), rows: vec![row], brief: vec![("format".into(), "opus".into())] },
             Msg::Undoable(Some("the swap".into())),
             Msg::Dropped(vec![5]),
             Msg::Review,

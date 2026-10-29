@@ -5991,7 +5991,7 @@ mod tests {
             row("intro", Value::Switch(true), Source::Default, When::NextStart),
             row("update_check", Value::Switch(false), Source::Flag, When::NextStart),
         ];
-        app.apply(Msg::Settings { text: String::new(), format: "m4a".into(), rows });
+        app.apply(Msg::Settings { text: String::new(), format: "m4a".into(), rows, brief: Vec::new() });
         app.open_settings();
         app.cycle_theme();
         app.settings_step(true, 1);

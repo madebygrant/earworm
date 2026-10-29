@@ -1008,6 +1008,19 @@ impl Config {
 
     /// Shown in the help overlay, so a run's settings are visible without
     /// remembering which flags were passed.
+    /// The five settings that change what a run fetches and writes, as name and value: the desktop
+    /// header has room for these and the settings screen holds the rest.
+    pub fn brief(&self) -> Vec<(String, String)> {
+        let on = |flag: bool| if flag { "on" } else { "off" }.to_string();
+        vec![
+            ("format".into(), self.format.clone()),
+            ("lookup".into(), on(self.lookup)),
+            ("cover".into(), on(self.cover)),
+            ("m3u8".into(), on(self.m3u8)),
+            ("rename".into(), on(self.rename)),
+        ]
+    }
+
     pub fn describe(&self) -> String {
         let on = |flag: bool| if flag { "on" } else { "off" };
         // Named only when on: the header drops this string whole when it does not fit, and off is the default.
@@ -1074,6 +1087,14 @@ mod tests {
         let cfg = build("format = \"flac\"\n", &[]);
         assert_eq!(cfg.format, "flac");
         assert!(!cfg.convert, "picking a format turned conversion on");
+    }
+
+    // The desktop header's five, values as the switches leave them: a flag that turns one off shows off.
+    #[test]
+    fn the_brief_names_what_a_run_fetches_and_writes() {
+        let cfg = build("format = \"mp3\"\n", &["--no-cover"]);
+        let want = [("format", "mp3"), ("lookup", "on"), ("cover", "off"), ("m3u8", "on"), ("rename", "on")];
+        assert_eq!(cfg.brief(), want.map(|(k, v)| (k.to_string(), v.to_string())));
     }
 
     #[test]

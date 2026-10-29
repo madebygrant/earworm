@@ -3040,7 +3040,7 @@ fn pin_open_run(cfg: &mut Config, tracks: &[Track], folder: &Path, name: &str) -
 
 /// The help overlay's line and the settings screen's rows, re-sent after any change.
 pub(crate) fn settings(cfg: &Config) -> Msg {
-    Msg::Settings { text: cfg.describe(), format: cfg.format.clone(), rows: cfg.rows() }
+    Msg::Settings { text: cfg.describe(), format: cfg.format.clone(), rows: cfg.rows(), brief: cfg.brief() }
 }
 
 /// A switch from the settings screen. Saved before it is adopted, as the format is, so the session never

@@ -15,8 +15,9 @@ export const screens = $state({
   foundTotal: 0,
   // The result under the cursor as the folder and file it names, never a row number.
   found: null as Pick | null,
-  // Enter opened a result's folder, so Esc from there comes back to the results.
-  fromFound: false,
+  // The query, when Enter opened a result's folder, so Esc comes back to those results. Kept apart from the
+  // filter, which the restart that opening the folder sends clears.
+  fromFound: null as string | null,
   // `t` is waiting on its first answer, which decides whether the screen opens at all.
   finding: false,
   pick: {
@@ -143,7 +144,7 @@ export function foundPicks(): Pick[] {
 export function openFound() {
   const at = foundAt();
   if (!at) return;
-  screens.fromFound = true;
+  screens.fromFound = ui.filter;
   void send({ Open: [at[0].path, at[1][0]] });
 }
 

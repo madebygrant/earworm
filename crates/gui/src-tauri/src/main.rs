@@ -52,6 +52,7 @@ struct Setup {
     text: String,
     format: String,
     rows: Vec<config::Row>,
+    brief: Vec<(String, String)>,
     /// Where playlists land, with the home folder as `~`.
     dir: String,
     key: bool,
@@ -641,6 +642,7 @@ fn main() {
                     text: cfg.describe(),
                     format: cfg.format.clone(),
                     rows: cfg.rows(),
+                    brief: cfg.brief(),
                     dir: tilde(&cfg.dir),
                     key: cfg.acoustid_key.is_some(),
                 },

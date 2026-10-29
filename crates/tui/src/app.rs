@@ -382,8 +382,9 @@ pub struct App {
     pub found_cache: Vec<crate::picker::Hit>,
     // Tracks marked on the search screen for `P`, by folder and filename like the picker's.
     pub found_marks: crate::picker::Marks,
-    // Set when Enter opens a result's folder, so Esc comes back to the results and not the library.
-    pub from_found: bool,
+    // The query, when Enter opened a result's folder, so Esc comes back to those results. Kept here because
+    // opening the folder restarts the run, and `Msg::Restart` clears the filter it came from.
+    pub from_found: Option<String>,
     pub cursor: usize,
     /// Narrows what the track list shows. A view over `tracks` and nothing
     /// more: `cursor` stays a position in `tracks` and `marked` stays a set of
@@ -554,7 +555,7 @@ impl App {
             stop: Default::default(),
             found_cache: Vec::new(),
             found_marks: crate::picker::Marks::default(),
-            from_found: false,
+            from_found: None,
             waiting: std::collections::VecDeque::new(),
             confirm: None,
             run_started: None,
@@ -962,7 +963,7 @@ impl App {
                 self.flash_until = None;
                 self.done = Some(result);
             }
-            Msg::Settings { text, format, rows } => {
+            Msg::Settings { text, format, rows, .. } => {
                 self.settings = text;
                 self.format = format;
                 // Taken from what the worker saved, so a failed save leaves the icons as the file has them.
@@ -1564,8 +1565,8 @@ impl App {
             self.say("still working  ·  q quits");
         } else if self.library.is_empty() {
             self.say("nothing behind this  ·  q quits");
-        } else if std::mem::take(&mut self.from_found) && !self.filter.trim().is_empty() {
-            // Opened from a search result, so Esc goes back to the results.
+        } else if let Some(query) = self.from_found.take().filter(|q| !q.trim().is_empty()) {
+            self.filter = query;
             self.view = View::Found;
             self.found_snap();
         } else {

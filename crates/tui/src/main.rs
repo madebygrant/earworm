@@ -781,7 +781,7 @@ fn handle_found_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Enter if app.can_find() => {
             if let Some((shelf, (name, _))) = app.found_at() {
                 let (folder, name) = (shelf.path.clone(), name.clone());
-                app.from_found = true;
+                app.from_found = Some(app.filter.clone());
                 app.send(Cmd::Open(folder, Some(name)));
             }
         }
@@ -934,7 +934,7 @@ fn handle_playlist_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             match source {
                 Some((Some(path), file)) => match path.parent() {
                     Some(folder) => {
-                        app.from_found = false;
+                        app.from_found = None;
                         app.send(Cmd::Open(folder.to_path_buf(), Some(file)));
                     }
                     None => app.say("that track has no folder"),
@@ -1109,7 +1109,7 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
             Some(name) => app.send(Cmd::OpenPlaylist(name)),
             None => {
                 if let Some(folder) = app.selected_shelf().map(|s| s.path.clone()) {
-                    app.from_found = false;
+                    app.from_found = None;
                     app.send(Cmd::Open(folder, None));
                 }
             }
@@ -2063,11 +2063,15 @@ mod tests {
         app.typing_filter = false;
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(matches!(cmds.try_recv(), Ok(Cmd::Open(..))));
+        let query = app.filter.clone();
+        // What the worker sends on opening a folder, which clears the filter the results came from.
+        app.apply(crate::protocol::Msg::Restart);
+        assert!(app.filter.is_empty());
         app.busy = false;
-        app.view = View::Tracks;
         app.done = Some(Ok(String::new()));
         app.leave_tracks();
         assert_eq!(app.view, View::Found);
+        assert!(!query.is_empty() && app.filter == query, "the results came back without their query");
         // Once, and a folder opened from the library goes back to the library.
         app.view = View::Tracks;
         app.leave_tracks();
@@ -2894,7 +2898,7 @@ mod tests {
             crate::config::Row { key: "pick".into(), value: crate::config::Value::Switch(false), source: crate::config::Source::Flag, what: String::new(), when: crate::config::When::NextRun },
             crate::config::Row { key: "dir".into(), value: crate::config::Value::Fixed("/music".into()), source: crate::config::Source::File, what: String::new(), when: crate::config::When::NextStart },
         ];
-        app.apply(crate::protocol::Msg::Settings { text: String::new(), format: "m4a".into(), rows });
+        app.apply(crate::protocol::Msg::Settings { text: String::new(), format: "m4a".into(), rows, brief: Vec::new() });
     }
 
     // `,` opens the settings from a list and Esc goes back to that list, not to the library.
@@ -2971,7 +2975,7 @@ mod tests {
             Row { key: "icons".into(), value: Value::Icons(icons), source: Source::Default, what: String::new(), when: When::Now },
             Row { key: "notify".into(), value: Value::Switch(bell), source: Source::Default, what: String::new(), when: When::Now },
         ];
-        app.apply(crate::protocol::Msg::Settings { text: String::new(), format: "m4a".into(), rows: rows(crate::icons::Icons::Text, true) });
+        app.apply(crate::protocol::Msg::Settings { text: String::new(), format: "m4a".into(), rows: rows(crate::icons::Icons::Text, true), brief: Vec::new() });
         assert!(app.notify());
         assert_eq!(app.icons, crate::icons::Icons::Text);
         handle_key(&mut app, KeyCode::Char(','), KeyModifiers::NONE);
@@ -2979,7 +2983,7 @@ mod tests {
         handle_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
         assert!(matches!(cmds.try_recv(), Ok(Cmd::Icons(crate::icons::Icons::Symbols))));
         assert_eq!(app.icons, crate::icons::Icons::Text, "drew icons the worker had not saved");
-        app.apply(crate::protocol::Msg::Settings { text: String::new(), format: "m4a".into(), rows: rows(crate::icons::Icons::Symbols, false) });
+        app.apply(crate::protocol::Msg::Settings { text: String::new(), format: "m4a".into(), rows: rows(crate::icons::Icons::Symbols, false), brief: Vec::new() });
         assert_eq!(app.icons, crate::icons::Icons::Symbols);
         assert!(!app.notify());
     }

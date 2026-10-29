@@ -22,6 +22,7 @@ export interface Setup {
   text: string;
   format: string;
   rows: SettingRow[];
+  brief: [string, string][];
   dir: string;
   key: boolean;
 }
@@ -152,7 +153,7 @@ export async function boot() {
   try {
     const { theme, statuses, setup, replay, music } = await invoke<Boot>("start");
     app.music = music;
-    app.model = { ...app.model, statuses, settings: { text: setup.text, format: setup.format, rows: setup.rows } };
+    app.model = { ...app.model, statuses, settings: { text: setup.text, format: setup.format, rows: setup.rows, brief: setup.brief } };
     app.setup = setup;
     paint(theme);
     for (const sent of [...replay, ...(held ?? [])]) take(sent);

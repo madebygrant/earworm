@@ -125,7 +125,7 @@ export type Msg =
   | "Unmark"
   | "Idle"
   | "Restart"
-  | { Settings: { text: string; format: string; rows: SettingRow[] } }
+  | { Settings: { text: string; format: string; rows: SettingRow[]; brief: [string, string][] } }
   | { Undoable: string | null }
   | { Dropped: number[] }
   | "Review"
