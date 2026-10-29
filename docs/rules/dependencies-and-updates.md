@@ -16,6 +16,43 @@
   the exit status and only required tools clear it, so `--check` in a script
   means "can earworm work", not "is everything installed". The row still
   carries a cross and what you lose without it.
+- **Every tool is run through `tools::command`, never by bare name.** A desktop
+  app started from Finder gets a PATH without Homebrew's folders, so a bare
+  `Command::new("ffmpeg")` reads as missing on a machine that has it. `bin`
+  tries the config's `[tools]` path, then PATH, then `/opt/homebrew/bin`,
+  `/usr/local/bin`, Linuxbrew's `/home/linuxbrew/.linuxbrew/bin` and
+  `~/.local/bin`, and falls back to the bare name so a
+  launch still fails with `NotFound` and an install line. PATH comes first,
+  so a tool somebody put there on purpose beats a package manager's copy
+  (`path_wins_and_the_package_folders_catch_what_it_misses`). Only test
+  fixtures call ffmpeg by name; `kill`, `df`, `open` and `xdg-open` live in
+  `/bin` and `/usr/bin`, which even a minimal PATH has. `bin` caches what it
+  finds, and `configure` clears the cache.
+- **A tool earworm starts gets the folders earworm searched.** yt-dlp runs
+  ffmpeg and ffprobe itself to convert audio and embed art, and under Finder
+  its inherited PATH has neither: every download failed at the convert step
+  while `--check` showed ffmpeg found. `command` sets the child's PATH to
+  `tools::path()`, the helpers that take a test stub do the same, and the
+  download also passes `--ffmpeg-location`
+  (`yt_dlp_is_told_where_ffmpeg_is`, `a_launched_tool_sees_the_folders_earworm_searched`).
+  Per child, never on the process: changing the environment while other
+  threads run is undefined.
+- **A tool started from the AppImage gets none of the bundle's folders.**
+  The AppImage's launcher points PATH, the GTK variables and the library
+  paths into the mounted bundle, and a host tool that inherits them loads
+  the bundle's libraries instead of its own. `tools::environ`, which every
+  child goes through, takes those entries out when `APPDIR` is set and
+  leaves the host's (`a_tool_started_from_an_appimage_keeps_none_of_its_folders`).
+- **`[tools]` is set once, process-wide, by the front end.** ffmpeg runs deep
+  in tagging with no `Config` in reach, so `main` calls `tools::configure`
+  right after `Config::build`, before anything (`--check` included) runs a
+  tool. The keys are `DEPS`'s names and nothing else, refused by name at the
+  start, as is a path that is not a full one, which would depend on the
+  folder the app started in (`a_tool_can_be_named_and_a_misspelt_one_stops_the_start`).
+  `--check` names where each tool was found, a configured tool that is not
+  there is a typo in the config rather than a missing install, and one that
+  is there but gave no version says that instead
+  (`a_configured_tool_that_is_missing_points_at_the_config`).
 - **`version_of` takes one word after the tool's own name.** ffmpeg follows
   its version with a copyright line and fpcalc with a build string, and three
   of the four restate their own name before the number.

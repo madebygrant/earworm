@@ -1,6 +1,7 @@
 # earworm
 
-Rust/ratatui TUI that downloads a YouTube playlist as tagged opus files. See
+Rust/ratatui TUI that downloads a YouTube playlist as tagged opus files, built
+on a core library it shares with a Tauri desktop front end. See
 README.md for user-facing behaviour.
 
 ## Architecture
@@ -11,12 +12,24 @@ call and file write. Nothing that blocks touches the render loop. The one
 exception is `^t` writing the theme to the config, and the reason it is one is
 in docs/rules/themes-and-colour.md.
 
-- `main.rs` — terminal setup, event loop, key handling, shutdown
-- `app.rs` — `App` state, `Track`, `Status`, `Shelf` (one library row), `View`
-  (which screen has the keys), `Msg` (worker to UI), `Cmd` (UI to worker),
-  `Asker` (worker asks the UI a question and blocks on the reply), `Escape`
-  (what Esc on a prompt does), `picking` (the reply channel for the pick gate),
-  the `marked` set behind `targets()`, and the `filter` behind `rows()`
+A Cargo workspace. `crates/core` (`earworm-core`, a library) holds everything
+that is not drawing; `crates/tui` (package and binary `earworm`) is the
+terminal front end on top of it. The core never depends on the TUI, and
+`main.rs` re-exports the core's modules at the TUI's root so `crate::config`
+and friends resolve there too. Test helpers the TUI's tests need from the core
+sit behind core's `test-support` feature, which only the TUI's dev-dependency
+turns on.
+
+`crates/core/src`:
+
+- `protocol.rs` — what the worker and a front end exchange: `Msg` (worker to
+  UI), `Cmd` (UI to worker), `Track`, `Status`, `Shelf` (one library row),
+  `Prompt`, `Reply`, `Asker` (worker asks the UI a question and blocks on the
+  reply), `Escape` (what Esc on a prompt does), the row structs and
+  `Playback`, all serde so a front end can speak JSON. A question is an id:
+  `open_question` registers it, `answer(id, reply)` is the way back. Non-UI
+  modules import these from here, never from `app`, and `app` keeps its
+  imports private so the compiler holds that line
 - `config.rs` — `Cli`, the TOML `FileConfig`, and `Config::build`, which merges
   them; `SWITCHES` and `Config::rows`, what the settings screen lists
 - `worker.rs` — `ask_start` (library, resync or the URL prompt, which loops
@@ -32,19 +45,58 @@ in docs/rules/themes-and-colour.md.
 - `lookup.rs` — AcoustID, Deezer, Cover Art Archive, all through one `ureq`
   agent
 - `player.rs` — the optional cliamp handoff: import the `.m3u8`, then `load`
-- `ui.rs` — every draw function
 - `cheats.rs` — the cheat console's codes and `Unlocked`, the session's
   unlocks, shared by the UI and the worker
 - `achievements.rs` — the `Achievement` table, a pure `earned(Facts)`, and the
   state file that remembers which were announced
-- `theme.rs` — `Palette` and the four themes it ships, the WCAG measurements
+- `theme.rs` — `Palette` and the five themes it ships, the WCAG measurements
   that keep them legible, `background()` (the diagonal gradient painted behind
-  every frame) and the 256-colour quantiser
+  every frame) and the 256-colour quantiser. Colours are `ratatui_core`'s, the
+  one ratatui crate the core depends on
+- `icons.rs` — the glyph sets behind `icons = "..."`
+- `tools.rs` — `command`, how every external tool is started: from where
+  `bin` finds it (the config's `[tools]` path, PATH, then Homebrew's and
+  `~/.local`'s bin folders) and with those folders on its PATH
+- `view.rs` — the list rules both front ends share, as pure functions over
+  the state a front end holds: what the track filter and review keep, the
+  library's narrowings and `Sort`, the `t` search's hits, the artist query,
+  which tracks a marking key takes and what the pick gate opens with
 - `artists.rs` — the artist index read off the tags, `key` (one artist under
   any spelling), and the `.artists` and `.artists-seen` stores
 - `discover.rs` — Deezer's artists, releases, top tracks and related artists,
   `album_key`/`song_key`, the owned/partial match and the new-release check
 
+`crates/tui/src`:
+
+- `main.rs` — terminal setup, event loop, key handling, shutdown
+- `app.rs` — `App` state, `View` (which screen has the keys), `picking` (the
+  pick gate's question id), the `marked` set behind `targets()`, and the
+  `filter` behind `rows()`, which asks `view` and keeps only the cursors
+- `ui.rs` — every draw function
+
+`crates/gui` is the desktop front end: Tauri 2 with Svelte and TypeScript
+through Vite. `src-tauri/src/main.rs` (package `earworm-gui`, binary
+`earworm-desktop`) starts the worker, sends every `Msg` to the page on the
+`earworm://msg` event, and exposes `send`, `answer`, the theme and `view`
+functions as commands. `src/lib/reducer.ts` is the page's `App::apply`, `src/lib/keys.ts` its
+`handle_key` and `src/lib/screens.svelte.ts` the cursors and actions of the
+screens past the run and the library;
+`src/lib/msgs.json` is recorded from core's samples for its tests. The
+chrome is `App.svelte` laying out `screens/Header.svelte` (crumb, pills, the
+run's chip, search, theme), the screen, `screens/Detail.svelte` drawing
+`screens/Sheet.svelte` on the right, and `screens/Bar.svelte` with its hints
+from `src/lib/bar.ts`; the `h` sheet is `screens/Help.svelte` over
+`src/lib/keysheet.ts`. `Wall.svelte` is the scroller every wall and table
+sits in, and `Art.svelte` draws a folder's sleeve or mosaic with
+`src/lib/wall.ts`. A run in progress is `Room.svelte` over `src/lib/run.ts`;
+a finished one, or a folder opened from disk, is `Run.svelte`.
+`src/look.css` is the only stylesheet. Run it
+with `pnpm dev` in `crates/gui` and `cargo run -p earworm-gui`, or
+`pnpm tauri dev`; `pnpm test` runs the page's tests: the reducer's, and the
+library screen mounted in jsdom. `pnpm tauri build`
+makes the ad-hoc signed `.app` and `.dmg`, and `.github/workflows/desktop.yml`
+builds those and the Linux AppImage and `.deb` for a `v*` tag, attaching
+them to a draft release that is published by hand.
 
 ## Rules
 
@@ -74,8 +126,9 @@ which is read when somebody doubts a rule rather than at the start of a session.
 | Questions, forms and quitting: `App.confirm`, `App.fields`, `Confirm` and quit questions, the header and estimate | `docs/rules/questions-and-forms.md` | touching prompts, forms, `Confirm` or the quit flow |
 | Dependencies, `--check` and the update check: `DEPS`, `--check`, the GitHub probe | `docs/rules/dependencies-and-updates.md` | touching `deps.rs`, `update.rs` or `--check` |
 | Themes and colour depth: `Palette`, `[themes.*]`, `[colors]`, `^t`, truecolor vs 256, `NO_COLOR` | `docs/rules/themes-and-colour.md` | touching `theme.rs`, `recolour`, theme config or any colour in `ui.rs` |
-| Lists, narrowing and search: scrolling, flashes, the filter, review, the library order, `t` search, undo | `docs/rules/lists-and-search.md` | touching `rows()`, `shelf_rows()`, `found_hits`, the filter box or undo |
+| Lists, narrowing and search: scrolling, flashes, the filter, review, the library order, `t` search, undo | `docs/rules/lists-and-search.md` | touching `view.rs`, `rows()`, `shelf_rows()`, `found_hits`, the filter box or undo |
 | Artists and discovery: the artist index, stars, the artist page, getting albums and top tracks, new releases | `docs/rules/discovery.md` | touching `artists.rs`, `discover.rs`, `find_album`/`find_song`, `View::Artists`/`View::Artist` or `by_artist` |
+| The desktop app: what the page may keep, the worker's start, the recorded messages, the palette as CSS | `docs/rules/desktop.md` | touching anything in `crates/gui` |
 | Verbs, text, subprocesses and drawing: status verbs, the bell, column widths, `run_bounded`, the intro, the gradient | `docs/rules/ui-details.md` | touching text widths, subprocess calls, the intro or `draw_*` layout |
 
 A rule that mentions "the albums section" or a similar section name means the
@@ -111,9 +164,9 @@ different data and reports something else. Two runs that disagree are the
 harness, not the code, until proven otherwise.
 
 **Check the binary is newer than the source.** `cargo build` has reported
-`Finished` here without recompiling while `src/` was newer, which means
-verifying a fix against a binary that predates it. `cargo clean -p earworm`
-forces it.
+`Finished` here without recompiling while the source was newer, which means
+verifying a fix against a binary that predates it.
+`cargo clean -p earworm -p earworm-core` forces it.
 
 **Break the fix and watch the test fail.** Three tests written this way passed
 against the bug they described. Two specific traps: `ListState::select` with an

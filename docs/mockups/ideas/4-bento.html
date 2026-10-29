@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bento</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg:#0E1013; --card:#161920; --card-2:#1D2129; --line:#282D37; --text:#F0F2F5; --muted:#8A92A3;
+    --accent:#7DD3FC; --accent-2:#38BDF8; --violet:#A78BFA; --ok:#6EE7B7; --warn:#FCD34D; --error:#FCA5A5; --ink:#0E1013;
+    --font:"Space Grotesk", system-ui, sans-serif; --mono:"JetBrains Mono", ui-monospace, monospace; --r:20px;
+  }
+  * { box-sizing:border-box; }
+  html,body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 var(--font); }
+  .app { max-width:1400px; margin:0 auto; padding:22px 24px 40px; }
+  header { display:flex; align-items:center; gap:14px; margin-bottom:20px; }
+  header h1 { margin:0; font-size:26px; font-weight:700; letter-spacing:-.03em; }
+  header .stage { color:var(--muted); font-weight:500; }
+  header .stage b { color:var(--accent); }
+  header .right { margin-left:auto; display:flex; gap:8px; }
+  header .right span { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:9px 14px; font-weight:600; color:var(--muted); }
+  header .right kbd { font:11px var(--mono); color:var(--accent); margin-right:8px; }
+  .grid { display:grid; grid-template-columns:repeat(12, 1fr); grid-auto-rows:120px; gap:14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:var(--r); padding:18px 20px; position:relative; overflow:hidden; }
+  .card h3 { margin:0 0 10px; font-size:13px; font-weight:600; color:var(--muted); }
+  .big { font-size:36px; font-weight:700; letter-spacing:-.04em; line-height:1; font-variant-numeric:tabular-nums; }
+  .big small { font-size:13px; letter-spacing:0; font-weight:500; color:var(--muted); margin-left:8px; }
+  .folder { grid-column:span 4; grid-row:span 3; display:flex; flex-direction:column; }
+  .folder .mosaic { flex:1; border-radius:14px; overflow:hidden; display:grid; grid-template-columns:1fr 1fr; gap:3px; margin-bottom:14px; }
+  .folder .mosaic i { display:block; }
+  .folder h2 { margin:0; font-size:22px; font-weight:700; letter-spacing:-.03em; }
+  .folder p { margin:4px 0 12px; color:var(--muted); }
+  .folder .acts { display:flex; gap:8px; }
+  .btn { padding:9px 14px; border-radius:12px; border:1px solid var(--line); font-weight:600; display:inline-flex; gap:8px; align-items:center; }
+  .btn kbd { font:11px var(--mono); color:var(--accent); }
+  .btn.go { background:var(--accent); color:var(--ink); border:none; } .btn.go kbd { color:var(--ink); }
+  .stat { grid-column:span 2; grid-row:span 1; display:flex; flex-direction:column; justify-content:space-between; }
+  .stat .big { font-size:30px; }
+  .ring { grid-column:span 4; grid-row:span 2; display:grid; grid-template-columns:140px 1fr; gap:16px; align-items:center; }
+  .ring svg { width:140px; height:140px; transform:rotate(-90deg); }
+  .ring .lbl { position:absolute; left:20px; top:50%; width:140px; transform:translateY(-50%); text-align:center; }
+  .ring .lbl b { display:block; font-size:28px; font-weight:700; letter-spacing:-.03em; }
+  .ring .lbl span { color:var(--muted); font-size:12px; }
+  .ring ul { list-style:none; margin:0; padding:0; display:grid; gap:8px; }
+  .ring li { display:flex; justify-content:space-between; font-weight:600; }
+  .ring li i { display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:10px; vertical-align:middle; }
+  .list { grid-column:span 8; grid-row:span 4; padding:12px 8px 8px; }
+  .list h3 { padding:6px 12px 8px; display:flex; }
+  .list h3 .f { margin-left:auto; display:flex; gap:12px; }
+  .row { display:grid; grid-template-columns:40px 40px 1fr 110px 90px 70px; align-items:center; gap:12px; padding:9px 12px; border-radius:12px; }
+  .row.cur { background:var(--card-2); box-shadow:inset 0 0 0 1px var(--line); }
+  .row .n { color:var(--muted); font-variant-numeric:tabular-nums; }
+  .row .sl { width:34px; height:34px; border-radius:9px; display:grid; place-items:center; font-weight:700; font-size:11px; color:var(--ink); }
+  .row .t b { font-weight:600; display:block; }
+  .row .t small { color:var(--muted); }
+  .row .st { font-weight:700; } .st.ok { color:var(--ok); } .st.unsure { color:var(--warn); } .st.failed { color:var(--error); } .st.skipped { color:var(--muted); }
+  .row .src { font:12px var(--mono); color:var(--muted); }
+  .row .len { text-align:right; color:var(--muted); font-variant-numeric:tabular-nums; }
+  .artists { grid-column:span 4; grid-row:span 2; }
+  .artists ul { list-style:none; margin:0; padding:0; display:grid; gap:8px; }
+  .artists li { display:flex; align-items:center; gap:10px; }
+  .artists li i { width:26px; height:26px; border-radius:50%; background:linear-gradient(135deg, var(--violet), var(--accent)); }
+  .artists li b { font-weight:600; }
+  .artists li small { color:var(--muted); margin-left:auto; }
+  .artists li .new { color:var(--accent); font-size:11px; font-weight:700; background:rgba(125,211,252,.12); padding:2px 7px; border-radius:999px; }
+  .log { grid-column:span 4; grid-row:span 2; font:12px/1.6 var(--mono); color:var(--muted); }
+  .log .e { color:var(--error); }
+  .bar { position:absolute; left:0; right:0; bottom:0; height:4px; background:var(--line); }
+  .bar i { display:block; height:100%; width:58%; background:linear-gradient(90deg, var(--accent-2), var(--violet)); }
+  footer { margin-top:16px; display:flex; gap:20px; color:var(--muted); font-weight:500; }
+  footer kbd { font:11px var(--mono); color:var(--text); background:var(--card); border:1px solid var(--line); padding:2px 7px; border-radius:7px; margin-right:6px; }
+</style>
+<body>
+<div class="app">
+  <header>
+    <h1>Krautrock</h1><span class="stage"><b>tagging</b> · 7 of 12 · following</span>
+    <div class="right"><span><kbd>esc</kbd>library</span><span><kbd>t</kbd>find a track</span><span><kbd>b</kbd>artists</span><span><kbd>,</kbd>settings</span><span><kbd>^t</kbd>graphite</span></div>
+  </header>
+
+  <div class="grid">
+    <div class="card folder">
+      <div class="mosaic"><i style="background:linear-gradient(135deg,#F5F5F0,#D9D4C8)"></i><i style="background:linear-gradient(135deg,#2E7D32,#A5D6A7)"></i><i style="background:linear-gradient(135deg,#1E88E5,#90CAF9)"></i><i style="background:linear-gradient(135deg,#43A047,#FFEB3B)"></i></div>
+      <h2>Krautrock</h2>
+      <p>playlist · 12 tracks · synced today · opus</p>
+      <div class="acts"><span class="btn go"><kbd>S</kbd>Sync</span><span class="btn"><kbd>p</kbd>Play</span><span class="btn"><kbd>O</kbd>Show folder</span></div>
+      <div class="bar"><i></i></div>
+    </div>
+
+    <div class="card stat"><h3>confirmed</h3><div class="big" style="color:var(--ok)">8<small>of 12</small></div></div>
+    <div class="card stat"><h3>worth a look</h3><div class="big" style="color:var(--warn)">2</div></div>
+    <div class="card stat"><h3>failed</h3><div class="big" style="color:var(--error)">1<small>r retries</small></div></div>
+    <div class="card stat"><h3>skipped</h3><div class="big" style="color:var(--muted)">1</div></div>
+
+    <div class="card ring">
+      <svg viewBox="0 0 140 140">
+        <circle cx="70" cy="70" r="58" fill="none" stroke="var(--line)" stroke-width="14"/>
+        <circle cx="70" cy="70" r="58" fill="none" stroke="var(--ok)" stroke-width="14" stroke-dasharray="243 365" stroke-linecap="round"/>
+        <circle cx="70" cy="70" r="58" fill="none" stroke="var(--warn)" stroke-width="14" stroke-dasharray="60 365" stroke-dashoffset="-246" stroke-linecap="round"/>
+        <circle cx="70" cy="70" r="58" fill="none" stroke="var(--error)" stroke-width="14" stroke-dasharray="30 365" stroke-dashoffset="-310" stroke-linecap="round"/>
+      </svg>
+      <div class="lbl"><b>67%</b><span>confirmed</span></div>
+      <ul><li><span><i style="background:var(--ok)"></i>ok · manual</span>8</li><li><span><i style="background:var(--warn)"></i>guessed · unsure</span>2</li><li><span><i style="background:var(--error)"></i>failed</span>1</li><li><span><i style="background:var(--line)"></i>skipped</span>1</li></ul>
+    </div>
+
+    <div class="card ring" style="grid-column:span 4">
+      <div style="grid-column:span 2">
+        <h3>library</h3>
+        <div class="big">1,284<small>tracks in 38 folders</small></div>
+        <p style="color:var(--muted);margin:10px 0 0">3 files missing in Chill Evenings · <b style="color:var(--text)">D</b> to review</p>
+      </div>
+    </div>
+
+    <div class="card list">
+      <h3>tracks<span class="f"><span><kbd style="font:11px var(--mono);color:var(--accent)">/</kbd> filter</span><span><kbd style="font:11px var(--mono);color:var(--accent)">v</kbd> worth a look</span><span><kbd style="font:11px var(--mono);color:var(--accent)">w</kbd> tiles</span></span></h3>
+      <div class="row"><span class="n">01</span><span class="sl" style="background:#D9D4C8;color:#C0392B">N!</span><span class="t"><b>Hallogallo</b><small>Neu!</small></span><span class="st ok">ok</span><span class="src">acoustid</span><span class="len">10:07</span></div>
+      <div class="row"><span class="n">02</span><span class="sl" style="background:#A5D6A7">C</span><span class="t"><b>Vitamin C</b><small>Can</small></span><span class="st ok">ok</span><span class="src">deezer</span><span class="len">3:34</span></div>
+      <div class="row"><span class="n">03</span><span class="sl" style="background:#90CAF9">K</span><span class="t"><b>Autobahn</b><small>Kraftwerk</small></span><span class="st ok">ok</span><span class="src">acoustid</span><span class="len">22:43</span></div>
+      <div class="row"><span class="n">04</span><span class="sl" style="background:#FFEB3B">H</span><span class="t"><b>Watussi</b><small>Harmonia</small></span><span class="st ok">ok</span><span class="src">deezer</span><span class="len">6:42</span></div>
+      <div class="row"><span class="n">05</span><span class="sl" style="background:#E91E63;color:#fff">Cl</span><span class="t"><b>Hollywood</b><small>Cluster</small></span><span class="st ok">ok</span><span class="src">deezer</span><span class="len">5:20</span></div>
+      <div class="row"><span class="n">06</span><span class="sl" style="background:#415A77;color:#fff">LD</span><span class="t"><b>Silver Cloud</b><small>La Düsseldorf</small></span><span class="st ok">ok</span><span class="src">deezer</span><span class="len">5:45</span></div>
+      <div class="row cur"><span class="n">07</span><span class="sl" style="background:var(--card);color:var(--muted);border:1px solid var(--line)">07</span><span class="t"><b>Archangel Thunderbird</b><small>Amon Düül II · deezer found a match that didn't fit</small></span><span class="st unsure">unsure</span><span class="src">deezer</span><span class="len">3:08</span></div>
+      <div class="row"><span class="n">08</span><span class="sl" style="background:#333;color:#eee">F</span><span class="t"><b>It's a Rainy Day, Sunshine Girl</b><small>Faust</small></span><span class="st ok">ok</span><span class="src">deezer</span><span class="len">7:12</span></div>
+      <div class="row"><span class="n">09</span><span class="sl" style="background:var(--card);color:var(--error);border:1px solid var(--error)">!</span><span class="t"><b>Daydream</b><small>Ash Ra Tempel · video unavailable</small></span><span class="st failed">failed</span><span class="src">—</span><span class="len">—</span></div>
+      <div class="row"><span class="n">10</span><span class="sl" style="background:#FF7043">C</span><span class="t"><b>Mother Sky</b><small>Can</small></span><span class="st ok">ok</span><span class="src">acoustid</span><span class="len">14:31</span></div>
+      <div class="row"><span class="n">11</span><span class="sl" style="background:var(--card);color:var(--muted);border:1px solid var(--line)">11</span><span class="t"><b>Aguirre I</b><small>Popol Vuh</small></span><span class="st unsure">unsure</span><span class="src">apple</span><span class="len">6:17</span></div>
+      <div class="row"><span class="n">12</span><span class="sl" style="background:var(--card);color:var(--muted);border:1px solid var(--line)">12</span><span class="t"><b>Phaedra</b><small>Tangerine Dream</small></span><span class="st skipped">skipped</span><span class="src">—</span><span class="len">17:39</span></div>
+    </div>
+
+    <div class="card artists">
+      <h3>starred artists</h3>
+      <ul>
+        <li><i></i><b>Can</b><span class="new">2 new</span><small>14 tracks</small></li>
+        <li><i style="background:linear-gradient(135deg,#F59E0B,#EF4444)"></i><b>Neu!</b><small>9 tracks</small></li>
+        <li><i style="background:linear-gradient(135deg,#10B981,#3B82F6)"></i><b>Kraftwerk</b><span class="new">1 new</span><small>22 tracks</small></li>
+        <li><i style="background:linear-gradient(135deg,#EC4899,#8B5CF6)"></i><b>Harmonia</b><small>6 tracks</small></li>
+      </ul>
+    </div>
+
+    <div class="card log">
+      <h3>yt-dlp</h3>
+      [download] 07 - Amon Düül II - Archangel Thunderbird.opus<br>
+      [ExtractAudio] Destination: 08 - Faust - It's a Rainy Day.opus<br>
+      <span class="e">ERROR: [youtube] vid09: Video unavailable</span><br>
+      [download] 10 - Can - Mother Sky.opus<br>
+      [download]  58.0% of 12.4MiB at 2.1MiB/s
+    </div>
+  </div>
+
+  <footer><span><kbd>j k</kbd>move</span><span><kbd>e</kbd>edit</span><span><kbd>T</kbd>search again</span><span><kbd>c</kbd>cover</span><span><kbd>l</kbd>log</span><span><kbd>h</kbd>keys</span><span style="margin-left:auto"><kbd>q</kbd>quit</span></footer>
+</div>
+</body>
+</html>

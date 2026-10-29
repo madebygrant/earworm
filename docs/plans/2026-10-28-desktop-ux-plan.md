@@ -1,9 +1,13 @@
 # UX and UI plan: the earworm desktop app
 
+**Superseded 2026-10-29.** The app now follows
+`docs/mockups/ideas/6-wall-and-room-icons.html`, built by
+`2026-10-29-desktop-redesign-plan.md`. The screenshots this plan showed are
+deleted; each now links to the mockup page it was captured from.
+
 Written 2026-10-28. It covers how the Tauri app from
 `2026-10-26-native-app-plan.md` looks and behaves; waves 6 to 8 there build
-it. Every screen below is shown as its mockup, captured from
-`docs/mockups/shots/`, with a link to the live page. Open
+it. Every screen below links to its mockup page. Open
 `docs/mockups/index.html` in a browser for the live versions: each is HTML,
 themed and keyboard-driven where it matters, built on the tokens and styles
 the Svelte app should copy.
@@ -70,7 +74,7 @@ gradient ends. `graphite` is new; the other four are the TUI's own values.
 | error | `#FF8F87` | `failed`, log errors |
 | muted | `#A0A6B2` | sources, notes, `queued` `gone` `skipped` |
 | unsure | `#B9BEC8` | "we looked and found nothing" |
-| rule | `#343842` | borders, dividers, empty tile outlines |
+| rule | `#4E525C` | borders, dividers, empty tile outlines |
 | surface | `#262A31` | dialogs, tinted rows |
 | ink | `#16181D` | text on an accent fill |
 | near, far | `#1D2026`, `#121418` | the window gradient, 160°, stop 0.76 |
@@ -107,10 +111,10 @@ with its title set into the top edge, as the TUI draws popups. Dividers are
 
 ## Layout
 
-![The library screen: the rail of folders on the left, the open folder as a
+[The library screen: the rail of folders on the left, the open folder as a
 sheet of tiles in the middle, the folder under the cursor in the detail pane
 on the right, the tally and key hints along the
-bottom](../mockups/shots/library.png)
+bottom](../mockups/library.html)
 
 Four regions, fixed: the header (40px), the rail (232px), the detail pane
 (340px) and the status bar (30px). The middle takes the rest.
@@ -167,14 +171,14 @@ Each is a page in `docs/mockups/`; the picture is that page as captured.
    tool found with its version, or missing with the install command to copy.
    The rail says "No folders yet. A synced playlist lands here."
 
-   ![The first launch: a large link field over the tools table, an empty rail](../mockups/shots/first-launch.png)
+   [The first launch: a large link field over the tools table, an empty rail](../mockups/first-launch.html)
 
 2. **Library** ([`library.html`](../mockups/library.html)). A folder opened from disk, at rest. Missing
    files are tiles in their own right, so a gap in an album is visible at a
    glance. The detail pane describes the folder (kind, count, last sync, URL,
    playlist file, the missing files by name) with `S` `p` `O` `e` `D`.
 
-   ![The library: Ambient 1975 open as tiles, three missing files as dashed tiles with !, the folder described in the pane](../mockups/shots/library.png)
+   [The library: Ambient 1975 open as tiles, three missing files as dashed tiles with !, the folder described in the pane](../mockups/library.html)
 
 3. **A run** ([`run.html`](../mockups/run.html)). Live. Follow mode drags the cursor to the working
    tile and the bar says `⟳ following`; any movement key ends it and says
@@ -182,7 +186,7 @@ Each is a page in `docs/mockups/`; the picture is that page as captured.
    app. `l` opens the yt-dlp log along the bottom third; its hint burns error
    only when the log holds an ERROR.
 
-   ![A run: the progress bar, settled covers, the fetching tile with its scan line, queued tiles as numbers, the log pane open](../mockups/shots/run.png)
+   [A run: the progress bar, settled covers, the fetching tile with its scan line, queued tiles as numbers, the log pane open](../mockups/run.html)
 
 4. **Pick gate** ([`pick.html`](../mockups/pick.html)). Always rows, never tiles, since nothing has
    a sleeve yet. A filled `pick` band counts the selection and names the keys.
@@ -190,39 +194,39 @@ Each is a page in `docs/mockups/`; the picture is that page as captured.
    explained in the pane, and a long upload flagged by its length. A button
    names its result, "Download 13 tracks", beside "Take none".
 
-   ![The pick gate: a filled band counting the selection, [x] rows, a twin marked, the Download 13 tracks button](../mockups/shots/pick.png)
+   [The pick gate: a filled band counting the selection, ticked rows, a twin marked, the Download 13 tracks button](../mockups/pick.html)
 
 5. **Prompts** ([`prompts.html`](../mockups/prompts.html)). The finish menu with the review row first
    when there is something to review, the two-box form the run asks, the
    four-box `e` form, a link prompt for a folder with no URL, a refused link
    with its reason, and the `D` confirmation naming every file.
 
-   ![Six prompts: the finish menu, the two-box and four-box tag forms, a link prompt, a refused link, the delete confirmation](../mockups/shots/prompts.png)
+   [Six prompts: the finish menu, the two-box and four-box tag forms, a link prompt, a refused link, the delete confirmation](../mockups/prompts.html)
 
 6. **Track detail** ([`detail.html`](../mockups/detail.html)). The pane in all nine states, each with
    its sentence and its keys.
 
-   ![The detail pane in nine states, from ok to undone](../mockups/shots/detail.png)
+   [The detail pane in nine states, from ok to undone](../mockups/detail.html)
 
 7. **Artists** ([`artists.html`](../mockups/artists.html)). `b` turns the rail into the artist list,
    starred first, `+2 new` where a release is waiting. The page lays releases
    out as tiles, marked `● owned`, `◐ 2 of 6` or `○ missing` with the missing
    ones greyed. Shown locked: no hint, key or button mentions downloading.
 
-   ![An artist page: the artist list in the rail, releases as tiles marked owned, partial or missing, one release open in the pane](../mockups/shots/artists.png)
+   [An artist page: the artist list in the rail, releases as tiles marked owned, partial or missing, one release open in the pane](../mockups/artists.html)
 
 8. **Settings** ([`settings.html`](../mockups/settings.html)). Every row with its value, where it came
    from and what it does, grouped. A row a flag holds is in warn, and the pane
    says to start without the flag rather than pretending to switch it.
 
-   ![Settings: every row with its value, source and meaning, the pick row held by a flag](../mockups/shots/settings.png)
+   [Settings: every row with its value, source and meaning, the pick row held by a flag](../mockups/settings.html)
 
 9. **Overlays** ([`overlays.html`](../mockups/overlays.html)). The key sheet grouped by job with the
    status legend under it, the quit question, `t` search across the library,
    an achievement as a corner toast, and the console as one line along the
    bottom that names nothing it unlocks.
 
-   ![The key sheet, the quit question, library search, an achievement toast and the console line](../mockups/shots/overlays.png)
+   [The key sheet, the quit question, library search, an achievement toast and the console line](../mockups/overlays.html)
 
 
 ## Interaction

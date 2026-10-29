@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cover chooser</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="tokens.css"><link rel="stylesheet" href="base.css">
+<style>
+.choose { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 14px; margin: 10px 0 6px; }
+.choose figure { margin: 0; padding: 6px; border: 1px solid var(--rule); }
+.choose figure.cur { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.choose img { width: 100%; aspect-ratio: 1; display: block; image-rendering: pixelated; }
+.choose figcaption { font-size: var(--s-12); margin-top: 6px; display: grid; grid-template-columns: 2ch 1fr; color: var(--muted); }
+.choose figcaption .num { color: var(--accent); }
+.dialog.wide { width: min(760px, 100%); margin: 40px auto 0; }
+</style>
+</head>
+<body>
+<script src="directions/data.js"></script>
+<script src="shell.js"></script>
+<script>
+// c on a track: the pictures the lookup found, shown rather than described, then the rows about what the folder
+// already has. Numbers answer as on every choice. The images need their URLs in the question; today it holds labels.
+const FOUND = [["Cover Art Archive · 1200×1200", "Zuckerzeit"], ["Deezer · 1000×1000", "Zuckerzeit (Remastered)"], ["Apple Music · 600×600", "Zuckerzeit 2017"]];
+const tiles = FOUND.map(([label, seed], i) => `<figure class="${i === 0 ? "cur" : ""}"><img alt="" src="${pixelSleeve(seed, 16)}"><figcaption><span class="num">${i + 1}</span><span>${esc(label)}</span></figcaption></figure>`).join("")
+  + `<figure><img alt="" src="${pixelSleeve("Krautrock folder", 16)}"><figcaption><span class="num">4</span><span>keep the current cover · cover.jpg 500×500</span></figcaption></figure>`;
+mount({
+  head: { folder: "Zuckerzeit", stage: "cover art", count: "" },
+  railOpts: { current: "Zuckerzeit" },
+  main: `<section class="view"><div class="dialog wide"><span class="t">cover for Zuckerzeit</span>
+    <p class="muted">written as cover.jpg and embedded in all 10 tracks</p>
+    <div class="choose">${tiles}</div>
+    <ul class="menu"><li><span class="num">5</span><span>remove the folder cover · restore each track's own art</span></li><li><span class="num">6</span><span>use my own file…</span></li></ul>
+    <p class="foot"><span><span class="k">1-6</span> answer</span><span><span class="k">← →</span> move</span><span><span class="k">enter</span> choose</span><span><span class="k">esc</span> keeps the cover</span></p></div></section>`,
+  noDetail: true,
+  foot: { hints: [["1-6", "answer"], ["esc", "keep"]] },
+});
+</script>
+</body>
+</html>

@@ -25,6 +25,13 @@
 
 ## Narrowing, ordering and undoing
 
+- **What a list shows is decided in core, never in a front end.** `view.rs`
+  holds the narrowings, the library order, the search's hits and which tracks
+  a marking key takes, as functions over the state passed in, and the
+  terminal's `rows()`, `shelf_rows()`, `found_hits()` and marking keys only
+  call them. The desktop app calls the same functions, so a rule here cannot
+  hold in one front end and not the other. Cursors, scrolling and flashes are
+  each front end's own.
 - **The review is a predicate beside the filter, not a string in the box.**
   `kept`, `unsure`, `no match` and `failed` share no word to type, so
   `Status::wants_a_look` is what `v`, `n`/`N` and the finish menu's first row
@@ -72,9 +79,10 @@
   (`Msg::FoundUnmark`, sent from `append` only when something was written) and
   not when `P` is pressed, for the reason a bulk action clears on completion;
   a new search clears them too. A file that is gone is not markable, since the
-  add would only fail on it. `from_found` is set by Enter on a result so `Esc`
-  from that folder comes back to the results; the library's and the list's
-  open paths clear it
+  add would only fail on it. `from_found` holds the query when Enter opens a result, so `Esc` from that folder comes back to the
+  results with it: opening the folder sends `Msg::Restart`, which clears the filter, and a flag that read the
+  filter never fired outside the test that skipped the restart. The library's and the list's open paths
+  clear it
   (`tab_marks_search_results_and_p_adds_them_in_the_order_marked`,
   `a_file_that_is_gone_is_not_marked`,
   `esc_from_a_folder_opened_from_a_result_goes_back_to_the_results`).

@@ -44,13 +44,19 @@
   falls back to the bare `Year` field; `set_date` writes a `Timestamp` whose
   month and day are `None`. A year that will not parse refuses the edit rather
   than writing nothing over what the file had.
-- **`Msg::Meta` carries album and year, not `Msg::Update`.** They change only
-  when somebody edits them, where `Update` is sent for every status a run
-  passes through. Same reason `Path` is its own message. Every path that
-  fills them in has to send it, which is what `offer_meta` is for: the
-  worker's `Track` is not the one `draw_detail` reads, and `tag_tracks`
-  filling in the album without saying so left the pane blank after a run and
-  populated after reopening the same folder from the library.
+- **`Msg::Meta` carries the tags, not `Msg::Update`.** Artist, title, album
+  and year change only when somebody edits them or the tag pass writes them,
+  where `Update` is sent for every status a run passes through. Same reason
+  `Path` is its own message. Every path that fills them in has to send it,
+  which is what `offer_meta` is for: the worker's `Track` is not the one
+  `draw_detail` reads, and `tag_tracks` filling in the album without saying
+  so left the pane blank after a run and populated after reopening the same
+  folder from the library. The artist and title are here because
+  `Update.name` is display text in title-first order once a track is
+  tagged, and the desktop app's tiles took it apart artist-first and
+  swapped the two; `M` on a freshly tagged track also had no artist to read
+  (`a_run_tells_the_ui_about_the_album_it_wrote`,
+  `marking_by_artist_works_on_a_track_the_run_just_tagged`).
 - **The header's right half is dropped whole, never truncated.** Half a
   progress bar is a lie about how far along the run is. The left half names
   what you are looking at, so it is what stays.

@@ -2,7 +2,7 @@
    graphite is the desktop default; the other four are the TUI's own values. */
 :root, [data-theme="graphite"] { color-scheme: dark;
   --text:#F1F2F4; --accent:#9DB7FF; --cursor:#7CDDB2; --warn:#F5B867; --error:#FF8F87; --muted:#A0A6B2;
-  --rule:#343842; --surface:#262A31; --unsure:#B9BEC8; --ink:#16181D; --near:#1D2026; --far:#121418; }
+  --rule:#4E525C; --surface:#262A31; --unsure:#B9BEC8; --ink:#16181D; --near:#1D2026; --far:#121418; }
 @media (prefers-color-scheme: light) { :root:not([data-theme]) { color-scheme: light;
   --text:#26221E; --accent:#7C540E; --cursor:#116E62; --warn:#845206; --error:#AA2828; --muted:#696258;
   --rule:#ACA496; --surface:#FDFBF7; --unsure:#746038; --ink:#FAF8F4; --near:#F7F3EC; --far:#E7E1D6; } }

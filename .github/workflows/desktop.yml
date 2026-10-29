@@ -1,0 +1,75 @@
+# Builds the desktop app for a release tag and attaches it to that tag's release as a draft. The terminal
+# app is installed from the tag with cargo and needs nothing built here.
+name: desktop
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  TAG: ${{ github.ref_name }}
+
+jobs:
+  # One job makes the draft before either build starts, so two builds finishing together cannot make
+  # one each.
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - run: gh release view "$TAG" --repo "$GITHUB_REPOSITORY" || gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --draft --title "earworm $TAG" --generate-notes
+
+  build:
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        # Bundle types come from tauri.conf.json, which builds the ones each platform can make.
+        # 22.04, the oldest supported LTS, so the AppImage's glibc is one a stock Ubuntu LTS still has.
+        os: [macos-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev librsvg2-dev libssl-dev patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: swatinem/rust-cache@v2
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: crates/gui/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: crates/gui
+      - run: pnpm tauri build
+        working-directory: crates/gui
+
+      # Before the upload: Apple Silicon will not run an unsigned binary, so a build that lost the ad-hoc
+      # signature must not reach the release.
+      - name: The app keeps its ad-hoc signature
+        if: runner.os == 'macOS'
+        run: |
+          app=target/release/bundle/macos/earworm.app
+          codesign --verify --strict "$app"
+          codesign -dv "$app" 2>&1 | grep -x "Signature=adhoc"
+
+      - name: Upload to the draft
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            files=(target/release/bundle/dmg/*.dmg)
+          else
+            files=(target/release/bundle/deb/*.deb target/release/bundle/appimage/*.AppImage)
+          fi
+          gh release upload "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+        shell: bash

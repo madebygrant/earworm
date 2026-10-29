@@ -4,12 +4,16 @@
 words grouped by what to do about them.
 
 `^t` is the one key that works everywhere, the help overlay and prompts
-included: it walks the four [colour themes](themes.md) and remembers the one
+included: it walks the five [colour themes](themes.md) and remembers the one
 you stop on.
 
 ![The keys overlay: keys grouped by what they do, then the status words
 grouped into confirmed tags, guesses worth a look, tracks this run did not
 touch, and failures](images/keys.png)
+
+The [desktop app](gui.md) takes every key on this page. `w` is the one
+key it adds. On a Mac its ⌘ shortcuts (⌘c, ⌘v) keep their usual meaning; on
+Linux `^c` quits, as it does here.
 
 ## Track list
 
@@ -20,6 +24,7 @@ touch, and failures](images/keys.png)
 | `g` `G` | first, last |
 | `n` `N` | next, previous track nothing has confirmed |
 | `f` | follow the active track (any movement key stops it) |
+| `w` | tiles or a list (desktop app only) |
 | `l` | toggle the yt-dlp output pane |
 | `L` `J` `K` | grow the log pane to half the screen, scroll it |
 | `/` | filter the list by name or status |
@@ -61,6 +66,7 @@ touch, and failures](images/keys.png)
 | `t` | every matching track across the library, flat |
 | `b` | every artist in the library, starred first ([discovery](discovery.md)) |
 | `s` | sort: name, last synced, most missing |
+| `w` | tiles or a list (desktop app only) |
 | `a` | show every folder, albums only, or playlists only |
 | `p` | play the folder under the cursor in cliamp (needs a playlist file) |
 | `space` | play/pause cliamp |
@@ -94,6 +100,7 @@ touch, and failures](images/keys.png)
 | `enter` | open a related artist's page |
 | `a` | albums and EPs, or every release |
 | `o` | the library, narrowed to their folders |
+| `w` | tiles or a list (desktop app only) |
 | `Esc` | the page before, else the artists |
 
 ## Settings

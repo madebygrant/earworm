@@ -28,7 +28,7 @@ achievements = true # announce achievements and remember the ones earned
 
 theme = "warm"     # a built-in, or one of your own below
 
-[themes.midnight]  # palettes of your own, joining the four that ship
+[themes.midnight]  # palettes of your own, joining the five that ship
 base   = "cool"    # optional: a diff on a built-in rather than all twelve
 accent = "#ff5cd5"
 
@@ -37,6 +37,9 @@ cursor = "#00ff88"
 
 extra = ["--sleep-requests", "1"]   # always passed to yt-dlp
 acoustid_key = "..."                # or use ACOUSTID_API_KEY
+
+[tools]            # a tool earworm cannot find on its own; see docs/install.md
+ffmpeg = "~/bin/ffmpeg"
 ```
 
 ## Flags
@@ -115,7 +118,7 @@ changing nothing. A key in the file sits there in plain text, so
 Once a day earworm asks GitHub whether a newer version exists and says so on
 the intro and in `--check`. Equal versions, older ones, network failures and
 `--no-update-check` all say nothing. Updating is
-`git pull && cargo install --path .`.
+`git pull && cargo install --path crates/tui`.
 
 ## Achievements
 

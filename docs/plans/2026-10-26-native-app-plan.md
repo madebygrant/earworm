@@ -34,7 +34,7 @@ default. Waves 2, 3 and 6 to 10 carry what that plan needs.
   `PATH` without `/opt/homebrew/bin`, so every tool would read as missing.
 - `serde` is already a dependency.
 
-## 1. Move the protocol out of `app.rs`
+## 1. Move the protocol out of `app.rs` [done 2026-10-28]
 
 Why first: every later wave depends on the core not importing the TUI, and
 it is a pure move with the suite as its check.
@@ -49,7 +49,7 @@ it is a pure move with the suite as its check.
 
 Exit: `cargo test` passes and `grep -n "crate::app" src/{worker,tag,lookup,custom,export,discover,artists,picker,player,playlists}.rs` finds nothing.
 
-## 2. Split into a workspace
+## 2. Split into a workspace [done 2026-10-28]
 
 - `crates/core` (lib): worker, config, tag, lookup, ytdlp, manifest, artists,
   discover, custom, playlists, export, deps, update, cheats, achievements,
@@ -57,6 +57,17 @@ Exit: `cargo test` passes and `grep -n "crate::app" src/{worker,tag,lookup,custo
 - `crates/tui` (bin `earworm`): main, app, ui, icons, the intro.
 - Tests move with their modules. Fixtures shared through a `test-support`
   feature on core rather than copied.
+- Three `worker.rs` tests run the worker, feed its messages to `App` and draw
+  the screen (one near `can_purge`, two checking the `≈` twin marker). Core
+  cannot reach `App`, so move them to the TUI crate on core's
+  `test-support`, or assert on the `Msg` values instead. Left from wave 1.
+- `Cmd::Icons` carries `icons::Icons`, and `config.rs` uses it too, but
+  `icons.rs` is listed for the TUI. Move the `Icons` enum (the choice, not
+  the glyph tables) into core, or `Cmd` will not compile there.
+- `Palette` holds `ratatui::style::Color`, so theme data in core still pulls
+  in ratatui. Either core keeps ratatui as a dependency for the colour type
+  alone, or palettes become plain RGB triples with the TUI converting. Decide
+  before the move; wave 6's CSS generation wants the RGB form anyway.
 - The binary name, flags and `cargo install` stay the same.
 - Add the `graphite` palette (UX plan, colour table) beside the four in
   `theme.rs`. If the TUI ships it too, it goes in `BUILT_INS` and
@@ -67,9 +78,9 @@ Exit: `cargo test` passes and `grep -n "crate::app" src/{worker,tag,lookup,custo
 - Update CLAUDE.md's module list and the rules table paths.
 
 Exit: `cargo test --workspace` passes with the same count as before the
-split, and `cargo build -p earworm-tui` produces `earworm`.
+split, and `cargo build -p earworm` produces `earworm`.
 
-## 3. A serialisable protocol with question ids
+## 3. A serialisable protocol with question ids [done 2026-10-28]
 
 Why here: the GUI cannot exist without it, and the TUI moving onto the same
 path is what keeps one protocol.
@@ -95,7 +106,7 @@ Exit: `cargo test --workspace` passes; a test round-trips every `Msg` and
 `Cmd` variant through JSON from an exhaustive `match`, so a new variant that
 cannot serialise fails to compile or fails the test.
 
-## 4. Find tools without the shell's PATH
+## 4. Find tools without the shell's PATH [done 2026-10-28]
 
 - `core::tools::bin(name)`: an explicit override from the config, then
   `PATH`, then `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`. Every
@@ -110,7 +121,7 @@ cannot serialise fails to compile or fails the test.
 Exit: `env -i HOME=$HOME PATH=/usr/bin:/bin earworm --check` finds the
 Homebrew tools on a machine that has them.
 
-## 5. The view model both front ends share
+## 5. The view model both front ends share [done 2026-10-28]
 
 Why before the GUI: these rules have tests and were each learned the hard
 way; the GUI should call them, not reimplement them in TypeScript.
@@ -129,7 +140,7 @@ way; the GUI should call them, not reimplement them in TypeScript.
 Exit: the moved tests pass in core, the TUI calls core for each, and no
 filter or sort logic is left in `crates/tui/src/app.rs`.
 
-## 6. The Tauri shell
+## 6. The Tauri shell [done 2026-10-28]
 
 - `crates/gui`: Tauri 2, Svelte and TypeScript through Vite.
 - The backend:
@@ -155,7 +166,7 @@ Exit: the app opens on a fixture `--dir` and lists its folders from
 `Msg::Library` in the rail; the reducer tests pass; `^t` walks every palette
 and a `[colors]` override in the fixture config shows on screen.
 
-## 7. Library, runs and questions
+## 7. Library, runs and questions [done 2026-10-29]
 
 - Screens, each with its mockup:
   - first launch, with `--check`'s tools table (`first-launch.html`);
@@ -173,13 +184,17 @@ and a `[colors]` override in the fixture config shows on screen.
   layout does not wait on it.
 - Read `questions-and-forms.md` and `keys-and-screens.md` first.
 
+- Carried from wave 6's review: the page stores `Msg::Ask` and `Msg::Pick`
+  but draws and answers neither, so a first run with an empty library sits
+  at the URL prompt.
+
 Exit: with a stub `yt-dlp` on the resolved path, syncing a fixture playlist
 from the GUI writes its `.m3u8` and `.earworm` (wait on the files), and an
 answered pick gate downloads only what was marked. Each screen, captured at
 1440 wide in graphite, matches its picture in `docs/mockups/shots/` in layout
 and colour.
 
-## 8. The remaining screens
+## 8. The remaining screens [done 2026-10-29]
 
 - Search (`t`), custom playlists and the picker, export, tag edit and undo,
   covers (plain `<img>`, no kitty graphics), settings, help.
@@ -192,10 +207,14 @@ and colour.
 - Each screen checked against the same fixture library, one at a time;
   any can slip to a later release except settings.
 
+- Carried from wave 6's review: the reducer does not mark an artist page's
+  new releases or record the page as read, which `App::apply` does with
+  `artists::key`. Move that marking into core before the page uses it.
+
 Exit: every TUI screen has a GUI counterpart, and the discovery rules hold
 in the GUI (the locked page offers no download).
 
-## 9. Packaging for macOS and Linux
+## 9. Packaging for macOS and Linux [done 2026-10-29]
 
 - macOS: `.app` and `.dmg`, **unsigned**: no Developer ID, no notarisation.
   - Apple Silicon refuses to run code with no signature at all, so the build
@@ -219,7 +238,7 @@ flag, opens for a fresh macOS user after Open Anyway and finds the Homebrew
 tools; `codesign -dv` shows the ad-hoc signature; the AppImage runs on a
 stock Ubuntu LTS.
 
-## 10. Docs
+## 10. Docs [done 2026-10-29]
 
 - README: a GUI section and install steps, including the unsigned-app
   first launch on macOS.

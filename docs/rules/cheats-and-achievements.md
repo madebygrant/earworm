@@ -9,8 +9,9 @@
 - **A code is stored as its FNV-1a hash, never as the word.** A plain string
   shows up in `grep` and in `strings` on the binary, and so does any name
   built from it, so the popup and its identifiers don't say it either. The
-  tests type a `cfg(test)`-only code instead, which means no test can notice
-  a wrong stored hash: check a new one by hand in the console. `digest` is
+  tests type a test-only code instead, built under `cfg(test)` or core's
+  `test-support` feature and so never in a release binary, which means no test
+  can notice a wrong stored hash: check a new one by hand in the console. `digest` is
   pinned to published vectors, because changing it breaks every code at once
   while the suite stays green.
 - **A gated link is refused in `prompt_url`, the one place a URL is

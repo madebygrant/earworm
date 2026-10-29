@@ -1,0 +1,399 @@
+/* docs/mockups/ideas/6-wall-and-room-icons.html, scoped to `.look`. No color-mix(): WebKit before 16.2
+   lacks it, so main.rs derives card2, glass, accent2, glow and scrim. */
+/* graphite until core's palette is painted over it, with its derived slots as main.rs works them out. */
+:root { color-scheme: dark;
+  --text:#F1F2F4; --accent:#9DB7FF; --cursor:#7CDDB2; --warn:#F5B867; --error:#FF8F87; --muted:#A0A6B2;
+  --rule:#4E525C; --surface:#262A31; --unsure:#B9BEC8; --ink:#16181D; --near:#1D2026; --far:#121418;
+  --card2:#1C1F25; --glass:rgba(38, 42, 49, 0.82); --accent2:#6C7EAE; --glow:rgba(157, 183, 255, 0.22); --scrim:rgba(18, 20, 24, 0.78); }
+/* light on a light system, so the window does not open dark and then flip. */
+@media (prefers-color-scheme: light) { :root { color-scheme: light;
+  --text:#26221E; --accent:#7C540E; --cursor:#116E62; --warn:#845206; --error:#AA2828; --muted:#696258;
+  --rule:#ACA496; --surface:#FDFBF7; --unsure:#746038; --ink:#FAF8F4; --near:#F7F3EC; --far:#E7E1D6;
+  --card2:#F2EEE7; --glass:rgba(253, 251, 247, 0.82); --accent2:#A18554; --glow:rgba(124, 84, 14, 0.22); --scrim:rgba(231, 225, 214, 0.78); } }
+* { box-sizing: border-box; margin: 0; }
+html, body { height: 100%; }
+body { font: 13px/1.5 "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace; color: var(--text); overflow: hidden; user-select: none; -webkit-user-select: none;
+  background: linear-gradient(160deg, var(--near) 0%, var(--far) var(--stop, 76%), var(--far) 100%);
+  --sheet: 330px; }
+button, input { font: inherit; color: inherit; background: none; border: 0; }
+button { cursor: pointer; }
+:focus-visible { outline: 1px solid var(--accent); outline-offset: 0; }
+.good { color: var(--cursor); } .warn { color: var(--warn); } .error { color: var(--error); } .muted { color: var(--muted); }
+.unsure { color: var(--unsure); } .live { color: var(--accent); font-weight: 700; }
+.k { color: var(--accent); }
+.view { overflow: auto; min-width: 0; padding: 12px 16px 24px; }
+main.app { display: grid; min-height: 0; }
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+.fail { padding: 24px 16px; }
+.fail h1 { font-size: 17px; color: var(--error); margin-bottom: 8px; }
+.fail pre { white-space: pre-wrap; color: var(--text); font: inherit; }
+.console { position: fixed; left: 0; right: 0; bottom: 84px; background: var(--surface); border-top: 1px solid var(--accent); padding: 4px 16px; display: flex; gap: 1ch; z-index: 6; }
+.console input { flex: 1; outline: none; }
+/* The redesign's chrome: header, the screens between, then the floating bar. Room for the traffic lights. */
+.shell { height: 100%; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; gap: 14px; padding: 18px 24px 16px; }
+main.app, main.app.no-detail { grid-template-columns: minmax(0, 1fr) var(--sheet); gap: 18px; }
+main.app.no-detail { grid-template-columns: minmax(0, 1fr); }
+@media (max-width: 1100px) { main.app, main.app.no-detail { grid-template-columns: minmax(0, 1fr); } }
+/* A wall: its toolbar stays put while the sleeves scroll under it, and the log keeps its third. */
+.view.walled { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+/* A run: its counts and table, and its own card where the sheet would be. */
+.view.room { display: grid; grid-template-columns: minmax(0, 1fr) var(--sheet); grid-template-rows: minmax(0, 1fr); gap: 18px; padding: 0; overflow: hidden; }
+/* Narrow, the run's card goes as the sheet does, but the log stays, under the table, so `l` still shows it. */
+@media (max-width: 1100px) { .view.room { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; } .view.room .side .run { display: none; } .view.room .side .log { max-height: 160px; } }
+/* yt-dlp's log, under a folder's wall or in the run's card. */
+.log { overflow: auto; font: 12px/1.6 "JetBrains Mono", ui-monospace, monospace; color: var(--muted); user-select: text; -webkit-user-select: text; }
+.log .warn { color: var(--warn); } .log .error { color: var(--error); }
+.log div { white-space: pre-wrap; word-break: break-all; }
+.view.walled > .log { border-top: 1px solid var(--rule); height: 30%; min-height: 120px; padding: 8px 16px; flex: none; }
+.view.walled > .log.tall { height: 50%; }
+
+/* The picker's list in the order Enter leaves it. */
+.order { list-style: none; padding: 0; font-size: 13px; margin-top: 8px; counter-reset: o; }
+.order li { counter-increment: o; display: grid; grid-template-columns: 3ch 1fr; }
+.order li::before { content: counter(o); color: var(--muted); }
+.order li.out { color: var(--muted); text-decoration: line-through; }
+.order li.out::before { content: ""; }
+
+/* display: contents, so the header, the bar and the sheet stay the shell's grid items. */
+.look {
+  display: contents;
+  --card: var(--surface); --card-2: var(--card2); --line: var(--rule); --ok: var(--cursor); --accent-2: var(--accent2);
+  --font: "Manrope", system-ui, sans-serif; --mono: "JetBrains Mono", ui-monospace, monospace;
+  --r: 18px; --r-s: 12px;
+  font: 14px/1.45 var(--font); color: var(--text);
+}
+/* Glow is light only: muted on it measures 3:1 on warm, so no text sits on it. */
+.stage { background: radial-gradient(900px 400px at 70% -10%, var(--glow), transparent 60%); }
+.look kbd { font: 11px var(--mono); color: var(--accent); background: var(--card-2); padding: 1px 6px; border-radius: 6px; }
+
+.look .i { width: 18px; height: 18px; stroke: currentColor; fill: none; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+
+/* Flush with the screen below: the macOS traffic lights sit above the logo, in the shell's top padding. */
+.look header { display: flex; align-items: center; gap: 24px; padding: 4px 0; }
+.look .logo { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 20px; letter-spacing: -.02em; }
+/* The gradient is 1.5:1 on a light ground, so there the coil takes the text colour and the eye is a hole.
+   WebKit before 15.4 has only the prefixed mask. */
+.look .logo i { width: 30px; height: 30px; background: radial-gradient(circle 0.7px at 93.6% 28.6%, #000 99%, #0000), linear-gradient(135deg, #9DB7FF, #7CDDB2); -webkit-mask: url("./logo.svg") center / contain no-repeat; mask: url("./logo.svg") center / contain no-repeat; }
+/* Before `paint`, the system's scheme decides, as :root's palette does. */
+:root[data-light="true"] .look .logo i { background: var(--text); -webkit-mask-image: url("./logo-cut.svg"); mask-image: url("./logo-cut.svg"); }
+@media (prefers-color-scheme: light) { :root:not([data-light]) .look .logo i { background: var(--text); -webkit-mask-image: url("./logo-cut.svg"); mask-image: url("./logo-cut.svg"); } }
+.look .crumb { flex: 1 1 0; min-width: 0; color: var(--muted); font-weight: 600; white-space: nowrap; }
+.look .crumb .line { display: flex; gap: 8px; align-items: baseline; }
+/* The place may be cut; the count never is, since a cut-off count reads as a wrong one. */
+.look .crumb .where { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.look .crumb .spin, .look .crumb .count { flex: none; color: var(--text); font-variant-numeric: tabular-nums; }
+.look .crumb .brief { overflow: hidden; font-size: 12px; font-weight: 500; }
+.look .crumb b { color: var(--text); }
+
+.look nav.pills { flex: none; display: flex; gap: 4px; padding: 4px; background: var(--card); border: 1px solid var(--line); border-radius: 999px; }
+.look nav.pills button { color: var(--muted); padding: 8px 16px; border-radius: 999px; font-weight: 600; display: flex; gap: 8px; align-items: center; }
+.look nav.pills button .i { width: 17px; height: 17px; }
+.look nav.pills button:disabled, .look .tools button:disabled, .look .seg3 > button:disabled, .look .toolbar .go:disabled { opacity: .45; cursor: default; }
+.look nav.pills button.on { background: var(--card-2); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
+.look .tools { flex: none; display: flex; gap: 8px; }
+.look .tools > * { background: var(--card); border: 1px solid var(--line); color: var(--text); border-radius: 999px; height: 38px; padding: 0 14px; font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.look .tools .search { width: 200px; color: var(--muted); }
+.look .tools .search kbd { margin-left: auto; }
+.look .tools .icon { width: 38px; padding: 0; justify-content: center; }
+/* The run's chip: its name may be cut, its count never is, as in the crumb. */
+.look .tools .run { max-width: 280px; min-width: 0; }
+.look .tools .run.on { background: var(--card-2); box-shadow: inset 0 0 0 1px var(--line); }
+.look .tools .run .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.look .tools .run .said { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+.look .tools .run .said.warn { color: var(--warn); }
+.look .tools .run .said.error { color: var(--error); }
+.look .tools .run .progress { flex: none; width: 48px; }
+
+.look .seg3 { display: flex; gap: 2px; padding: 4px; background: var(--card); border: 1px solid var(--line); border-radius: 999px; align-items: center; }
+.look .seg3 > * { width: 34px; height: 30px; border-radius: 999px; display: grid; place-items: center; color: var(--muted); }
+.look .seg3 > .on { background: var(--card-2); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
+.look .filters { display: flex; gap: 4px; padding: 4px; background: var(--card); border: 1px solid var(--line); border-radius: 999px; }
+.look .filters > * { padding: 7px 14px; border-radius: 999px; color: var(--muted); font-weight: 600; }
+.look .filters > .on { background: var(--card-2); color: var(--text); box-shadow: inset 0 0 0 1px var(--line); }
+
+.look footer.bar { display: flex; align-items: center; gap: 18px; padding: 12px 18px; background: var(--glass); backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-weight: 600; }
+.look footer.bar kbd { color: var(--text); background: var(--card-2); border: 1px solid var(--line); margin-right: 6px; }
+.look footer.bar .hints { flex: 1; min-width: 0; display: flex; gap: 18px; overflow: hidden; white-space: nowrap; }
+.look footer.bar .hot { color: var(--error); }
+.look footer.bar .tally { flex: none; display: flex; gap: 14px; color: var(--text); }
+.look footer.bar .progress { flex: 0 1 180px; }
+.look .progress { height: 6px; border-radius: 999px; background: var(--line); overflow: hidden; }
+.look .progress i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent-2), var(--accent)); }
+
+.look .toolbar { flex: none; display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+.look .seg3 > button { cursor: pointer; }
+.look .find { margin-left: auto; flex: 0 1 420px; min-width: 220px; height: 34px; display: flex; align-items: center; gap: 8px; padding: 0 14px; background: var(--card); border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-weight: 600; }
+.look .find.on { border-color: var(--accent); color: var(--text); }
+.look .find button, .look .find input { flex: 1; min-width: 0; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; outline: none; caret-color: var(--accent); }
+.look .find input::placeholder { color: var(--muted); }
+.look .find input { min-width: 120px; }
+.look .find .n { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
+/* Padding so the cursor's outline, drawn outside the sleeve, is never clipped by the scroller. */
+.look .scroll { flex: 1; min-height: 0; overflow: auto; padding: 8px 8px 24px; }
+.look .none { margin: 0; padding: 24px 8px; color: var(--muted); font-weight: 600; }
+.look .wall { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 18px; }
+.look .wall > * { min-width: 0; cursor: pointer; }
+.look tbody tr { cursor: pointer; }
+.look .s { aspect-ratio: 1; border-radius: 16px; position: relative; overflow: hidden; display: grid; place-items: center; font-weight: 800; font-size: 28px; color: var(--ink); box-shadow: 0 10px 30px var(--scrim); }
+.look .s img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.look .s .cap { position: absolute; left: 0; right: 0; bottom: 0; padding: 38px 14px 12px; background: linear-gradient(transparent, var(--scrim) 55%); color: var(--text); font-size: 13px; text-align: left; font-weight: 700; }
+.look .s .cap small { display: block; color: var(--muted); font-weight: 500; }
+.look .s .st { position: absolute; top: 10px; left: 10px; font-size: 11px; font-weight: 700; padding: 3px 8px; border-radius: 999px; background: var(--scrim); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); color: var(--muted); }
+.look .s .kind { position: absolute; top: 10px; right: 10px; padding: 5px; display: grid; place-items: center; border-radius: 999px; background: var(--scrim); color: var(--text); }
+.look .s .kind .i { width: 14px; height: 14px; }
+/* Named by palette slot, so a pill takes theme::status_slot's answer as its class. */
+.look .st.cursor { color: var(--cursor); }
+.look .st.warn { color: var(--warn); }
+.look .st.error { color: var(--error); }
+.look .st.unsure { color: var(--unsure); }
+.look .st.accent { color: var(--accent); }
+.look .s.cur { outline: 3px solid var(--accent); outline-offset: 3px; }
+.look .s.empty { background: var(--card); border: 1px dashed var(--line); color: var(--muted); font-size: 22px; box-shadow: none; }
+.look .s.empty.error { border-color: var(--error); color: var(--error); }
+.look .s.mosaic { grid-template-columns: 1fr 1fr; gap: 3px; place-items: stretch; background: var(--line); }
+.look .s.mosaic > i { display: block; position: relative; overflow: hidden; }
+/* Art.svelte: a sleeve, a 2×2 mosaic or the kind's icon, filling whatever holds it. */
+.look .art { position: absolute; inset: 0; display: grid; place-items: center; background: var(--card-2); color: var(--muted); }
+.look .art.mosaic { grid-template-columns: 1fr 1fr; gap: 3px; place-items: stretch; background: var(--line); }
+.look .art.mosaic > i { display: block; position: relative; overflow: hidden; min-height: 0; background: var(--card-2); }
+.look .art img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.look .s > .art > .i { width: 36px; height: 36px; }
+.look .s.empty > .art { background: none; }
+.look .s.gone img { opacity: .35; filter: grayscale(1); }
+.look .s .cap { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Scrolls only on a window too short for it, with no bar: the bottom fades instead, over padding that a sheet
+   which fits leaves empty, so the fade shows only when something is under it. */
+.look .sheet { min-height: 0; overflow: hidden; background: var(--card); border: 1px solid var(--line); border-radius: var(--r); padding: 22px 22px 2px; display: flex; flex-direction: column; }
+.look .sheet > .in { flex: 1; min-height: 0; overflow: auto; scrollbar-width: none; padding-bottom: 20px; display: flex; flex-direction: column; gap: 14px;
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 20px), transparent); mask-image: linear-gradient(to bottom, #000 calc(100% - 20px), transparent); }
+.look .sheet > .in::-webkit-scrollbar { display: none; }
+/* Square, as a sleeve is: as wide as the sheet less its padding and border, shrinking to the room the rest leaves. */
+.look .sheet .big { flex: 0 1 calc(var(--sheet) - 46px); min-height: 96px; aspect-ratio: 1; align-self: center; max-width: 100%; border-radius: 14px; background: var(--card-2); border: 1px dashed var(--line); display: grid; place-items: center; color: var(--muted); overflow: hidden; }
+.look .sheet .big.art { border: 0; }
+.look .sheet .big:not(.art) { padding: 10px; text-align: center; }
+.look .sheet .big { position: relative; }
+/* Safari 14's WebKit has no aspect-ratio, and the picture's only child is positioned, so it would be 0 wide. */
+@supports not (aspect-ratio: 1) { .look .sheet .big { align-self: stretch; } }
+.look .sheet .big .i { width: 40px; height: 40px; }
+.look .sheet .big img { width: 100%; height: 100%; object-fit: cover; }
+.look .sheet h3 { margin: 0; font-size: 18px; font-weight: 800; letter-spacing: -.02em; }
+.look .sheet .why { margin: 0; font-weight: 600; color: var(--muted); }
+.look .sheet .why.warn { color: var(--warn); }
+.look .sheet dl { margin: 0; display: grid; grid-template-columns: 22px 1fr; align-items: start; gap: 8px 12px; font-size: 13px; }
+.look .sheet dt { color: var(--muted); }
+.look .sheet dt .i { width: 16px; height: 16px; margin-top: 1px; }
+.look .sheet dd { margin: 0; word-break: break-word; user-select: text; -webkit-user-select: text; }
+.look .sheet ul, .look .sheet ol { margin: 0; padding: 0; list-style: none; font-size: 13px; }
+.look .sheet li { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.look .sheet .acts { margin-top: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+.look .sheet .acts > * { flex: 1; min-width: 60px; padding: 10px 6px; border-radius: 12px; border: 1px solid var(--line); background: none; font: 600 11px var(--font); color: var(--muted); display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 4px; cursor: pointer; }
+.look .sheet .acts > * .i { width: 20px; height: 20px; }
+.look .sheet .acts > .go { flex-basis: 100%; flex-direction: row; font-size: 14px; background: var(--accent); color: var(--ink); border: none; }
+
+.look .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--r); padding: 20px 22px; }
+.look .card h2 { margin: 0; font-size: 18px; font-weight: 700; letter-spacing: -.01em; }
+.look .head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
+.look .head .sub { color: var(--muted); font-weight: 500; margin-left: 10px; }
+.look .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+.look .tile { background: var(--card-2); border: 1px solid var(--line); border-radius: var(--r-s); padding: 16px; min-height: 130px; display: flex; flex-direction: column; justify-content: space-between; }
+.look .tile .top { display: flex; justify-content: space-between; align-items: flex-start; }
+.look .tile .n { font-size: 30px; font-weight: 800; letter-spacing: -.03em; line-height: 1; font-variant-numeric: tabular-nums; }
+.look .tile .l { color: var(--muted); font-weight: 600; margin-top: 4px; }
+.look .tile .ic { width: 36px; height: 36px; border-radius: 50%; display: grid; place-items: center; color: var(--ink); }
+.look table { width: 100%; border-collapse: collapse; }
+.look th { text-align: left; color: var(--muted); font-weight: 600; font-size: 13px; padding: 8px 10px; border-bottom: 1px solid var(--line); }
+.look td { padding: 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+.look tr.cur td { background: var(--card-2); }
+.look tr.cur td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.look td .t { font-weight: 700; }
+.look td .a { color: var(--muted); font-size: 13px; }
+.look .sleeve { width: 36px; height: 36px; border-radius: 9px; display: inline-grid; place-items: center; overflow: hidden; font-weight: 800; font-size: 12px; color: var(--ink); margin-right: 12px; vertical-align: middle; }
+.look .sleeve img { width: 100%; height: 100%; object-fit: cover; }
+.look .sleeve { position: relative; }
+.look .sleeve.empty { border: 1px dashed var(--line); }
+.look .sleeve .art { gap: 1px; }
+.look .sleeve .art > .i { width: 16px; height: 16px; }
+.look td .warn { color: var(--warn); }
+.look td .i { width: 16px; height: 16px; }
+.look .seg { display: inline-flex; gap: 2px; vertical-align: middle; margin-right: 10px; }
+.look .seg i { width: 6px; height: 14px; border-radius: 2px; background: var(--line); transform: skewX(-14deg); }
+.look .seg i.f { background: var(--accent); }
+.look .status { font-weight: 700; }
+.look .src { color: var(--muted); font: 12px var(--mono); }
+.look .gauge { display: grid; place-items: center; padding: 6px 0 0; }
+.look .gauge .big { font-size: 38px; font-weight: 800; letter-spacing: -.04em; line-height: 1; }
+.look .gauge .cap { color: var(--muted); font-weight: 600; }
+.look .kv { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 20px; margin-top: 16px; }
+.look .kv b { display: block; font-size: 22px; font-weight: 800; letter-spacing: -.02em; }
+.look .kv span { color: var(--muted); font-weight: 600; font-size: 13px; }
+.look .log { margin-top: 4px; }
+
+/* The run: tiles over the table, the run's card and the log beside them. */
+.look .watch { display: flex; flex-direction: column; gap: 16px; min-width: 0; min-height: 0; }
+.look .watch .tiles { flex: none; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+.look .tile .n small { font-size: 14px; color: var(--muted); font-weight: 600; letter-spacing: 0; }
+.look .tile .why { display: flex; flex-direction: column; font-size: 13px; font-weight: 600; min-width: 0; }
+.look .tile .why, .look .tile .why span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.look .bars { display: flex; gap: 4px; align-items: flex-end; height: 36px; }
+.look .bars b { flex: 1; border-radius: 3px; background: var(--accent); opacity: .85; }
+.look .spark { width: 100%; height: 38px; }
+.look .spark polyline { fill: none; stroke: var(--cursor); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.look .card.table { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 6px 10px; }
+.look .card.table .scroll { padding: 0; }
+.look .card.table th { position: sticky; top: 0; z-index: 1; background: var(--card); }
+.look td.conf { white-space: nowrap; color: var(--muted); font-size: 12px; }
+.look .side { display: flex; flex-direction: column; gap: 16px; min-height: 0; overflow: auto; }
+.look .side .brief { margin: -8px 0 6px; color: var(--muted); font-size: 12px; font-weight: 500; }
+.look .gauge svg { width: 240px; height: 130px; }
+.look .gauge path { fill: none; stroke-width: 18; stroke-linecap: round; }
+.look .gauge .track { stroke: var(--line); }
+.look .gauge .fill { stroke: url(#arc); transition: stroke-dasharray 200ms ease-out; }
+.look .gauge .big { margin-top: -50px; }
+.look .head .hide { display: grid; place-items: center; color: var(--muted); cursor: pointer; }
+.look .side .log { max-height: 220px; }
+.look .side .log.tall { max-height: 50vh; }
+/* A status word fades in over the last, so the column is seen to settle. */
+.look .status.fade { animation: settle 160ms ease-out; }
+@keyframes settle { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .look .status.fade, .look .gauge .fill { animation: none; transition: none; } }
+
+@media (max-width: 1100px) { .look .sheet { display: none; } }
+/* Narrow windows keep the icons; each button's title still names it. */
+@media (max-width: 1240px) { .look nav.pills button span, .look .tools .search span, .look .tools .run .name { display: none; } .look .tools .search { width: 38px; padding: 0; justify-content: center; } }
+@media (max-width: 860px) { .look .crumb { display: none; } }
+
+/* Questions and overlays: a card over a scrim, the key hints as badges and words. */
+.look .scrim { position: fixed; inset: 0; z-index: 5; display: grid; place-items: center; padding: 24px; background: var(--scrim); }
+.look .dialog { width: min(100%, 560px); max-height: calc(100vh - 48px); overflow: auto; display: flex; flex-direction: column; gap: 12px; padding: 22px; background: var(--card); border: 1px solid var(--line); border-radius: var(--r); box-shadow: 0 20px 60px var(--scrim); }
+.look .dialog.wide, .look .dialog.keysheet { width: min(100%, 760px); }
+.look .dialog { color: var(--text); }
+.look .dialog.alert { border-color: var(--warn); }
+.look .dialog.alert h3 { color: var(--warn); }
+.look .dialog h3 { margin: 0; font-size: 18px; font-weight: 800; letter-spacing: -.02em; }
+.look .dialog p { margin: 0; }
+.look .dialog .note { color: var(--muted); font-weight: 500; }
+.look .dialog .reason { color: var(--error); font-size: 13px; }
+.look .menu { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.look .menu li { display: flex; gap: 12px; align-items: center; padding: 9px 12px; border: 1px solid var(--line); border-radius: 12px; font-weight: 600; cursor: pointer; }
+.look .menu li.cur { background: var(--card-2); box-shadow: inset 3px 0 0 var(--accent); }
+.look .menu .num, .look .choose .num { min-width: 1.5ch; color: var(--muted); font-variant-numeric: tabular-nums; }
+.look .form { display: grid; grid-template-columns: 70px 1fr; gap: 8px 12px; align-items: center; }
+.look .form label { color: var(--muted); font-size: 13px; font-weight: 600; }
+.look .form .box { padding: 7px 12px; background: var(--card-2); border: 1px solid var(--line); border-radius: 10px; }
+.look .form .box:focus-within { border-color: var(--accent); }
+.look .form input { width: 100%; outline: none; font: inherit; color: inherit; caret-color: var(--accent); }
+.look .browse { padding: 7px 12px; border: 1px solid var(--line); border-radius: 10px; font-weight: 600; color: var(--text); }
+.look .foot { display: flex; flex-wrap: wrap; gap: 6px 18px; margin-top: 4px; color: var(--muted); font-size: 13px; font-weight: 600; }
+.look .foot kbd, .look .keys kbd { color: var(--text); border: 1px solid var(--line); margin-right: 6px; }
+.look .choose { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 12px; }
+.look .choose .fig { padding: 6px; border: 1px solid var(--line); border-radius: 12px; cursor: pointer; }
+.look .choose .fig.cur { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.look .choose img { display: block; width: 100%; aspect-ratio: 1; object-fit: cover; border-radius: 8px; background: var(--far); }
+.look .choose .label { display: flex; gap: 8px; margin-top: 6px; color: var(--muted); font-size: 12px; font-weight: 600; }
+.look .keys { display: grid; grid-template-columns: 1fr 1fr; gap: 16px 24px; font-size: 13px; }
+.look .keys h4 { margin: 0 0 6px; color: var(--muted); font-size: 12px; font-weight: 700; }
+.look .keys dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 4px 10px; align-items: baseline; }
+.look .keys dd { margin: 0; }
+.look .keys .legend { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 4px 18px; }
+.look .toast { position: fixed; top: 84px; right: 24px; z-index: 7; max-width: 360px; display: grid; grid-template-columns: auto 1fr; gap: 6px 14px; align-items: center; padding: 14px 18px; background: var(--card); border: 1px solid var(--accent); border-radius: var(--r); box-shadow: 0 20px 60px var(--scrim); }
+.look .toast .big { grid-row: span 9; font-size: 28px; line-height: 1; color: var(--accent); }
+.look .toast b { display: block; color: var(--accent); }
+.look .toast span:not(.big) { color: var(--muted); font-size: 13px; }
+@keyframes rise { from { transform: translateY(8px); opacity: 0; } }
+@media (prefers-reduced-motion: no-preference) { .look .toast { animation: rise 160ms ease-out; } }
+/* A found code: a card in the middle, its art played once. Every piece rests in its final state and animates
+   from hidden, so with motion reduced the card is complete and still. */
+.look .unlock { position: fixed; z-index: 8; left: 50%; top: 50%; transform: translate(-50%, -50%); width: min(calc(100% - 48px), 380px); padding: 20px 22px 16px; text-align: center; background: var(--card); border: 1px solid var(--accent); border-radius: var(--r); box-shadow: 0 0 0 100vmax var(--scrim), 0 20px 60px var(--scrim); overflow: hidden; }
+.look .unlock .t { color: var(--accent); font: 700 12px var(--mono); letter-spacing: .14em; }
+.look .unlock .art { position: relative; height: 104px; margin: 12px 0 14px; overflow: hidden; border-radius: var(--r-s); }
+.look .unlock .words b { display: block; font-size: 18px; font-weight: 800; letter-spacing: -.02em; }
+.look .unlock .words span { color: var(--muted); font-size: 13px; }
+.look .unlock .foot { margin-top: 14px; color: var(--muted); font-size: 12px; }
+.look .unlock .words { animation: rise 400ms ease-out 800ms both; }
+.look .unlock .spark { position: absolute; color: var(--accent); font-size: 14px; opacity: 0; animation: twinkle 1.4s ease-in-out infinite; }
+@keyframes twinkle { 50% { opacity: 1; transform: scale(1.15); } }
+/* YouTube Music links: the chest opens and notes float out of it. */
+.look .unlock .chest { position: absolute; left: 50%; bottom: 8px; width: 104px; height: 46px; margin-left: -52px; border: 2px solid var(--warn); border-radius: 6px; background: var(--ink); }
+.look .unlock .chest::after { content: "◆"; position: absolute; left: 50%; top: -10px; transform: translateX(-50%); color: var(--accent); font-size: 12px; }
+.look .unlock .lid { position: absolute; left: -2px; right: -2px; top: -22px; height: 20px; border: 2px solid var(--warn); border-radius: 8px 8px 2px 2px; background: var(--card-2); transform-origin: 0 100%; transform: rotate(-14deg); animation: open 600ms cubic-bezier(.3, 1.6, .5, 1) 150ms both; }
+@keyframes open { from { transform: none; } }
+.look .unlock .glow { position: absolute; left: 8px; right: 8px; top: 0; height: 12px; background: var(--accent); filter: blur(9px); opacity: .5; animation: shine 1.2s ease-in-out 500ms infinite alternate; }
+@keyframes shine { from { opacity: .2; } to { opacity: .85; } }
+.look .unlock .note { position: absolute; bottom: 44px; color: var(--cursor); font-size: 18px; opacity: 0; animation: float 1.8s ease-out infinite; }
+@keyframes float { 20% { opacity: 1; } 100% { opacity: 0; transform: translate(12px, -60px) rotate(20deg); } }
+/* Vaporwave: a striped sun rises over a grid that runs at you. */
+.look .unlock .sun { position: absolute; left: 50%; top: 6px; width: 68px; height: 68px; margin-left: -34px; border-radius: 50%; background: linear-gradient(var(--warn), var(--accent));
+  -webkit-mask: linear-gradient(#000 0 36px, transparent 36px 40px, #000 40px 47px, transparent 47px 50px, #000 50px 55px, transparent 55px 57px, #000 57px);
+  mask: linear-gradient(#000 0 36px, transparent 36px 40px, #000 40px 47px, transparent 47px 50px, #000 50px 55px, transparent 55px 57px, #000 57px);
+  animation: sunrise 900ms ease-out 100ms both; }
+@keyframes sunrise { from { transform: translateY(44px); opacity: 0; } }
+.look .unlock .grid { position: absolute; left: -40%; right: -40%; bottom: -30px; height: 74px; transform: perspective(90px) rotateX(55deg); opacity: .7;
+  background: repeating-linear-gradient(90deg, var(--cursor) 0 1px, transparent 1px 22px), repeating-linear-gradient(0deg, var(--cursor) 0 1px, transparent 1px 14px); animation: run 900ms linear infinite; }
+@keyframes run { to { background-position: 0 0, 0 14px; } }
+.look .unlock.vaporwave .t { text-shadow: 1px 1px 0 var(--cursor); }
+/* Game boy: the name drops in pixel steps and the screen comes up through four shades. Nothing glides. */
+.look .unlock.gameboy, .look .unlock.gameboy * { font-family: var(--mono); }
+.look .unlock .lcd { position: absolute; inset: 0 14%; background: var(--ink); border: 3px solid var(--rule); border-radius: 4px; animation: shades 800ms steps(4) both; }
+@keyframes shades { from { background: var(--far); } }
+.look .unlock .drop { position: absolute; left: 0; right: 0; top: 30px; color: var(--accent); font: 700 22px var(--mono); letter-spacing: .08em; animation: drop 1s steps(10) 200ms both; }
+@keyframes drop { from { transform: translateY(-72px); } }
+.look .unlock .blip { position: absolute; left: 0; right: 0; bottom: 10px; color: var(--cursor); font-size: 11px; animation: rise 1ms steps(1) 1300ms both; }
+@media (max-width: 760px) { .look .keys { grid-template-columns: 1fr; } }
+
+/* First launch: the link field is the screen, with what earworm needs under it. */
+.look .hero { flex: 1; min-height: 0; overflow: auto; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px; padding: 32px 16px; text-align: center; }
+.look .hero h1 { margin: 0 0 8px; font-size: 40px; font-weight: 800; letter-spacing: -.03em; }
+.look .url { width: min(100%, 720px); display: flex; align-items: center; gap: 14px; padding: 14px 22px; font-size: 20px; background: var(--card); border: 1px solid var(--line); border-radius: 999px; color: var(--muted); }
+.look .url:focus-within { border-color: var(--accent); }
+.look .url.bad { border-color: var(--error); }
+.look .url input { flex: 1; min-width: 0; outline: none; font: 600 20px var(--font); color: var(--text); caret-color: var(--accent); }
+.look .url input::placeholder { color: var(--muted); }
+.look .hero .say { margin: 0; max-width: 72ch; color: var(--muted); font-weight: 500; }
+.look .hero .say.error { color: var(--error); font-weight: 600; }
+.look .check { width: min(100%, 720px); margin-top: 12px; text-align: left; font-size: 13px; }
+.look .check h2 { margin: 12px 0 6px; font-size: 13px; font-weight: 700; color: var(--muted); }
+.look .check h2:first-child { margin-top: 0; }
+.look .check > div { display: grid; grid-template-columns: 22px 90px 150px 1fr; gap: 10px; align-items: center; padding: 5px 0; white-space: nowrap; }
+.look .check > div > * { overflow: hidden; text-overflow: ellipsis; }
+/* The missing key's row says where to get one, which is worth a wrapped line rather than an ellipsis. */
+.look .check > div.nokey .fix { white-space: normal; }
+.look .check > .key > input, .look .check > .key > .said { grid-column: 3 / -1; }
+.look .check > .key > input { padding: 6px 12px; background: var(--card-2); border: 1px solid var(--line); border-radius: 10px; outline: none; font: inherit; color: var(--text); caret-color: var(--accent); }
+.look .check > .key > input:focus { border-color: var(--accent); }
+.look .check > .key > .said { color: var(--muted); white-space: normal; }
+.look .check > .key > .said.error { color: var(--error); }
+.look .check .i { width: 16px; height: 16px; }
+.look .check .fix, .look .check .path { color: var(--muted); }
+.look .check .copy { color: var(--accent); font-family: var(--mono); user-select: text; -webkit-user-select: text; }
+.look .good { color: var(--cursor); } .look .warn { color: var(--warn); } .look .error { color: var(--error); } .look .muted { color: var(--muted); }
+@media (max-width: 760px) { .look .url, .look .url input { font-size: 16px; } .look .check > div { grid-template-columns: 22px 80px 1fr; } .look .check .fix { display: none; } }
+
+/* The other screens in the same chrome: a line of what the screen holds, ticks for the pick gate. */
+.look .toolbar .sum { color: var(--muted); font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.look .toolbar .sum b { color: var(--text); }
+.look .toolbar .live { color: var(--accent); font-weight: 700; }
+.look tr.off .t { color: var(--muted); }
+.look .tick { width: 20px; height: 20px; display: inline-grid; place-items: center; border: 1px solid var(--line); border-radius: 6px; color: var(--ink); }
+.look .tick.on { background: var(--accent); border-color: var(--accent); }
+.look .tick .i { width: 14px; height: 14px; stroke-width: 3; }
+.look td.twin { color: var(--unsure); }
+.look td u { text-decoration-color: var(--accent); text-underline-offset: 3px; }
+.look td.star { width: 2ch; color: var(--accent); }
+.look .s .kind.fresh { padding: 3px 8px; font-size: 11px; font-weight: 700; color: var(--accent); }
+.look .sheet .files { margin: 0; }
+.look .sheet .files .live { color: var(--accent); }
+.look td.what { width: 55%; }
+
+/* The first-run tip: what to do next, over the wall it is about. */
+.look .card.tip { flex: none; display: flex; gap: 18px; align-items: center; margin: 0 0 10px; padding: 14px 18px; border-color: var(--accent); }
+.look .card.tip > div { flex: 1; min-width: 0; }
+.look .card.tip button { flex: none; padding: 8px 16px; border-radius: 999px; font-weight: 700; background: var(--accent); color: var(--ink); }
+
+/* A table's secondary columns: the number, the folder, the year. */
+.look td.a { color: var(--muted); font-size: 13px; }
+/* The pick gate's buttons are the sheet's; below the width that hides the sheet they move up here. */
+.look .toolbar .go { display: none; padding: 7px 16px; border-radius: 999px; font-weight: 700; background: var(--accent); color: var(--ink); }
+.look .toolbar .go.plain { background: none; color: var(--text); border: 1px solid var(--line); }
+@media (max-width: 1100px) { .look .toolbar .go { display: inline-flex; gap: 8px; align-items: center; } }
