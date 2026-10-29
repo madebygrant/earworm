@@ -41,6 +41,13 @@ export function working(): boolean {
   return m.busy || (m.done === null && m.tracks.length > 0);
 }
 
+// A run's own screen is up: tracks listed and not yet finished, past the pick gate. The header, the bar
+// and the screen choice all ask this, so they agree on when the run screen shows.
+export function running(): boolean {
+  const m = app.model;
+  return m.view === "Tracks" && m.tracks.length > 0 && m.done === null && m.picking === null;
+}
+
 /** The run is over and nothing else is going, so a command will be read straight away. */
 export function canCommand(): boolean {
   const m = app.model;

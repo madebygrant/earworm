@@ -6,7 +6,7 @@
   import type { Shelf } from "./lib/protocol";
   import { firstScreen, settledCount } from "./lib/reducer";
   import { app, boot, hooks, tryCode } from "./lib/store.svelte";
-  import { quit, trackRows, ui } from "./lib/ui.svelte";
+  import { quit, running as isRunning, trackRows, ui } from "./lib/ui.svelte";
   import * as sc from "./lib/screens.svelte";
   import { screens } from "./lib/screens.svelte";
   import ArtistPage from "./screens/ArtistPage.svelte";
@@ -28,6 +28,7 @@
   import Rail from "./screens/Rail.svelte";
   import Run from "./screens/Run.svelte";
   import Library from "./screens/Library.svelte";
+  import Room from "./screens/Room.svelte";
   import sprite from "./icons.svg?raw";
 
   const m = $derived(app.model);
@@ -35,9 +36,11 @@
   const library = $derived(m.library);
   const first = $derived(firstScreen(m) ? m.prompt!.prompt : null);
   const dialog = $derived(m.prompt && !first ? m.prompt.prompt : null);
+  // A run in progress has its own right-hand column, the run's card, in place of the sheet.
+  const running = $derived(!first && isRunning());
   const railed = $derived(!first && (m.view === "Artists" || m.view === "Artist"));
   const detail = $derived(
-    !first &&
+    !first && !running &&
       (m.view === "Tracks" ? m.tracks.length > 0
       : m.view === "Library" ? m.library.length > 0
       : m.view === "Found" ? screens.hits.length > 0
@@ -225,6 +228,8 @@
     <ArtistPage />
   {:else if m.view === "Settings"}
     <Settings />
+  {:else if running}
+    <Room />
   {:else if m.view === "Tracks" && m.tracks.length}
     <Run />
   {:else}

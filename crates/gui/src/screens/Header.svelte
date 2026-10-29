@@ -4,7 +4,7 @@
   import { settledCount } from "../lib/reducer";
   import { screens } from "../lib/screens.svelte";
   import { app, walkTheme } from "../lib/store.svelte";
-  import { ui, working } from "../lib/ui.svelte";
+  import { running, ui, working } from "../lib/ui.svelte";
   import Icon from "./Icon.svelte";
 
   const SPIN = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
@@ -55,11 +55,11 @@
   // The pill already names the screen, so its own word is not said again.
   const said = $derived(word.toLowerCase() === here.toLowerCase() ? "" : word);
 
-  // Under the crumb: a run's own settings, or where an empty library will fill. Dropped whole rather than
-  // cut, since half a description of the run is a wrong one.
+  // Under the crumb: a finished run's settings (a running one has them on its card), or where an empty
+  // library will fill. Dropped whole rather than cut, since half a description of the run is a wrong one.
   const brief = $derived(
     !m.library.length && !m.tracks.length ? `${app.setup?.dir ?? ""} · nothing synced yet`
-    : m.view === "Tracks" ? m.settings.brief.map(([name, value]) => `${name} ${value}`).join(" · ")
+    : m.view === "Tracks" && !running() ? m.settings.brief.map(([name, value]) => `${name} ${value}`).join(" · ")
     : "",
   );
   let briefEl = $state<HTMLElement>();

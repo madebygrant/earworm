@@ -12,6 +12,8 @@ export interface Word {
   label: string;
   look: boolean;
   settled: boolean;
+  fetched: boolean;
+  in_hand: boolean;
   tally: number | null;
   // The palette slot it is drawn in, which is also its CSS variable.
   slot: string;

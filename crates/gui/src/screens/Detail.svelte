@@ -3,6 +3,7 @@
   import type { Shelf, Status, Track } from "../lib/protocol";
   import { app } from "../lib/store.svelte";
   import { label, names, short, tone, word } from "../lib/ui.svelte";
+  import { clock } from "../lib/run";
   import { ago, shelfArt } from "../lib/wall";
   import { complete, customRow, foundAt, relatedRows, releaseSelected, screens, topRows } from "../lib/screens.svelte";
   import Art from "./Art.svelte";
@@ -86,12 +87,6 @@
     return word(t.status)?.look ? "no sleeve until it's confirmed" : "no sleeve yet";
   }
 
-  function length(secs: number): string {
-    const [h, mm, ss] = [Math.floor(secs / 3600), Math.floor((secs % 3600) / 60), secs % 60];
-    const two = (n: number) => String(n).padStart(2, "0");
-    return h ? `${h}:${two(mm)}:${two(ss)}` : `${mm}:${two(ss)}`;
-  }
-
   const missing = $derived(shelf ? shelf.files.filter(([, here]) => !here).map(([name]) => name) : []);
   const found = $derived(m.view === "Found" ? foundAt() : null);
   const entry = $derived(m.view === "Playlist" ? customRow() : undefined);
@@ -113,7 +108,7 @@
       : track.twin ? `${track.twin}. Leave it selected and earworm copies that file across instead of downloading it again.`
       : track.duration > 1800 ? "Over half an hour long. Probably not one track."
       : on ? "Selected." : "Not selected."}
-    fields={[{ icon: "video", name: "video", value: track.was }, ...(track.duration ? [{ icon: "clock", name: "length", value: length(track.duration) } as Field] : [])]}
+    fields={[{ icon: "video", name: "video", value: track.was }, ...(track.duration ? [{ icon: "clock", name: "length", value: clock(track.duration) } as Field] : [])]}
   >
     {#snippet picture()}no sleeve until it's downloaded{/snippet}
   </Sheet>

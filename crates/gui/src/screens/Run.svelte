@@ -53,13 +53,13 @@
     </div>
     {#if shown.length}
       <Wall at={String(m.cursor ?? "")} list={ui.mode === "list"}>
-        {#snippet head()}<tr><th>#</th><th></th><th>track</th><th>status</th><th>source</th></tr>{/snippet}
+        {#snippet head()}<tr><th>#</th><th></th><th>track</th><th>confidence</th><th>status</th><th>source</th><th>length</th></tr>{/snippet}
         {#each shown as t (t.index)}
           {@const [title, artist] = names(t)}
           {@const marked = m.marked.includes(t.index)}
           {#if ui.mode === "list"}
             <TrackRow num={t.index} word={label(t.status)} color={tone(t.status)} {title} {artist} source={t.source}
-              thumb={thumb(t)} cur={t.index === m.cursor} {marked} onpick={() => pick(t)} />
+              score={t.score} duration={t.duration} thumb={thumb(t)} cur={t.index === m.cursor} {marked} onpick={() => pick(t)} />
           {:else}
             {@const art = thumb(t)}
             <div class="s" class:empty={!art} class:error={slot(t) === "error"} class:gone={t.status === "Gone"} class:cur={t.index === m.cursor}

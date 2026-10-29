@@ -124,6 +124,42 @@ impl Status {
         }
     }
 
+    /// Past its download, what the desktop's run gauge counts. Exhaustive, so a new status has to say.
+    pub fn fetched(self) -> bool {
+        match self {
+            Status::Downloaded
+            | Status::Tagging
+            | Status::Converting
+            | Status::Ok
+            | Status::Manual
+            | Status::Kept
+            | Status::Weak
+            | Status::NoMatch
+            | Status::Have
+            | Status::Local => true,
+            Status::Pending | Status::Downloading | Status::Failed | Status::Gone | Status::Skipped => false,
+        }
+    }
+
+    /// Being worked on this moment, which the desktop's bar names. `Downloaded` is waiting, not worked on.
+    pub fn in_hand(self) -> bool {
+        match self {
+            Status::Downloading | Status::Tagging | Status::Converting => true,
+            Status::Pending
+            | Status::Downloaded
+            | Status::Ok
+            | Status::Manual
+            | Status::Kept
+            | Status::Weak
+            | Status::NoMatch
+            | Status::Failed
+            | Status::Gone
+            | Status::Skipped
+            | Status::Have
+            | Status::Local => false,
+        }
+    }
+
     /// Terminal states, for the run summary and for picking what to follow.
     pub fn settled(self) -> bool {
         matches!(
@@ -1094,6 +1130,16 @@ mod tests {
             assert!(now.on(Path::new(composed)), "composed shelf missed {reported:?}");
             assert!(now.on(Path::new(decomposed)), "decomposed shelf missed {reported:?}");
             assert!(!now.on(Path::new("/music/Focus")), "it matched another folder");
+        }
+    }
+
+    #[test]
+    fn a_status_in_hand_is_in_flight_and_a_waiting_one_is_not_fetched() {
+        for status in TALLY {
+            assert!(!status.in_hand() || !status.settled(), "{status:?} is worked on and settled at once");
+            if matches!(status, Status::Pending | Status::Downloading) {
+                assert!(!status.fetched(), "{status:?} has not been downloaded yet");
+            }
         }
     }
 

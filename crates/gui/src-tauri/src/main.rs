@@ -178,6 +178,9 @@ struct Word {
     /// Nothing confirmed it: what the review keeps and `n` walks.
     look: bool,
     settled: bool,
+    /// Past its download, and being worked on now: the run screen's gauge and the bar's current track.
+    fetched: bool,
+    in_hand: bool,
     /// Its column in the tally, or `None` while it is still in flight.
     tally: Option<u8>,
     /// The palette slot it is drawn in, which is also the CSS variable's name.
@@ -187,7 +190,7 @@ struct Word {
 fn words() -> Vec<Word> {
     protocol::TALLY
         .iter()
-        .map(|s| Word { status: *s, label: s.label(), look: s.wants_a_look(), settled: s.settled(), tally: s.tally(), slot: earworm_core::theme::status_slot(*s) })
+        .map(|s| Word { status: *s, label: s.label(), look: s.wants_a_look(), settled: s.settled(), fetched: s.fetched(), in_hand: s.in_hand(), tally: s.tally(), slot: earworm_core::theme::status_slot(*s) })
         .collect()
 }
 

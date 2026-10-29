@@ -20,3 +20,7 @@ main.app.railed.no-detail { grid-template-columns: var(--rail) minmax(0, 1fr); }
 @media (max-width: 760px) { main.app, main.app.no-detail, main.app.railed, main.app.railed.no-detail { grid-template-columns: 1fr; } }
 /* A wall: its toolbar stays put while the sleeves scroll under it, and the log keeps its third. */
 .view.walled { display: flex; flex-direction: column; padding: 0; overflow: hidden; }
+/* A run: its counts and table, and its own card where the sheet would be. */
+.view.room { display: grid; grid-template-columns: minmax(0, 1fr) 330px; grid-template-rows: minmax(0, 1fr); gap: 18px; padding: 0; overflow: hidden; }
+/* Narrow, the run's card goes as the sheet does, but the log stays, under the table, so `l` still shows it. */
+@media (max-width: 1100px) { .view.room { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; } .view.room .side .run { display: none; } .view.room .side .log { max-height: 160px; } }

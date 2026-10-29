@@ -468,6 +468,8 @@
   ],
   "statuses": [
     {
+      "fetched": false,
+      "in_hand": false,
       "label": "queued",
       "look": false,
       "settled": false,
@@ -476,6 +478,8 @@
       "tally": null
     },
     {
+      "fetched": true,
+      "in_hand": false,
       "label": "on disk",
       "look": false,
       "settled": true,
@@ -484,6 +488,8 @@
       "tally": 8
     },
     {
+      "fetched": false,
+      "in_hand": true,
       "label": "fetching",
       "look": false,
       "settled": false,
@@ -492,6 +498,8 @@
       "tally": null
     },
     {
+      "fetched": true,
+      "in_hand": false,
       "label": "fetched",
       "look": false,
       "settled": false,
@@ -500,6 +508,8 @@
       "tally": null
     },
     {
+      "fetched": true,
+      "in_hand": true,
       "label": "tagging",
       "look": false,
       "settled": false,
@@ -508,6 +518,8 @@
       "tally": null
     },
     {
+      "fetched": true,
+      "in_hand": true,
       "label": "convert",
       "look": false,
       "settled": false,
@@ -516,6 +528,8 @@
       "tally": null
     },
     {
+      "fetched": true,
+      "in_hand": false,
       "label": "ok",
       "look": false,
       "settled": true,
@@ -524,6 +538,8 @@
       "tally": 0
     },
     {
+      "fetched": true,
+      "in_hand": false,
       "label": "manual",
       "look": false,
       "settled": true,
@@ -532,6 +548,8 @@
       "tally": 1
     },
     {
+      "fetched": true,
+      "in_hand": false,
       "label": "guessed",
       "look": true,
       "settled": true,
@@ -540,6 +558,8 @@
       "tally": 2
     },
     {
+      "fetched": true,
+      "in_hand": false,
       "label": "unsure",
       "look": true,
       "settled": true,
@@ -548,6 +568,8 @@
       "tally": 3
     },
     {
+      "fetched": true,
+      "in_hand": false,
       "label": "no match",
       "look": true,
       "settled": true,
@@ -556,6 +578,8 @@
       "tally": 4
     },
     {
+      "fetched": false,
+      "in_hand": false,
       "label": "failed",
       "look": true,
       "settled": true,
@@ -564,6 +588,8 @@
       "tally": 5
     },
     {
+      "fetched": false,
+      "in_hand": false,
       "label": "gone",
       "look": false,
       "settled": true,
@@ -572,6 +598,8 @@
       "tally": 6
     },
     {
+      "fetched": false,
+      "in_hand": false,
       "label": "skipped",
       "look": false,
       "settled": true,
@@ -580,6 +608,8 @@
       "tally": 7
     },
     {
+      "fetched": true,
+      "in_hand": false,
       "label": "local",
       "look": false,
       "settled": true,

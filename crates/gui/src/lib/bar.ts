@@ -2,6 +2,7 @@
 import { firstScreen, type State } from "./reducer";
 import { canGet, relatedRows, screens, topRows } from "./screens.svelte";
 import { app } from "./store.svelte";
+import { running, working } from "./ui.svelte";
 
 const PASTE = typeof navigator !== "undefined" && navigator.platform.startsWith("Mac") ? "⌘v" : "^v";
 
@@ -43,8 +44,11 @@ function screenKeys(m: State): [string, string][] {
     return keys;
   }
   if (m.view === "Settings") return [["enter", "change"], ["esc", "back"]];
-  const keys: [string, string][] = [["w", "tiles/list"]];
-  if (m.done !== null) keys.push(["e", "edit"], ["r", "retry"]);
+  // While it runs the screen is for watching: the cursor can follow it, and fixing waits for the end.
+  const f: [string, string] = ["f", m.follow ? "stop following" : "follow"];
+  if (running()) return [f, ["/", "filter"], ["v", m.review ? "all" : "worth a look"]];
+  const keys: [string, string][] = [["w", "tiles/list"], ["e", "edit"], ["r", "retry"]];
+  if (working()) keys.unshift(f);
   if (m.undoable) keys.push(["u", `undo ${m.undoable}`]);
   return keys;
 }

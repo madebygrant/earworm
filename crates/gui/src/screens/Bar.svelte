@@ -5,7 +5,7 @@
   import { settledCount } from "../lib/reducer";
   import { screens } from "../lib/screens.svelte";
   import { app } from "../lib/store.svelte";
-  import { label, tone, working } from "../lib/ui.svelte";
+  import { label, names, running, tone, word, working } from "../lib/ui.svelte";
 
   const m = $derived(app.model);
   // Core's `view::counts`, asked again when the tracks change; a reply is kept only while it is the latest.
@@ -20,19 +20,24 @@
   });
   const missing = $derived(m.library.reduce((n, s) => n + (s.kind === "Custom" ? 0 : s.missing), 0));
   const keys = $derived(hints(m));
+  const active = $derived(tracks.find((t) => word(t.status)?.in_hand) ?? null);
+  // A retry or search after the run moves the cursor too while following, so it is said then as well.
+  const following = $derived(m.follow && working() && m.view === "Tracks");
   // The run's progress line, while there is a run to measure.
-  const progress = $derived(m.view === "Tracks" && tracks.length && m.done === null && m.picking === null ? settledCount(m) / tracks.length : null);
+  const progress = $derived(running() ? settledCount(m) / tracks.length : null);
 </script>
 
 <div class="look">
   <footer class="bar">
     <span class="hints">
-      {#if m.follow && working() && m.view === "Tracks"}<span>⟳ following</span>{/if}
+      {#if following && progress === null}<span>⟳ following</span>{/if}
       {#each keys as [key, what] (key)}<span class:hot={what === "! log"}><kbd>{key}</kbd>{what}</span>{/each}
     </span>
     {#if progress !== null}<span class="progress" role="progressbar" aria-valuenow={Math.round(progress * 100)}><i style:width="{progress * 100}%"></i></span>{/if}
     <span class="tally">
-      {#if m.view === "Library" && m.picking === null}
+      {#if progress !== null}
+        {#if following}<span>⟳ following</span>{/if}{#if active}<span><span style:color={tone(active.status)}>{label(active.status)}</span> {names(active)[0]}</span>{/if}
+      {:else if m.view === "Library" && m.picking === null}
         <span class="muted">{m.library.length} {m.library.length === 1 ? "folder" : "folders"}</span>{#if missing}<span class="warn">{missing} missing</span>{/if}
       {:else if m.view === "Artist" && screens.section === "Releases" && m.page.loaded}
         {@const shown = screens.releaseRows.map((at) => m.page.rows[at]).filter(Boolean)}

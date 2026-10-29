@@ -157,6 +157,36 @@
 .look .log { font: 12px/1.6 var(--mono); color: var(--muted); margin-top: 4px; }
 .look .log .e { color: var(--error); }
 
+/* The run: tiles over the table, the run's card and the log beside them. */
+.look .watch { display: flex; flex-direction: column; gap: 16px; min-width: 0; min-height: 0; }
+.look .watch .tiles { flex: none; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+.look .tile .n small { font-size: 14px; color: var(--muted); font-weight: 600; letter-spacing: 0; }
+.look .tile .why { display: flex; flex-direction: column; font-size: 13px; font-weight: 600; min-width: 0; }
+.look .tile .why, .look .tile .why span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.look .bars { display: flex; gap: 4px; align-items: flex-end; height: 36px; }
+.look .bars b { flex: 1; border-radius: 3px; background: var(--accent); opacity: .85; }
+.look .spark { width: 100%; height: 38px; }
+.look .spark polyline { fill: none; stroke: var(--cursor); stroke-width: 2; vector-effect: non-scaling-stroke; stroke-linejoin: round; }
+.look .card.table { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 6px 10px; }
+.look .card.table .scroll { padding: 0; }
+.look .card.table th { position: sticky; top: 0; z-index: 1; background: var(--card); }
+.look td.conf { white-space: nowrap; color: var(--muted); font-size: 12px; }
+.look .side { display: flex; flex-direction: column; gap: 16px; min-height: 0; overflow: auto; }
+.look .side .brief { margin: -8px 0 6px; color: var(--muted); font-size: 12px; font-weight: 500; }
+.look .gauge svg { width: 240px; height: 130px; }
+.look .gauge path { fill: none; stroke-width: 18; stroke-linecap: round; }
+.look .gauge .track { stroke: var(--line); }
+.look .gauge .fill { stroke: url(#arc); transition: stroke-dasharray 200ms ease-out; }
+.look .gauge .big { margin-top: -50px; }
+.look .head .hide { display: grid; place-items: center; color: var(--muted); cursor: pointer; }
+.look .side .log { max-height: 220px; overflow: auto; user-select: text; -webkit-user-select: text; }
+.look .side .log.tall { max-height: 50vh; }
+.look .side .log div { white-space: pre-wrap; word-break: break-all; }
+/* A status word fades in over the last, so the column is seen to settle. */
+.look .status.fade { animation: settle 160ms ease-out; }
+@keyframes settle { from { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .look .status.fade, .look .gauge .fill { animation: none; transition: none; } }
+
 @media (max-width: 1100px) { .look .sheet { display: none; } }
 /* Narrow windows keep the icons; each button's title still names it. */
 @media (max-width: 1240px) { .look nav.pills button span, .look .tools .search span { display: none; } .look .tools .search { width: 38px; padding: 0; justify-content: center; } }

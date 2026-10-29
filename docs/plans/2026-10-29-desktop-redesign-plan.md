@@ -149,7 +149,7 @@ Exit: the preview's library session matches the mockup's first two frames at
 follows; `enter` opens, `esc` returns; thumbnails for every folder arrive once
 (probe counts the asks); 23+ page tests pass.
 
-## 4. The run as tiles, a table and a gauge
+## 4. The run as tiles, a table and a gauge [done 2026-10-29]
 
 Why here: it reuses wave 3's table rows and sheet, and the confidence column
 needs wave 1's score.
