@@ -9,12 +9,12 @@
   );
 </script>
 
-<div class="scrim">
-  <div class="dialog keysheet">
-    <span class="t">keys, {title}</span>
+<div class="look"><div class="scrim">
+  <div class="dialog keysheet" role="dialog" aria-label="keys">
+    <h3>Keys for the {title}</h3>
     <div class="keys">
       {#each groups as [name, keys] (name)}
-        <div><h4>{name}</h4><dl>{#each keys as [k, what] (k)}<dt>{k}</dt><dd>{what}</dd>{/each}</dl></div>
+        <div><h4>{name}</h4><dl>{#each keys as [k, what] (k)}<dt><kbd>{k}</kbd></dt><dd>{what}</dd>{/each}</dl></div>
       {/each}
       {#if app.model.view === "Tracks"}
         <div class="legend"><h4 style="width:100%">status words</h4>
@@ -22,6 +22,6 @@
         </div>
       {/if}
     </div>
-    <p class="foot"><span><span class="k">any key</span> close</span><span><span class="k">^t</span> theme: {app.theme?.name}</span><span><span class="k">,</span> settings</span></p>
+    <p class="foot"><span><kbd>any key</kbd> close</span><span><kbd>^t</kbd> theme: {app.theme?.name}</span><span><kbd>,</kbd> settings</span></p>
   </div>
-</div>
+</div></div>

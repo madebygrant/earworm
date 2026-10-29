@@ -1,4 +1,6 @@
 // What `h` lists on each screen, in groups as the mockup's key sheet draws them. The words are docs/keys.md's.
+// Drawn as a key badge and a word, never an icon: icons are for the mouse, and a badge on one reads as a
+// second, different action.
 import type { View } from "./reducer";
 
 export type Group = [string, [string, string][]];

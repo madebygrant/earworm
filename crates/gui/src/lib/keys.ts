@@ -115,14 +115,16 @@ function artistQueryKey(e: KeyboardEvent) {
   } else if (e.key === "Enter") {
     e.preventDefault();
     screens.artistTyping = false;
-  } else if (e.key === "ArrowDown") sc.artistMove(1);
-  else if (e.key === "ArrowUp") sc.artistMove(-1);
+  } else if (e.key === "ArrowDown") sc.artistMove(columns());
+  else if (e.key === "ArrowUp") sc.artistMove(-columns());
 }
 
-// The common movement keys for a list that is not the tracks, as one step function.
+// The common movement keys for a list that is not the tracks, as one step function. On a wall the arrows
+// move as it is drawn, and j and k through it in order.
 function listMove(e: KeyboardEvent, move: (by: number | "first" | "last") => void): boolean {
   const k = e.key;
-  const by = k === "j" || k === "ArrowDown" ? 1 : k === "k" || k === "ArrowUp" ? -1 : k === "g" ? "first" : k === "G" ? "last"
+  const by = k === "j" || k === "ArrowRight" ? 1 : k === "k" || k === "ArrowLeft" ? -1
+    : k === "ArrowDown" ? columns() : k === "ArrowUp" ? -columns() : k === "g" ? "first" : k === "G" ? "last"
     : k === "PageDown" || (e.ctrlKey && k === "d") ? page() : k === "PageUp" || (e.ctrlKey && k === "u") ? -page() : null;
   if (by === null) return false;
   e.preventDefault();
@@ -258,12 +260,10 @@ function order(): number[] {
   return ui.rows.map((at) => app.model.tracks[at]?.index).filter((i) => i !== undefined);
 }
 
-// How many tiles a row of the wall holds, read off the grid the browser laid out. The artist page's
-// releases are still the old `.sheet`.
+// How many tiles a row of the wall on screen holds, read off the grid the browser laid out; 1 for a table.
 function columns(): number {
-  const sheet = shown.el?.firstElementChild ?? document.querySelector(".view .sheet");
-  if (!sheet || ui.mode !== "tiles") return 1;
-  return getComputedStyle(sheet).gridTemplateColumns.split(" ").length;
+  const grid = shown.el?.querySelector(":scope > .wall");
+  return grid ? getComputedStyle(grid).gridTemplateColumns.split(" ").length : 1;
 }
 
 // A key that moves the cursor ends following, or the next progress message drags it straight back. Said

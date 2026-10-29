@@ -89,15 +89,15 @@
 
 <svelte:window onkeydown={key} />
 
-<div class="scrim">
-  <div class="dialog" class:wide={hasPictures}>
-    <span class="t">{body.header}</span>
+<div class="look"><div class="scrim">
+  <div class="dialog" class:wide={hasPictures} role="dialog" aria-label={body.header}>
+    <h3>{body.header}</h3>
     {#if body.note}<p class="note">{body.note}</p>{/if}
     {#if kind === "Choice" && hasPictures}
       <div class="choose">
         {#each pictured.filter(([, , pic]) => pic) as [i, label, pic] (i)}
           <div class="fig" class:cur={i === choice} onclick={() => reply({ Choice: i })} onkeydown={() => {}} role="option" tabindex="-1" aria-selected={i === choice}>
-            <img src={pic} alt="" /><span class="cap"><span class="num">{i + 1}</span><span>{label}</span></span>
+            <img src={pic} alt="" /><span class="label"><span class="num">{i + 1}</span><span>{label}</span></span>
           </div>
         {/each}
       </div>
@@ -132,10 +132,10 @@
       </div>
     {/if}
     <p class="foot">
-      {#if kind === "Choice"}<span><span class="k">1-{body.options!.length}</span> answer</span>{#if hasPictures}<span><span class="k">← →</span> move</span>{/if}<span><span class="k">enter</span> choose</span>
-      {:else if kind === "Form"}<span><span class="k">tab</span> field</span>{#if swap}<span><span class="k">^s</span> swap artist and title</span>{/if}<span><span class="k">enter</span> save</span>
-      {:else}<span><span class="k">enter</span> answer</span><span><span class="k">^u</span> clear</span>{/if}
-      <span><span class="k">esc</span> {ESC[body.escape]}</span>
+      {#if kind === "Choice"}<span><kbd>1-{body.options!.length}</kbd> answer</span>{#if hasPictures}<span><kbd>← →</kbd> move</span>{/if}<span><kbd>enter</kbd> choose</span>
+      {:else if kind === "Form"}<span><kbd>tab</kbd> field</span>{#if swap}<span><kbd>^s</kbd> swap artist and title</span>{/if}<span><kbd>enter</kbd> save</span>
+      {:else}<span><kbd>enter</kbd> answer</span><span><kbd>^u</kbd> clear</span>{/if}
+      <span><kbd>esc</kbd> {ESC[body.escape]}</span>
     </p>
   </div>
-</div>
+</div></div>

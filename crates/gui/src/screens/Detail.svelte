@@ -1,11 +1,11 @@
 <script lang="ts">
   import { convertFileSrc } from "@tauri-apps/api/core";
   import type { Shelf, Status, Track } from "../lib/protocol";
-  import { app } from "../lib/store.svelte";
-  import { label, names, short, tone, word } from "../lib/ui.svelte";
+  import { answerPick, app } from "../lib/store.svelte";
+  import { label, names, short, tone, ui, word } from "../lib/ui.svelte";
   import { clock } from "../lib/run";
   import { ago, shelfArt } from "../lib/wall";
-  import { complete, customRow, foundAt, relatedRows, releaseSelected, screens, topRows } from "../lib/screens.svelte";
+  import { artistSelected, complete, customRow, foundAt, relatedRows, releaseSelected, screens, topRows } from "../lib/screens.svelte";
   import Art from "./Art.svelte";
   import Sheet, { type Act, type Field } from "./Sheet.svelte";
 
@@ -13,9 +13,17 @@
     /** Runs the key a button stands for, so a click and the key are one action. */
     press: (key: string) => void;
   }
-  let { press }: Props = $props();
+  let { press: key }: Props = $props();
+  // A button is its key, but a focused filter box takes every key; the click ends the typing first, as
+  // Enter in the box would, and keeps what was typed.
+  function press(k: string) {
+    ui.typing = false;
+    screens.artistTyping = false;
+    key(k);
+  }
 
   const m = $derived(app.model);
+  // The pick gate's "take none" is no key: Esc clears a filter first, so that button answers the gate itself.
   const track = $derived(m.view === "Tracks" ? (m.tracks.find((t) => t.index === m.cursor) ?? null) : null);
   const shelf = $derived(m.view === "Library" ? (m.library.find((s) => s.path === m.shelf) ?? null) : null);
 
@@ -93,6 +101,8 @@
   const release = $derived(m.view === "Artist" && screens.section === "Releases" ? releaseSelected() : undefined);
   const top = $derived(m.view === "Artist" && screens.section === "Top" ? topRows()[screens.topAt] : undefined);
   const related = $derived(m.view === "Artist" && screens.section === "Related" ? relatedRows()[screens.relatedAt] : undefined);
+  const artist = $derived(m.view === "Artists" ? artistSelected() : undefined);
+  const news = $derived(artist ? (screens.artistNew[m.artists.rows.indexOf(artist)] ?? []) : []);
   const order = $derived(m.view === "Pick" ? screens.pick.marks.map(([, file]) => file.replace(/\.[^.]+$/, "").replace(/^\d+\s*-\s*/, "")) : []);
   // Core's answer to what Enter takes off, never worked out here.
   const leaving = $derived(m.view === "Pick" ? screens.pick.removing : []);
@@ -101,16 +111,18 @@
 {#if track && m.picking !== null}
   {@const [title, artist] = names(track)}
   {@const on = m.marked.includes(track.index)}
+  {@const n = m.marked.length}
   <Sheet
-    {press}
+    press={(k) => (k === "none" ? void answerPick([]) : press(k))}
     title={`${title}${artist ? ` - ${artist}` : ""}`}
     why={track.status === "Have" ? "Already in the folder, so there is nothing to fetch."
       : track.twin ? `${track.twin}. Leave it selected and earworm copies that file across instead of downloading it again.`
       : track.duration > 1800 ? "Over half an hour long. Probably not one track."
-      : on ? "Selected." : "Not selected."}
+      : on ? "Selected: it downloads." : "Not selected: it is left out."}
     fields={[{ icon: "video", name: "video", value: track.was }, ...(track.duration ? [{ icon: "clock", name: "length", value: clock(track.duration) } as Field] : [])]}
+    acts={[{ key: "Enter", icon: "open", word: `Download ${n} ${n === 1 ? "track" : "tracks"}` }, { key: " ", icon: "mark", word: on ? "unmark" : "mark" }, { key: "none", icon: "stop", word: "take none" }]}
   >
-    {#snippet picture()}no sleeve until it's downloaded{/snippet}
+    {#snippet extra()}<p class="why">Esc takes none and still tags what's already in the folder.</p>{/snippet}
   </Sheet>
 {:else if track}
   {@const [title, artist] = names(track)}
@@ -163,6 +175,22 @@
   <Sheet {press} title={`${screens.pick.name}, after Enter`} why="Marks join in the order you made them. Unmarking a track the list holds takes it off the list, never off the disk.">
     {#snippet extra()}
       <ol class="order">{#each order as t, i (i)}<li>{t}</li>{/each}{#each leaving as [folder, n] (`${folder}/${n}`)}<li class="out">{n.replace(/\.[^.]+$/, "")}</li>{/each}</ol>
+    {/snippet}
+  </Sheet>
+{:else if artist}
+  <Sheet
+    {press}
+    title={artist.name}
+    why={artist.starred ? "Starred. Their new releases are looked for at every start." : "Enter opens their releases, top tracks and related artists."}
+    fields={[
+      { icon: "tracks", name: "tracks", value: String(artist.tracks) },
+      { icon: "album", name: "albums", value: String(artist.albums) },
+      { icon: "folder", name: "folders", value: artist.folders.map((f) => f.split("/").pop()).join(", ") || "none" },
+    ]}
+    acts={[{ key: "Enter", icon: "open", word: "Their page" }, { key: "o", icon: "folder", word: "folders" }, { key: "*", icon: "mark", word: artist.starred ? "unstar" : "star" }]}
+  >
+    {#snippet extra()}
+      {#if news.length}<ul class="files">{#each news as t (t)}<li class="live">new: {t}</li>{/each}</ul>{/if}
     {/snippet}
   </Sheet>
 {:else if release}

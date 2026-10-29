@@ -85,7 +85,7 @@
           <button class:on={ui.mode === "tiles"} title="tiles" aria-pressed={ui.mode === "tiles"} onclick={() => (ui.mode = "tiles")}><Icon name="library" /></button>
           <button class:on={ui.mode === "list"} title="list" aria-pressed={ui.mode === "list"} onclick={() => (ui.mode = "list")}><Icon name="list" /></button>
         </div>
-        <FilterBox placeholder="filter folders" said={ui.byArtist ? `${ui.byArtist[0]}'s folders` : ""} />
+        <FilterBox bind:value={ui.filter} typing={ui.typing} placeholder="filter folders" said={ui.byArtist ? `${ui.byArtist[0]}'s folders` : ""} />
       </div>
     {/if}
     {#if rows.length}

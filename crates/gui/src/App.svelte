@@ -25,7 +25,6 @@
   import Header from "./screens/Header.svelte";
   import Pick from "./screens/Pick.svelte";
   import Quit from "./screens/Quit.svelte";
-  import Rail from "./screens/Rail.svelte";
   import Run from "./screens/Run.svelte";
   import Library from "./screens/Library.svelte";
   import Room from "./screens/Room.svelte";
@@ -38,13 +37,13 @@
   const dialog = $derived(m.prompt && !first ? m.prompt.prompt : null);
   // A run in progress has its own right-hand column, the run's card, in place of the sheet.
   const running = $derived(!first && isRunning());
-  const railed = $derived(!first && (m.view === "Artists" || m.view === "Artist"));
   const detail = $derived(
     !first && !running &&
       (m.view === "Tracks" ? m.tracks.length > 0
       : m.view === "Library" ? m.library.length > 0
       : m.view === "Found" ? screens.hits.length > 0
       : m.view === "Playlist" ? m.custom.rows.length > 0
+      : m.view === "Artists" ? screens.artistRows.length > 0
       : m.view === "Pick" || m.view === "Artist"),
   );
 
@@ -207,9 +206,7 @@
 <div class="shell stage">
 <Header />
 
-<!-- Folders are the library's wall; the rail is left holding the artists until they get a wall of their own. -->
-<main class="app" class:no-detail={!detail} class:railed={railed}>
-  {#if railed}<Rail />{/if}
+<main class="app" class:no-detail={!detail}>
   {#if app.error}
     <section class="view"><div class="fail"><h1>earworm could not start</h1><pre>{app.error}</pre></div></section>
   {:else if first}

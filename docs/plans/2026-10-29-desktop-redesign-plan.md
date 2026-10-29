@@ -177,7 +177,7 @@ frame; the confidence column shows a bar only where `score` is set; the
 progress line and tally update per message with no re-render of the table
 per log line (the untracked-effect rule in `desktop.md`).
 
-## 5. The screens the mockup leaves out, in the same chrome
+## 5. The screens the mockup leaves out, in the same chrome [done 2026-10-29]
 
 Why here: each is a smaller job once the chrome, walls and sheet exist, and
 they follow those patterns rather than inventing their own.

@@ -1,113 +1,14 @@
-/* Each screen's own rules, as the mockup pages set them in their heads. */
-
-/* first-launch.html */
-.hero { display: grid; align-content: center; justify-items: start; gap: 18px; padding: 40px clamp(16px, 6vw, 96px); overflow: auto; }
-.hero h1 { font-size: var(--s-22); font-weight: 700; }
-.url { width: min(100%, 72ch); font-size: var(--s-28); border-bottom: 2px solid var(--accent); padding: 6px 0; display: flex; gap: 1ch; }
-.url input { flex: 1; min-width: 0; outline: none; caret-color: var(--accent); }
-.url input::placeholder { color: var(--muted); }
-.url.bad { border-color: var(--error); }
-.hero .note { font-size: var(--s-12); }
-.or { color: var(--muted); }
-.check { font-size: var(--s-13); width: min(100%, 92ch); margin-top: 10px; }
-.check h2 { font-size: var(--s-12); color: var(--muted); font-weight: 400; margin: 12px 0 4px; }
-.check div { display: grid; grid-template-columns: 2ch 10ch 12ch 1fr; gap: 1ch; white-space: nowrap; }
-.check .fix { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
-.check div > span { overflow: hidden; text-overflow: ellipsis; }
-.copy { color: var(--accent); user-select: text; }
-@media (max-width: 760px) { .url { font-size: var(--s-17); } .check div { grid-template-columns: 2ch 9ch 1fr; } .check .fix { display: none; } }
-
-/* run.html */
-.view.run { display: flex; flex-direction: column; padding: 0; }
-.view.run .scroll { overflow: auto; padding: 12px var(--gutter) 24px; flex: 1; min-height: 0; }
+/* What the old screens' stylesheet still draws: the log pane under a folder's wall, and the picker's list
+   in the order Enter leaves it. The rest moved to look.css with the screens. */
 .log { border-top: 1px solid var(--rule); height: 30%; min-height: 120px; overflow: auto; padding: 8px var(--gutter); font-size: var(--s-12); color: var(--muted); flex: none; user-select: text; }
 .log.tall { height: 50%; }
 .log .warn { color: var(--warn); } .log .error { color: var(--error); }
 .log div { white-space: pre-wrap; word-break: break-all; }
 
-/* pick.html */
-.go { margin-top: 16px; display: flex; gap: 2ch; align-items: center; flex-wrap: wrap; }
-.btn { border: 1px solid var(--accent); padding: 3px 14px; }
-.btn.primary { background: var(--accent); color: var(--ink); font-weight: 700; }
-.twin { color: var(--unsure); }
-
-/* prompts and overlays */
-.dialog input { width: 100%; outline: none; caret-color: var(--accent); }
-.dialog .form .box { padding: 1px 0; }
-.dialog .note { color: var(--muted); }
-.dialog .reason { color: var(--error); margin-top: 8px; font-size: var(--s-12); }
-.menu li { cursor: pointer; }
-
-/* What the rail's filter box looks like while it takes the keys. */
-.rail .q input { width: 100%; outline: none; color: var(--text); caret-color: var(--accent); }
-.rail .q input::placeholder { color: var(--muted); }
-
-.frame .num { font-size: var(--s-22); }
-.tile .w, .r .w { white-space: nowrap; }
-.empty-main { padding: 24px var(--gutter); color: var(--muted); }
-
-/* library.html */
-.detail .files { list-style: none; padding: 0; margin-top: 12px; font-size: var(--s-12); }
-.detail .files li { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.detail .files li.miss { color: var(--warn); }
-.detail dd { user-select: text; }
-
-.band input { flex: 1; min-width: 0; outline: none; color: var(--ink); caret-color: var(--ink); font-weight: 700; }
-
-/* overlays.html: the key sheet and the achievement toast */
-.dialog.keysheet { width: min(760px, calc(100vw - 32px)); max-height: calc(100vh - 120px); overflow: auto; }
-.keys { display: grid; grid-template-columns: 1fr 1fr; gap: 14px 3ch; font-size: var(--s-13); }
-.keys h4 { font-size: var(--s-12); color: var(--muted); font-weight: 400; margin-bottom: 2px; }
-.keys dl { display: grid; grid-template-columns: 12ch 1fr; column-gap: 1ch; }
-.keys dt { color: var(--accent); }
-.keys .legend { grid-column: 1 / -1; display: flex; flex-wrap: wrap; gap: 0 2ch; }
-.toast { position: fixed; top: 60px; right: 16px; z-index: 7; border: 1px solid var(--accent); background: var(--surface); padding: 10px 14px; display: grid; grid-template-columns: auto 1fr; gap: 4px 2ch; align-items: center; max-width: 44ch; }
-.toast .big { font-size: var(--s-28); color: var(--accent); line-height: 1; grid-row: span 9; }
-.toast b { color: var(--accent); }
-@media (prefers-reduced-motion: no-preference) { .toast { animation: rise 160ms ease-out; } }
 @keyframes rise { from { transform: translateY(8px); opacity: 0; } }
 
-/* the search, custom.html and picker.html */
-.r.found, .r.list { grid-template-columns: 3ch 1ch 1fr auto; }
-.r .miss { color: var(--warn); }
-.r.pk { grid-template-columns: 2ch 1fr auto; }
-.r.pk .g { color: var(--accent); }
-.r.pk .on { font-weight: 700; }
-.r u { text-decoration-color: var(--accent); text-underline-offset: 3px; }
-
-/* artists.html */
-.tabsrow { display: flex; gap: 3ch; border-bottom: 1px solid var(--rule); margin-bottom: 14px; font-size: var(--s-13); }
-.tabsrow span { padding: 4px 0; color: var(--muted); }
-.tabsrow span[aria-current="true"] { color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); font-weight: 700; }
-.r.rel { grid-template-columns: 12ch 5ch 1fr auto; }
-.rail .star { color: var(--accent); }
-.rail li[aria-current="true"] .star { color: var(--ink); }
-
-/* settings.html */
-.set { display: grid; grid-template-columns: 14ch 10ch 8ch 1fr; gap: 1ch; padding: 2px 8px; position: relative; white-space: nowrap; font-size: var(--s-14); margin-bottom: 2px; cursor: pointer;
-  background: linear-gradient(90deg, color-mix(in srgb, var(--surface) 55%, transparent), transparent); }
-.set.cur { box-shadow: inset 3px 0 0 var(--cursor); }
-.set.cur .key { font-weight: 700; }
-.set .src, .set .what { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
-.set .v.on { color: var(--cursor); } .set .v.off { color: var(--muted); }
-.set.locked .v { color: var(--warn); }
-@media (max-width: 900px) { .set { grid-template-columns: 12ch 8ch 1fr; } .set .what { display: none; } }
-
-/* covers.html: a choice whose options are pictures */
-.choose { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 14px; margin: 10px 0 6px; }
-.choose .fig { margin: 0; padding: 6px; border: 1px solid var(--rule); cursor: pointer; }
-.choose .fig.cur { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
-.choose img { width: 100%; aspect-ratio: 1; display: block; object-fit: cover; background: var(--far); }
-.choose .cap { font-size: var(--s-12); margin-top: 6px; display: grid; grid-template-columns: 2ch 1fr; color: var(--muted); }
-.choose .cap .num { color: var(--accent); }
-.dialog.wide { width: min(760px, calc(100vw - 32px)); }
-.browse { border: 1px solid var(--accent); padding: 1px 10px; color: var(--accent); margin-left: 1ch; }
-
-/* picker.html: the list as Enter would leave it */
 .order { list-style: none; padding: 0; font-size: var(--s-13); margin-top: 8px; counter-reset: o; }
 .order li { counter-increment: o; display: grid; grid-template-columns: 3ch 1fr; }
 .order li::before { content: counter(o); color: var(--muted); }
 .order li.out { color: var(--muted); text-decoration: line-through; }
 .order li.out::before { content: ""; }
-/* A release not in the library: nothing is wrong, so dashed in the rule colour rather than the warning one. */
-.frame.unheld { border-style: dashed; border-color: var(--rule); }

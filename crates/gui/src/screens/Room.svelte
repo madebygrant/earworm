@@ -59,7 +59,7 @@
             <button class:on={!m.review} title="all" aria-pressed={!m.review} disabled={ui.typing} onclick={() => m.review && press("v")}><Icon name="all" /></button>
             <button class:on={m.review} title="worth a look" aria-pressed={m.review} disabled={ui.typing} onclick={() => !m.review && press("v")}><Icon name="missing" /></button>
           </div>
-          <FilterBox placeholder="filter tracks" count={ui.filter || m.review ? `${shown.length} of ${tracks.length}` : ""} />
+          <FilterBox bind:value={ui.filter} typing={ui.typing} placeholder="filter tracks" count={ui.filter || m.review ? `${shown.length} of ${tracks.length}` : ""} />
         </div>
         <Wall at={String(cursor ?? "")} list>
           {#snippet head()}<tr><th>#</th><th></th><th>track</th><th>confidence</th><th>status</th><th>source</th><th>length</th></tr>{/snippet}

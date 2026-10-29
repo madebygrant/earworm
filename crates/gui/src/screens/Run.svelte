@@ -49,7 +49,7 @@
       <div class="seg3" role="group" aria-label="next">
         <button title="next unconfirmed" disabled={ui.typing} onclick={() => press("n")}><Icon name="open" /></button>
       </div>
-      <FilterBox placeholder="filter tracks" count={narrowed ? `${shown.length} of ${m.tracks.length}` : ""} />
+      <FilterBox bind:value={ui.filter} typing={ui.typing} placeholder="filter tracks" count={narrowed ? `${shown.length} of ${m.tracks.length}` : ""} />
     </div>
     {#if shown.length}
       <Wall at={String(m.cursor ?? "")} list={ui.mode === "list"}>

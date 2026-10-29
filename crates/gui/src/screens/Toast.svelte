@@ -12,8 +12,8 @@
 </script>
 
 {#if toast}
-  <div class="toast" role="status">
+  <div class="look"><div class="toast" role="status">
     <span class="big">✦</span>
-    {#each toast.prizes as p (p.id)}<div><b>{p.label}</b><br /><span class="muted">{p.hint}</span></div>{/each}
-  </div>
+    {#each toast.prizes as p (p.id)}<div><b>{p.label}</b><span>{p.hint}</span></div>{/each}
+  </div></div>
 {/if}

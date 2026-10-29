@@ -309,9 +309,10 @@ export function leavePage() {
 }
 
 // Tab: top tracks and related artists are asked for the first time they are shown, and again after a failure.
-export function pageSection() {
+// Tab walks the lists; a click names one, and only the list shown is asked for.
+export function pageSection(to?: Section) {
   const next: Record<Section, Section> = { Releases: "Top", Top: "Related", Related: "Releases" };
-  screens.section = next[screens.section];
+  screens.section = to ?? next[screens.section];
   const page = m().page;
   if (screens.section === "Top" && !(page.top && "Ok" in page.top) && !screens.topAsked) {
     screens.topAsked = true;

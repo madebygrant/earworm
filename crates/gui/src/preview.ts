@@ -62,6 +62,9 @@ mockIPC(
         const next = ({ Name: "Synced", Synced: "Missing", Missing: "Name" } as Record<string, string>)[String(a.sort)];
         return [next, ({ Name: "name", Synced: "last synced", Missing: "most missing" } as Record<string, string>)[next]];
       }
+      // Nothing new for anyone: the session has no release check to replay.
+      case "new_titles":
+        return (a.rows as unknown[]).map(() => []);
       case "earned":
         return [];
       // Close enough to core's for a picture: everything still to fetch.
