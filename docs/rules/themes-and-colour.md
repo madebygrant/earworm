@@ -75,8 +75,8 @@
   a check that must cover the palette cannot quietly miss one. Adding a field
   without adding it there is the mistake that list exists to make hard, and
   `slot_mut` is the second half: every slot earworm holds is drawn in
-  something, so every one can be repainted and `slot_names` is asked of
-  `slot_mut` rather than written out again.
+  something, so every one can be repainted and `field_names` is asked of
+  `set_field` rather than written out again.
 - **The palette lives on `App`, not in a `OnceLock`.** `^t` changes it between
   frames, and a global resolved once is the one shape that cannot. Every draw
   function either holds an `App` and does `let p = app.theme;` or takes

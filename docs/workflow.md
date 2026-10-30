@@ -15,7 +15,7 @@ earworm --list                           # what's on disk, then exit
 earworm --check                          # is everything installed, then exit
 ```
 
-Tracks land in `<dir>/<playlist name>/` as `NN - Artist - Title.opus`, next to
+Tracks land in `<dir>/<playlist name>/` as `NN - Artist - Title.m4a` (or whichever format you chose), next to
 `<playlist name>.m3u8`. Cover art is embedded in each track rather than
 dropped in as a folder image, and capped at 1000x1000. YouTube serves an
 auto-generated album's art at 2048 square, which is several times the size of
@@ -48,6 +48,7 @@ themselves.
 │ ▌ review 9 tracks worth a look                                   │
 │   keep this open                                                 │
 │   sync another playlist                                          │
+│   format for next time  (m4a)                                    │
 │   quit                                                           │
 └──────────────────────────────────────────────────────────────────┘
 ```
@@ -56,7 +57,8 @@ The review row only appears when the run left guesses or failures behind, and
 it's first because it's what the run is asking for. It closes the menu with
 the list narrowed to those tracks and the cursor on the first. Otherwise
 keeping the menu open is first, so neither Enter nor Esc starts work or ends
-the session.
+the session. A `play it in cliamp` row appears when cliamp is installed, and
+`format for next time` only when there is a config file to save it to.
 
 ## Choosing what to download
 
@@ -64,7 +66,7 @@ Every run but `--resync` pauses between reading the playlist and downloading
 it, and hands you the list.
 
 ```
- PICK  158 of 361 selected       space  ·  a all  ·  enter downloads  ·  esc none
+ PICK  158 of 361 selected       space  ·  a all  ·  i invert  ·  enter downloads  ·  esc none
 ```
 
 The gate exists because you can't know whether you want the whole thing until
@@ -144,8 +146,9 @@ different names. With nothing marked, both act on the track under the cursor.
 twenty tracks, or an `A`. One level, because the edit worth taking back is the
 one you just watched land on the row. The bar names what it's holding, and it
 goes after one use rather than turning into a redo. The tracks come back
-reading `undone`, since somebody typed those values back and `ok` would claim
-a lookup that's no longer what's in the file.
+as `manual`, with `undone` as where the tags came from, since somebody typed
+those values back and `ok` would claim a lookup that's no longer what's in the
+file.
 
 ## Notes
 

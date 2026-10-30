@@ -47,7 +47,7 @@
   flac with no seek table ignores the range under a copy and writes the whole
   file, exiting 0. `tag::cut` re-encodes the lossless formats and compares the
   result's length with the chapter's, so that case is an error and not a
-  full-length track. `a_chapter_cut_is_the_right_length_in_every_container`
+  full-length track. `a_chapter_cut_is_the_right_length_in_every_container_earworm_downloads`
   fails if the re-encode is taken out.
 - **A cut is written under `SCRATCH` and renamed into place, and the manifest
   entry is written after each chapter.** A kill in the middle of ffmpeg leaves

@@ -6,7 +6,7 @@ import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 
 const q = new URLSearchParams(location.search);
 const session = await fetch(`/@fs${q.get("file")}`).then((r) => r.json());
-// `?tokens` keeps look.css's own colours, for comparing against docs/mockups/ideas/6-wall-and-room-icons.html.
+// `?tokens` keeps look.css's own colours, for comparing against the wall-and-room mockup, in git at 792c6b8.
 if (q.has("tokens")) session.theme = { ...session.theme, vars: {} };
 // The history holds every question, answered or not; one is still open only if it is the last thing applied.
 const upto: unknown[] = session.msgs.slice(0, Number(q.get("upto") ?? session.msgs.length));

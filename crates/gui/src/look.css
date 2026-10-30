@@ -1,4 +1,4 @@
-/* docs/mockups/ideas/6-wall-and-room-icons.html, scoped to `.look`. No color-mix(): WebKit before 16.2
+/* docs/mockups/ideas/6-wall-and-room-icons.html (removed; in git at 792c6b8), scoped to `.look`. No color-mix(): WebKit before 16.2
    lacks it, so main.rs derives card2, glass, accent2, glow and scrim. */
 /* graphite until core's palette is painted over it, with its derived slots as main.rs works them out. */
 :root { color-scheme: dark;
