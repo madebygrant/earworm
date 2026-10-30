@@ -9,7 +9,7 @@ you stop on.
 
 ![The keys overlay: keys grouped by what they do, then the status words
 grouped into confirmed tags, guesses worth a look, tracks this run did not
-touch, and failures](images/keys.png)
+touch, files of your own, and failures](images/keys.png)
 
 The [desktop app](gui.md) takes every key on this page. `w` is the one
 key it adds. On a Mac its ⌘ shortcuts (⌘c, ⌘v) keep their usual meaning; on
@@ -40,6 +40,7 @@ Linux `^c` quits, as it does here.
 | `s` | swap artist and title on the marked tracks |
 | `A` | set one artist across the marked tracks |
 | `*` | star or unstar the artist of the track under the cursor |
+| `P` | add the marked tracks, or the one under the cursor, to a custom playlist |
 | `tab` `^s` | next field, swap artist and title (in the edit form) |
 | `r` | retry every failed track (after the run) |
 | `S` | sync the open playlist, asking for a URL if it has none |
@@ -67,17 +68,20 @@ Linux `^c` quits, as it does here.
 | `b` | every artist in the library, starred first ([discovery](discovery.md)) |
 | `s` | sort: name, last synced, most missing |
 | `w` | tiles or a list (desktop app only) |
-| `a` | show every folder, albums only, or playlists only |
+| `a` | show every folder, albums only, playlists only, or custom playlists only |
 | `p` | play the folder under the cursor in cliamp (needs a playlist file) |
 | `space` | play/pause cliamp |
 | `S` | sync the playlist under the cursor (asks for a URL if it has none) |
 | `R` | sync every playlist |
 | `n` | sync a new URL |
+| `N` | make a custom playlist, in the track picker |
+| `E` | export this folder or custom playlist |
 | `^t` | next colour theme, and remember it |
 | `l` | toggle the yt-dlp output pane |
 | `,` | settings, from any screen with a list |
 | `h` `?` | keys and current settings |
-| `q` `Esc` `ctrl+c` | quit |
+| `Esc` | clear the filter or the `a` narrowing |
+| `q` `ctrl+c` | quit |
 
 ## Artists
 
@@ -100,8 +104,49 @@ Linux `^c` quits, as it does here.
 | `enter` | open a related artist's page |
 | `a` | albums and EPs, or every release |
 | `o` | the library, narrowed to their folders |
+| `^d` `^u` `PgDn` `PgUp` | move by a screenful |
 | `w` | tiles or a list (desktop app only) |
-| `Esc` | the page before, else the artists |
+| `Esc` | stop a YouTube Music search, else the page before, else the artists |
+
+## Track search
+
+`t` on the library opens every matching track across the library.
+
+| Key | Action |
+| --- | --- |
+| `j` `k` `↑` `↓` `g` `G` | move |
+| `^d` `^u` `PgDn` `PgUp` | move by a screenful |
+| `enter` | open the result's folder with the cursor on that track |
+| `tab` `space` | mark or unmark the result |
+| `P` | add the marked results to a custom playlist |
+| `/` | edit the search |
+| `Esc` | back to the library, keeping the search |
+
+## Custom playlist
+
+| Key | Action |
+| --- | --- |
+| `j` `k` `↑` `↓` `g` `G` | move |
+| `J` `K` | move the track down or up the list |
+| `x` `Delete` | take the track off the list (the file stays) |
+| `P` | add tracks, in the track picker |
+| `p` | play the list in cliamp |
+| `enter` | open the folder the track lives in |
+| `Esc` | back to the library |
+
+## Track picker
+
+Letters type into the search, so help is `F1` and quitting is `ctrl+c`.
+
+| Key | Action |
+| --- | --- |
+| `↑` `↓` `^n` `^p` `PgDn` `PgUp` | move |
+| `tab` | mark or unmark the track |
+| `^a` | mark every track shown |
+| `F2` | show only the marked tracks |
+| `^u` `^w` | clear the search, or its last word |
+| `enter` | add the marked tracks, or apply the changes |
+| `Esc` | close, asking first if you changed anything |
 
 ## Settings
 
@@ -115,8 +160,10 @@ What each row means is in [configuration](configuration.md#the-settings-screen).
 
 ## The details
 
-`Esc` never ends the session, and does nothing at all while a run or a command
-is going. `q` and `ctrl+c` are the way out. `q` asks before it kills a
+`Esc` steps back one level and never ends the session, with one exception:
+on the very first link prompt, with nothing on disk yet, it quits. While a run
+or a command is going it still clears a filter or marks, but it won't leave
+the screen. `q` and `ctrl+c` are the way out. `q` asks before it kills a
 download, since that's the last thing in the tool one keypress can lose. A
 second `q` answers the question, so `qq` never makes you read the box.
 

@@ -47,7 +47,7 @@ holds, in that order, and earworm writes `<folder>.m3u8` to say so.
 When a playlist wants a video that another folder under `--dir` already holds,
 earworm copies the file instead of downloading it again. The copy keeps the
 other folder's tags, album included, and its cover, takes this playlist's number, and the log says
-`copied track 3 from Focus`. It only copies a file that is already in the
+`copied track 3 from Focus instead of downloading it`. It only copies a file that is already in the
 format you have chosen, so changing the format never leaves two in a folder.
 `--resync` copies too. If the other folder's album tag was only its playlist
 name, the copy has that name too; `A` sets the album you want.
@@ -147,7 +147,7 @@ the title, from the tag or from the filename with its leading number taken
 off, and uses the length only to break a tie between two files of the same
 title. Anything it cannot place is left alone and downloaded fresh.
 
-It always stops at the pick gate, whatever your `--pick` setting says, because
+It always stops at the pick gate, whatever the `pick` setting says, because
 the matching is a guess and the screen showing `12 to download` against a
 folder you know holds twelve is the point at which to stop it. `--resync`
 never attaches a URL to anything: it is unattended, and there would be nobody
@@ -176,9 +176,10 @@ already shows. Nothing moves, and the record is written.
 ## Albums and playlists
 
 A folder is a playlist unless earworm has reason to think otherwise, and the
-one reason it accepts by itself is the playlist id: YouTube gives an
+reasons it accepts by itself are the playlist id and a split: YouTube gives an
 official album release an id starting `OLAK5uy_`, where a playlist you or anyone else made
-starts `PL`. That is the only automatic signal, and it only ever promotes.
+starts `PL`, and a video you chose to split by its chapters is one record. Those are the
+only automatic signals, and they only ever promote.
 Calling an album a playlist costs nothing you can see; calling a playlist an
 album stamps one sleeve across a dozen unrelated records.
 
@@ -217,7 +218,7 @@ the library's `h` lists them. Every row gets a kind icon, so `[playlist]` is
 dropped from the name as `[album]` is. Set `icons = "nerd"` for larger Nerd Font glyphs, which need a patched
 terminal font and show as boxes without one. Set `icons = "text"` in the
 config for the pills and words above, which is the layout earworm had before icons. Your
-font needs those three glyphs; most have them, and `earworm --check` names the
+font needs those glyphs, `◈` for a custom playlist included; most have them, and `earworm --check` names the
 tier in use.
 
 A folder you marked `[album]` yourself shows the pill instead of the word, not
@@ -310,7 +311,7 @@ finds no folder but `t` would find tracks, the library says so.
 
 ```
  earworm  ·  search  ·  4 tracks in 3 playlists
- SEARCH  /neu!                          4 of 612 shown  ·  esc clears
+ SEARCH  /neu!     4 of 612 tracks  ·  enter open  ·  Tab mark  ·  P add  ·  esc library
 ▌  Focus        01 Neu! - Hallogallo
    Road trip  ! 02 Neu! - Negativland
    Sleep        01 Neu! - Weissensee

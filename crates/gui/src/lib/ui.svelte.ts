@@ -115,7 +115,7 @@ export function say(text: string) {
   flash(text);
 }
 
-/** A path as the mockups show it: from the music folder's own name down, e.g. `music/Krautrock/01 - a.opus`. */
+/** A path as the sheet shows it: from the music folder's own name down, e.g. `music/Krautrock/01 - a.opus`. */
 export function short(path: string): string {
   const dir = app.setup?.dir;
   if (!dir) return path;

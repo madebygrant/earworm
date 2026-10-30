@@ -49,7 +49,7 @@ palette quietly finishing itself from `warm` is harder to spot than an error.
 
 A few rules the errors will tell you about anyway:
 
-- `base` may be `warm`, `light`, `cool` or `neon`, never another `[themes.*]`. A base that could
+- `base` may be `warm`, `light`, `cool`, `neon` or `graphite`, never another `[themes.*]`. A base that could
   name a peer could name a cycle.
 - A theme may not take a name earworm ships. Shadowing `warm` would make it unreachable with nothing
   saying so.
@@ -108,8 +108,8 @@ Under `NO_COLOR` every colour collapses to the terminal's own and earworm stays 
 words, the `!` on a missing file and the `♪ cliamp ▶` transport carry what colour was saying.
 
 A theme of your own gets the same numbers run over it at startup, since the test suite can only
-measure what ships. It is never refused on them: it is your screen, and the four built-ins are the
+measure what ships. It is never refused on them: it is your screen, and the five built-ins are the
 ones earworm vouches for.
 
 A theme changes colour, never layout. The tests assert the frame is identical cell for cell across
-all four.
+all five.

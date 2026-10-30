@@ -13,7 +13,7 @@
   is called after the page has subscribed to `earworm://msg`; a worker
   started in `setup` sends the library before anything listens and the wall
   stays empty. `boot` runs once, since a second listener applies every
-  message twice (`listens_once_however_often_it_is_mounted` in
+  message twice ("listens once however often it is mounted" in
   `store.test.ts`).
 - **A reload replays the history; it never cancels a question.** The worker
   sent the library once, so a reloaded page that started blank would show
@@ -23,8 +23,8 @@
   them but the questions the page already answered
   (`a_replay_leaves_out_the_questions_already_answered`). Live messages that
   arrive while `start` is answering wait, and those the history held are
-  dropped by number
-  (`applies_the_history_then_the_held_messages_it_did_not_hold`). The cost is
+  dropped by number ("applies the history, then the held messages it did
+  not hold" in `store.test.ts`). The cost is
   memory: a long session's yt-dlp log is kept twice.
 - **A search clears `stop` when it is sent, as the terminal's does.** Nothing
   else clears it, so one Esc on a search would end every later one at once
@@ -52,8 +52,8 @@
   `all: revert`, and a rule meant for one log leaked onto the other once the
   shield moved. `main.ts` imports `look.css` and the `@fontsource` faces, and
   no file under `src/` brings in styles of its own: no other `.css` import,
-  `<style>` block or `@import`. The mockups stay under `docs/mockups/` as
-  pictures
+  `<style>` block or `@import`. The mockups are gone from the tree; they
+  are in git at 792c6b8
   (`the_page_imports_look_css_and_the_fonts_and_no_other_stylesheet`).
 - **The desktop's derived colours are worked out in Rust, beside the
   palette, and measured there.** `card2` (the well inside a card: the active
@@ -189,7 +189,7 @@
   `?file=<session>&upto=<n>`, mocks IPC and replays the first `n` messages;
   `quit`, `logs`, `mode` and `tokens` set the page's own state, `tokens`
   keeping look.css's own colours for comparing with
-  `docs/mockups/ideas/6-wall-and-room-icons.html`. A question in the history is open only when it is
+  `docs/mockups/ideas/6-wall-and-room-icons.html` at 792c6b8. A question in the history is open only when it is
   the last message applied, since the page's answers are not in it. Covers
   load through Vite's `/@fs`, so the thumbnail cache is in `server.fs.allow`;
   a session recorded with another `XDG_CACHE_HOME` needs the preview started

@@ -33,7 +33,9 @@ Three aren't. `mp3` and `vorbis` on disk have already been re-encoded once
 from YouTube's Opus, and an `m4a` may have been, and converting them again
 would cost a third generation where a fresh download costs two. Those get
 downloaded. So does anything on its way *to* `opus` or `m4a`, since those are
-the formats a download copies from YouTube rather than re-encodes.
+the formats a download copies from YouTube rather than re-encodes. The one
+exception is `alac` going to `m4a`, which is converted in place because both
+use `.m4a`.
 
 Tags, cover art and any name you typed all come across, and nothing is deleted
 until the replacement is written and read back. A track whose download fails
