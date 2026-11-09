@@ -195,11 +195,8 @@ fn import_folder(dir: &Path, name: String, url: &str, ids: &[String], tx: &Sende
 
 /// A link, or a markdown file of links, or the prompt header that says why not.
 fn settle(answer: &str, unlocked: &Unlocked) -> Result<Link, String> {
-    if let Some(url) = youtube_url(answer) {
-        if locked(&url, unlocked) {
-            return Err(LOCKED.into());
-        }
-        return Ok(Link::plain(url));
+    if let Some(url) = settle_url(answer, unlocked) {
+        return url.map(Link::plain).map_err(String::from);
     }
     if answer.trim().is_empty() {
         return Err("Paste a YouTube link".into());
@@ -209,6 +206,12 @@ fn settle(answer: &str, unlocked: &Unlocked) -> Result<Link, String> {
         return Err(LOCKED.into());
     }
     Ok(Link { url: found.url(), name: found.name, ids: found.ids })
+}
+
+/// The link half of `settle`, which `queue` shares: `None` when the answer is not a link at all.
+pub(crate) fn settle_url(answer: &str, unlocked: &Unlocked) -> Option<Result<String, &'static str>> {
+    let url = youtube_url(answer)?;
+    Some(if locked(&url, unlocked) { Err(LOCKED) } else { Ok(url) })
 }
 
 pub(crate) const HOSTS: [&str; 5] = [

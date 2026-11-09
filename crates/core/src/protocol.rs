@@ -737,6 +737,9 @@ pub enum Msg {
         #[serde(serialize_with = "lossy::opt_path")]
         thumb: Option<PathBuf>,
     },
+    /// The links waiting, in the order the worker takes them. Both threads change the queue and either
+    /// can send this, so two can arrive out of order: a front end keeps the highest `rev` and drops the rest.
+    Queue { rev: u64, links: Vec<String> },
 }
 
 // Paths in a message go out as text, lossily: serde_json refuses a path that is not UTF-8, which on
@@ -1266,6 +1269,7 @@ pub mod test_support {
             Msg::Artwork,
             Msg::Quit,
             Msg::Thumb { file: p(), thumb: None },
+            Msg::Queue { rev: 3, links: vec!["https://www.youtube.com/playlist?list=PL1".into()] },
         ]
     }
 

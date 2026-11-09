@@ -324,6 +324,7 @@ const handlers: Handlers = {
   Artwork: (s) => ({ ...s, artwork: s.artwork + 1, thumbs: {}, thumbsAsked: [] }),
   Quit: (s) => ({ ...s, quit: true }),
   Thumb: (s, { file, thumb }) => ({ ...s, thumbs: { ...s.thumbs, [file]: thumb } }),
+  Queue: (s) => s,
 };
 
 /** Every message the reducer knows, for the test that holds it to the recorded ones. */

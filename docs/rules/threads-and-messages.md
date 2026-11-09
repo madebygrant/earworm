@@ -99,3 +99,17 @@
 - **A bulk action clears the marks with `Msg::Unmark` on completion,** not when
   the key is pressed, and only when something was written. Clearing on dispatch
   throws away a twenty-track selection the moment someone escapes the prompt.
+- **The download queue is the one piece of state both threads change.** The
+  worker reads no commands during a run, which is when somebody pastes the
+  next batch, so `queue::Queue` is shared like `cancel` and `stop` rather than
+  fed by a `Cmd`. It holds no sender: a front end holding the queue would keep
+  the worker's channel open after a panic, and the disconnect check above
+  would never fire. Each change returns the `Msg::Queue` for its caller to
+  send, and since either thread can send one, two can arrive out of order, so
+  a front end keeps the highest `rev`
+  (`every_change_says_so_with_a_higher_rev_and_nothing_else_does`). A link
+  is removed by its text, not its row, because the worker can pop the head
+  between the draw and the key (`a_remove_after_the_head_was_taken_leaves_the_rest`).
+  Repeats are matched on the video or list id, and the link running now is
+  one (`one_download_spelt_several_ways_is_queued_once`,
+  `the_running_link_is_a_repeat_until_it_is_done`).

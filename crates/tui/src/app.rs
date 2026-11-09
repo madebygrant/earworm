@@ -811,6 +811,7 @@ impl App {
             Msg::Artwork => self.art = None,
             // The terminal draws no tiles and never asks for these.
             Msg::Thumb { .. } => {}
+            Msg::Queue { .. } => {}
             Msg::Twin { index, twin } => {
                 if let Some(t) = self.track_mut(index) {
                     t.twin = twin;

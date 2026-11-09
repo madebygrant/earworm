@@ -138,7 +138,8 @@ export type Msg =
   | { Focus: number }
   | "Artwork"
   | "Quit"
-  | { Thumb: { file: string; thumb: string | null } };
+  | { Thumb: { file: string; thumb: string | null } }
+  | { Queue: { rev: number; links: string[] } };
 
 export type Reply = { Choice: number } | { Fields: string[] } | { Text: string } | { Picked: number[] } | "Cancel";
 
