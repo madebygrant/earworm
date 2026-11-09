@@ -1,6 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import type { Prompt } from "../lib/protocol";
+  import { pasteLinks } from "../lib/screens.svelte";
   import { app, reply } from "../lib/store.svelte";
   import { ui, type Tool } from "../lib/ui.svelte";
   import Icon from "./Icon.svelte";
@@ -25,11 +26,12 @@
     if (ui.tools === null) invoke<Tool[]>("tools").then((tools) => (ui.tools = tools));
   });
 
+  function send(link: string) {
+    ui.linkSent = true;
+    void reply({ Text: link });
+  }
   function key(e: KeyboardEvent) {
-    if (e.key === "Enter") {
-      ui.linkSent = true;
-      void reply({ Text: value });
-    }
+    if (e.key === "Enter") send(value);
     else if (e.key === "Escape") void reply("Cancel");
   }
   // The key is read once at start, so saving it restarts the app; until then this says why nothing moved.
@@ -58,10 +60,10 @@
       <h1>Playlist in, library out.</h1>
             <div class="url" class:bad={refused}>
         <Icon name="link" />
-        <input bind:this={field} bind:value onkeydown={key} placeholder="Paste a playlist link" spellcheck="false" />
+        <input bind:this={field} bind:value onkeydown={key} onpaste={(e) => pasteLinks(e, (v) => (value = v), () => (ui.linkSent = true))} placeholder="Paste a playlist link, or several" spellcheck="false" />
       </div>
       {#if refused}<p class="say error">{prompt.Input.header}</p>{/if}
-      {#if prompt.Input.note}<p class="say">{prompt.Input.note}</p>{/if}
+      {#if prompt.Input.note}<p class="say">{prompt.Input.note}{#if prompt.Input.links}{"  ·  "}paste several to queue them{/if}</p>{/if}
       <p class="say">earworm makes a folder for it in {setup?.dir ?? "your music folder"}, then names and tags every track.</p>
       <div class="card check">
         <h2>Tools</h2>

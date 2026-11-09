@@ -25,19 +25,26 @@ turns on.
 - `protocol.rs` — what the worker and a front end exchange: `Msg` (worker to
   UI), `Cmd` (UI to worker), `Track`, `Status`, `Shelf` (one library row),
   `Prompt`, `Reply`, `Asker` (worker asks the UI a question and blocks on the
-  reply), `Escape` (what Esc on a prompt does), the row structs and
+  reply; `Prompt::Input::links` marks the URL prompt, which takes a paste of
+  several), `Escape` (what Esc on a prompt does), the row structs and
   `Playback`, all serde so a front end can speak JSON. A question is an id:
   `open_question` registers it, `answer(id, reply)` is the way back. Non-UI
   modules import these from here, never from `app`, and `app` keeps its
   imports private so the compiler holds that line
 - `config.rs` — `Cli`, the TOML `FileConfig`, and `Config::build`, which merges
   them; `SWITCHES` and `Config::rows`, what the settings screen lists
-- `worker.rs` — `ask_start` (library, resync or the URL prompt, which loops
-  until the URL validates) then `pipeline` then `serve`, which serves both the
-  post-run commands and the library screen. `tag_tracks` is the
+- `worker.rs` — `ask_start` (library, resync, a queue or the URL prompt, which
+  loops until the URL validates) then `pipeline` then `serve`, which serves
+  both the post-run commands and the library screen. `drain` runs whatever is
+  queued behind a run, unattended, before the one finish menu; `serve` starts
+  it on its own when links are waiting. `tag_tracks` is the
   identify-and-write pass, shared by the run and by retry; `ask_which` is the
   pick gate between the scan and the download; `open_shelf` builds the same
   rows from the manifest and the tags on disk, with no network
+- `queue.rs` — `Queue`, the links waiting for the worker, shared with the front
+  ends on `Config.queue` as `unlocked` is, since the worker reads no commands
+  during a run. Each change returns the `Msg::Queue` to send; `links` pulls
+  links out of pasted text, and `.queue` keeps them for the next start
 - `ytdlp.rs` — `scan` (flat-playlist listing), `run` (the real download)
 - `manifest.rs` — the `.earworm` sidecar: the `#url`, `#synced`, `#name`,
   `#m3u8`, `#kind` and `#hidden` headers, plus video id to current filename
@@ -89,7 +96,9 @@ from `src/lib/bar.ts`; the `h` sheet is `screens/Help.svelte` over
 `src/lib/keysheet.ts`. `Wall.svelte` is the scroller every wall and table
 sits in, and `Art.svelte` draws a folder's sleeve or mosaic with
 `src/lib/wall.ts`. A run in progress is `Room.svelte` over `src/lib/run.ts`;
-a finished one, or a folder opened from disk, is `Run.svelte`.
+a finished one, or a folder opened from disk, is `Run.svelte`. The queue is
+`Queue.svelte`, its link fields over the queued list, over the shell's
+`enqueue`, `enqueue_fields`, `paste_links`, `unqueue` and `clear_queue`, which send what they change through `publish`.
 `src/look.css` is the only stylesheet. Run it
 with `pnpm dev` in `crates/gui` and `cargo run -p earworm-gui`, or
 `pnpm tauri dev`; `pnpm test` runs the page's tests: the reducer's, and the
@@ -110,7 +119,7 @@ which is read when somebody doubts a rule rather than at the start of a session.
 
 | Area | File | Read when |
 |---|---|---|
-| Threads and messages: the UI/worker split, `Msg` and `Cmd`, the pick gate, `busy`, the filter predicate and cursors | `docs/rules/threads-and-messages.md` | touching `main.rs`'s event loop, `Msg`/`Cmd`, `Status`, the pick gate or the filter |
+| Threads and messages: the UI/worker split, `Msg` and `Cmd`, the pick gate, `busy`, the filter predicate and cursors, the download queue and `.queue` | `docs/rules/threads-and-messages.md` | touching `main.rs`'s event loop, `Msg`/`Cmd`, `Status`, the pick gate, the filter or `queue.rs` |
 | Files and re-runs: the manifest sidecar, resyncs, renames, departures, `.m3u8` names, `D` deleting | `docs/rules/files-and-reruns.md` | touching `manifest.rs`, `scan`, renaming, `write_playlist`, `mark_departed` or purge |
 | Cover art: embedding, capping and restoring covers, folder images, pacing artwork downloads | `docs/rules/cover-art.md` | touching cover fetching, `cap_cover`, `c` or `cover.jpg` |
 | Folders earworm didn't download: adopted folders, `~` ids, `#hidden`, `D` menus, attaching a URL, `reconcile` | `docs/rules/folders-not-downloaded.md` | touching `contents`, `open_shelf`, adoption, hide/forget or attaching a URL |

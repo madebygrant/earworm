@@ -39,6 +39,8 @@ pub enum View {
     Artist,
     // Every setting with where it came from. `,` from any screen with a list.
     Settings,
+    // The links waiting for the worker. `Q` from the library or the track list.
+    Queue,
 }
 
 /// The open custom playlist.
@@ -145,6 +147,8 @@ pub enum Confirm {
     Quit,
     // Leaving the track picker with marks that would be lost.
     Discard,
+    // Emptying the queue, which a paste of twenty links is the only way back from.
+    ClearQueue,
 }
 
 /// Prompts are answered by the UI thread, so a question blocks only the worker.
@@ -469,6 +473,18 @@ pub struct App {
     pub update: Option<String>,
     /// Shared with the worker, which asks it at the URL prompt.
     pub unlocked: Arc<Unlocked>,
+    /// Shared with the worker, as `unlocked` is: a paste adds to it while a run is going.
+    pub downloads: Arc<crate::queue::Queue>,
+    /// What `Msg::Queue` last said, and its `rev`, so one that arrives late is dropped.
+    pub queued: Vec<String>,
+    pub queue_rev: u64,
+    pub queue_cursor: usize,
+    pub queue_scroll: usize,
+    // The screen `Q` was pressed on, which Esc goes back to.
+    pub queue_back: View,
+    /// A run is in flight: set by `Msg::Restart`, cleared by `Done`, `Idle` or the library being shown. The
+    /// first run sends no `Restart`, and its tracks say so instead.
+    pub running: bool,
     pub console: Option<Console>,
     /// The code just found and when, for the popup that celebrates it.
     pub reward: Option<(Instant, Reward)>,
@@ -567,6 +583,13 @@ impl App {
             intro_done: false,
             update: None,
             unlocked: Arc::default(),
+            downloads: Arc::default(),
+            queued: Vec::new(),
+            queue_rev: 0,
+            queue_cursor: 0,
+            queue_scroll: 0,
+            queue_back: View::Library,
+            running: false,
             console: None,
             reward: None,
             achieving: false,
@@ -811,6 +834,13 @@ impl App {
             Msg::Artwork => self.art = None,
             // The terminal draws no tiles and never asks for these.
             Msg::Thumb { .. } => {}
+            // Both threads change the queue, so two of these can cross; the higher `rev` is the newer list.
+            Msg::Queue { rev, links } if rev > self.queue_rev => {
+                self.queue_rev = rev;
+                self.queued = links;
+                self.queue_cursor = self.queue_cursor.min(self.queued.len().saturating_sub(1));
+            }
+            Msg::Queue { .. } => {}
             Msg::Twin { index, twin } => {
                 if let Some(t) = self.track_mut(index) {
                     t.twin = twin;
@@ -898,6 +928,10 @@ impl App {
             }
             Msg::Library { shelves, show } => {
                 self.recheck = true;
+                // Shown is the library taking the screen back, which no run in flight does.
+                if show {
+                    self.running = false;
+                }
                 // Kept on the same row by its path: a list made or deleted shifts every row after it.
                 let was = self.library.get(self.shelf).map(|s| s.path.clone());
                 self.library = shelves;
@@ -963,6 +997,7 @@ impl App {
             }
             Msg::Done { result, stage } => {
                 self.recheck = true;
+                self.running = false;
                 self.stage = if result.is_ok() { stage } else { "failed".into() };
                 self.resting = self.stage.clone();
                 self.flash_until = None;
@@ -1011,6 +1046,7 @@ impl App {
             Msg::Idle => {
                 self.busy = false;
                 self.searching = false;
+                self.running = false;
             }
             Msg::Restart => {
                 self.searching = false;
@@ -1031,6 +1067,7 @@ impl App {
                 self.review = false;
                 self.undoable = None;
                 self.log_scroll = 0;
+                self.running = true;
                 // Whatever is starting has tracks, and they are the point.
                 self.view = View::Tracks;
             }
@@ -1555,8 +1592,76 @@ impl App {
     /// Whether anything is in flight that quitting would take with it. One
     /// predicate for Esc and for `q`, or the two answer the same question
     /// differently and the safe key is safe on a different set of screens.
+    /// `running` covers a scan, when the list is still empty, which a queue the worker started by itself
+    /// has before every link. Waiting links count too, since quitting stops them until the next start.
     pub fn working(&self) -> bool {
-        self.busy || (self.done.is_none() && !self.tracks.is_empty())
+        self.busy || self.running || (self.done.is_none() && !self.tracks.is_empty()) || !self.queued.is_empty()
+    }
+
+    /// Something is downloading or scanning now, as opposed to links only waiting.
+    pub fn downloading(&self) -> bool {
+        self.running || (self.done.is_none() && !self.tracks.is_empty())
+    }
+
+    /// Queues the links in pasted text, logging what it refused, and says what happened.
+    pub fn enqueue(&mut self, text: &str) {
+        self.enqueue_behind(None, text);
+    }
+
+    /// `enqueue` for a paste whose `lead` the URL prompt runs, so it is neither queued nor counted as added.
+    pub fn enqueue_behind(&mut self, lead: Option<&str>, text: &str) {
+        let (added, msg) = self.downloads.add_behind(lead, text, &self.unlocked);
+        if let Some(msg) = msg {
+            self.apply(msg);
+        }
+        for refused in &added.rejected {
+            self.apply(Msg::Log(format!("{}: {}", refused.text, refused.why)));
+        }
+        self.say(added.said());
+    }
+
+    /// `q` on a screen with no run of its own: it quits, unless links are waiting, which quitting stops.
+    pub fn quit_key(&mut self) {
+        if self.queued.is_empty() {
+            self.quit = true;
+        } else {
+            self.confirm = Some(Confirm::Quit);
+        }
+    }
+
+    pub fn open_queue(&mut self) {
+        if self.view != View::Queue {
+            self.queue_back = self.view;
+            self.view = View::Queue;
+        }
+    }
+
+    pub fn leave_queue(&mut self) {
+        self.view = self.queue_back;
+    }
+
+    pub fn queue_step(&mut self, down: bool, by: usize) {
+        let last = self.queued.len().saturating_sub(1);
+        self.queue_cursor = if down { self.queue_cursor.saturating_add(by).min(last) } else { self.queue_cursor.saturating_sub(by) };
+    }
+
+    // By the link under the cursor: the worker may have taken the head since this list was drawn.
+    pub fn unqueue(&mut self) {
+        let Some(link) = self.queued.get(self.queue_cursor).cloned() else {
+            self.say("nothing queued");
+            return;
+        };
+        match self.downloads.remove(&link) {
+            Some(msg) => self.apply(msg),
+            None => self.say("already started"),
+        }
+    }
+
+    pub fn clear_queue(&mut self) {
+        if let Some(msg) = self.downloads.clear() {
+            self.apply(msg);
+            self.say("queue cleared");
+        }
     }
 
     /* Esc goes back one step and never ends the session. It used to quit
@@ -2610,6 +2715,15 @@ mod tests {
         }
     }
 
+    // The worker's pop and a paste on this thread can cross on the way here; the older list must not win.
+    #[test]
+    fn a_queue_message_older_than_the_last_is_dropped() {
+        let mut app = App::new(std::sync::mpsc::channel().0, String::new());
+        app.apply(Msg::Queue { rev: 3, links: vec!["b".into()] });
+        app.apply(Msg::Queue { rev: 2, links: vec!["a".into(), "b".into()] });
+        assert_eq!(app.queued, ["b"]);
+    }
+
     fn library_app(shelves: Vec<Shelf>) -> App {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(tx, String::new());
@@ -3309,7 +3423,7 @@ mod tests {
                 header: "q".into(),
                 note: String::new(),
                 value: String::new(),
-                escape: Escape::Keep, browse: None,
+                escape: Escape::Keep, browse: None, links: false,
             } });
         answers
     }
@@ -4088,7 +4202,7 @@ mod tests {
                 note: String::new(),
                 header: "Title".into(),
                 value: "Café del Mar".into(),
-                escape: Escape::Skip, browse: None,
+                escape: Escape::Skip, browse: None, links: false,
             } });
         assert_eq!(app.caret, 12, "the caret starts behind the prefilled text");
 

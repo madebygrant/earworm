@@ -73,6 +73,10 @@ struct Shell {
     config_file: Option<PathBuf>,
     overridden: bool,
     unlocked: Arc<Unlocked>,
+    /// Shared with the worker, as `unlocked` is: a paste adds to it while a run is going.
+    queue: Arc<earworm_core::queue::Queue>,
+    /// The music folder, where the queue is kept for the next start. `None` when the config did not build.
+    dir: Option<PathBuf>,
     /// The achievement state file and what it holds, or `None` when achievements are off for the session.
     achieved: Mutex<Option<(PathBuf, std::collections::BTreeSet<String>)>>,
     update_check: bool,
@@ -215,12 +219,7 @@ fn start(app: tauri::AppHandle, shell: State<Shell>) -> Result<Boot, String> {
             let history = Arc::clone(&shell.history);
             std::thread::spawn(move || {
                 for msg in rx {
-                    let Ok(msg) = serde_json::to_value(&msg) else { continue };
-                    // Numbered and emitted under one lock, so a replay never overlaps the live stream out of order.
-                    let mut history = history.lock().unwrap();
-                    let sent = Sent { seq: history.len() as u64, msg };
-                    let _ = app.emit(MSG, &sent);
-                    history.push(sent);
+                    publish(&app, &history, &msg);
                 }
                 let _ = app.emit(GONE, ());
             });
@@ -292,6 +291,87 @@ fn first_ask(on: bool, told: &AtomicBool) -> bool {
 #[tauri::command]
 fn quit(app: tauri::AppHandle) {
     app.exit(0);
+}
+
+// Numbered and emitted under one lock, so a replay never overlaps the live stream out of order. The worker's
+// messages come through here, and the queue's own, which the page's edits make and no channel carries: a
+// sender held here for them would keep the worker's stream open after it died, and `GONE` would never go.
+fn publish(app: &tauri::AppHandle, history: &Mutex<Vec<Sent>>, msg: &Msg) {
+    let Ok(msg) = serde_json::to_value(msg) else { return };
+    let mut history = history.lock().unwrap();
+    let sent = Sent { seq: history.len() as u64, msg };
+    let _ = app.emit(MSG, &sent);
+    history.push(sent);
+}
+
+/// Queues the links in pasted text, logs what it refused, and returns what to flash. `lead` is the link the
+/// URL prompt is about to run, which is not queued again.
+#[tauri::command]
+fn enqueue(text: String, lead: Option<String>, app: tauri::AppHandle, shell: State<Shell>) -> String {
+    let (added, msg) = shell.queue.add_behind(lead.as_deref(), &text, &shell.unlocked);
+    for refused in &added.rejected {
+        publish(&app, &shell.history, &Msg::Log(format!("{}: {}", refused.text, refused.why)));
+    }
+    if let Some(msg) = msg {
+        publish(&app, &shell.history, &msg);
+    }
+    added.said()
+}
+
+/// What the queue screen's link fields did: the flash, and why each field queued nothing, in their order.
+#[derive(Serialize)]
+struct Typed {
+    said: String,
+    problems: Vec<Option<String>>,
+}
+
+/// The queue screen's link fields, queued as one paste. With nothing queueable, nothing is sent and the
+/// fields say why, rather than a flash about a paste nobody made.
+#[tauri::command]
+fn enqueue_fields(fields: Vec<String>, app: tauri::AppHandle, shell: State<Shell>) -> Typed {
+    let problems = earworm_core::queue::field_problems(&fields, &shell.unlocked);
+    if problems.iter().all(Option::is_some) {
+        return Typed { said: "nothing queued".into(), problems };
+    }
+    let said = enqueue(fields.join("\n"), None, app, shell);
+    Typed { said, problems }
+}
+
+/// What a paste into the URL field did: `lead` answered question `id` and the rest were queued behind it,
+/// or `None` when it held fewer than two links and is the box's to type.
+#[derive(Serialize)]
+struct Pasted {
+    lead: Option<String>,
+    said: Option<String>,
+}
+
+// One call, so the question is answered here by its id. An answer sent from the page after a second round
+// trip went to whichever question was open by then, and the link `add_behind` had taken out was lost.
+#[tauri::command]
+fn paste_links(text: String, id: u64, app: tauri::AppHandle, shell: State<Shell>) -> Pasted {
+    let (found, _) = earworm_core::queue::links(&text, &shell.unlocked);
+    let [lead, _, ..] = &found[..] else { return Pasted { lead: None, said: None } };
+    // A question already answered, by an Enter that got there first, leaves the paste to the box.
+    if !protocol::answer(id, Reply::Text(lead.clone())) {
+        return Pasted { lead: None, said: None };
+    }
+    shell.answered.lock().unwrap().insert(id);
+    let said = enqueue(text, Some(lead.clone()), app, shell);
+    Pasted { lead: Some(lead.clone()), said: Some(said) }
+}
+
+/// By the link, not the row: the worker may have taken the head since the page drew it.
+#[tauri::command]
+fn unqueue(link: String, app: tauri::AppHandle, shell: State<Shell>) -> bool {
+    let msg = shell.queue.remove(&link);
+    msg.as_ref().inspect(|msg| publish(&app, &shell.history, msg)).is_some()
+}
+
+/// False when the worker took the last link before the question was answered, so there was nothing to clear.
+#[tauri::command]
+fn clear_queue(app: tauri::AppHandle, shell: State<Shell>) -> bool {
+    let msg = shell.queue.clear();
+    msg.as_ref().inspect(|msg| publish(&app, &shell.history, msg)).is_some()
 }
 
 #[tauri::command]
@@ -647,6 +727,12 @@ fn shut_down(shell: &Shell) {
     while tag::writing() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
+    // What the page added since the worker last saved, which it does only as it takes a link.
+    if let Some(dir) = &shell.dir
+        && let Err(err) = shell.queue.save(dir)
+    {
+        eprintln!("earworm: the queue could not be kept for next time: {err}");
+    }
 }
 
 // Debug builds with `EARWORM_SESSION` set write the session's messages there on the way out, which is what
@@ -717,6 +803,8 @@ fn main() {
                 config_file: cfg.config_file.clone(),
                 overridden: cfg.theme_overridden,
                 unlocked: Arc::clone(&cfg.unlocked),
+                queue: Arc::clone(&cfg.queue),
+                dir: Some(cfg.dir.clone()),
                 // Read once at start, as the terminal does: a file that cannot be read turns the feature off.
                 achieved: Mutex::new(
                     cfg.achievements
@@ -746,7 +834,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             start, send, answer, stop, theme_next, cheat, rows, shelf_rows, search, artist_rows,
             release_rows, take, flip, invert, gate_marks, unread, mark_new, counts, picker_rows, pick_toggle,
-            pick_changes, earned, shown, next_icons, switch_flag, lead_artist, new_titles, artist_at, next_kind, next_sort, probe, tools, latest, acoustid_key, quit
+            pick_changes, earned, shown, next_icons, switch_flag, lead_artist, new_titles, artist_at, next_kind, next_sort, probe, tools, latest, acoustid_key, quit,
+            enqueue, enqueue_fields, paste_links, unqueue, clear_queue
         ])
         .build(tauri::generate_context!())
         .expect("the window could not be built")
@@ -782,6 +871,8 @@ impl Shell {
             config_file: None,
             overridden: false,
             unlocked: Arc::new(Unlocked::default()),
+            queue: Arc::default(),
+            dir: None,
             achieved: Mutex::new(None),
             update_check: false,
             told: AtomicBool::new(false),

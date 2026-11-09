@@ -33,10 +33,11 @@ on this screen.
 The window has four parts:
 
 - **The header:** where you are, a pill for each screen (Library, Artists,
-  Playlists, Settings), the run's chip, the track search and the theme
-  button. The chip appears once you sync a link: while it downloads it
-  counts the tracks, once finished it says how many failed or want a look,
-  and from anywhere else a click opens that folder again.
+  Playlists, Settings), the run's chip, the queue's chip, the track search
+  and the theme button. The run's chip appears once you sync a link: while
+  it downloads it counts the tracks, once finished it says how many failed
+  or want a look, and from anywhere else a click opens that folder again.
+  The queue's chip appears while links are waiting and opens the queue.
 - **The middle:** the screen itself, usually a wall of tiles or a table,
   with a toolbar over it.
 - **The sheet** on the right: the tile or row under the cursor in full, with
@@ -116,6 +117,22 @@ file, a flag or the default. Enter or space changes one and writes it to the
 config, so the terminal app picks it up too. The theme button in the header
 and `^t` switch between the same five themes as the terminal, plus any of
 your own.
+
+## Several links
+
+Paste several links anywhere in the window, outside a text box, and earworm
+queues them and downloads them one after another, as in the
+[terminal](workflow.md#several-links-at-once). The link field on the first
+screen and in the `n` dialog takes several too: the first is the answer and
+the rest are queued behind it. The queue screen (`Q`, or the queue's chip)
+has link fields at the top for typing links one at a time: Enter or Another
+link gives you a new field, and Queue (or ⌘Enter) queues them all. A field
+whose link was refused stays, with the reason under it, and a paste of
+several lines into a field becomes a field each. Below them is what is
+waiting, with a button on each row to take it off and a Clear button for the
+lot. `q`
+asks first while links are waiting, and whatever is still queued when you
+close the app is offered back at the next start.
 
 ## Keys and the mouse
 

@@ -276,3 +276,52 @@
   and the page waits for room in the flash queue rather than being dropped
   from a full one at a busy start (`waits for room to say a newer release is
   out rather than dropping it`).
+- **The queue is the shell's, and its messages go through `publish`.** The
+  page adds, removes and clears through `enqueue`, `unqueue` and
+  `clear_queue`, which act on `Config.queue` and send the `Msg::Queue` that
+  comes back through `publish`, the one function that numbers a message into
+  the history and emits it. The worker's messages take the same path. The
+  shell holds no sender of the worker's channel for this: one would keep the
+  stream open after the worker died, and `GONE` would never go. Since the
+  queue's messages are in the history, a reload replays them, and the
+  reducer keeps the highest `rev` whatever order they arrive in (`keeps the
+  newest queue whatever order its messages arrive in`). Checked in the
+  running app through `EARWORM_DRIVE`: two links queued over the finish
+  menu were both there after `location.reload()`.
+- **A paste is links to queue, unless a box takes it.** The window's paste
+  queues them, over a menu too; a box and the console keep their own
+  (`a paste outside a box is queued, and a box or the console keeps its
+  own`). The URL field, on the first screen and in the dialog, is the one
+  box that does both. When the question carries `links`, `paste_links`
+  answers it by its id with the first link and queues the rest behind it,
+  in one call: the page answering after a second round trip sent the link to
+  whichever question was open by then, and the link `add_behind` had taken
+  out was lost. A paste of fewer than two goes in at the caret on one line,
+  read after the wait so nothing typed meanwhile is lost (`several links
+  pasted at the URL field go to the shell with the question's id, which
+  answers it`, `one link pasted at the URL field goes in at the caret, on
+  one line`). The "paste several to queue them" hint is the page's, drawn
+  when `links` is set, not the worker's note. `Added::said` is the flash in
+  both front ends. Checked in the running app: three links pasted on the
+  library, and three pasted into the `n` dialog, each synced three folders
+  with one finish menu.
+- **The queue screen's link fields keep their keys, and the shell says what
+  each one did.** `queueKey` runs before the general guard on a focused
+  input, so without its own guard an `x` typed into a field took a link off
+  the queue, and a `,` anywhere opened the settings (`a link field keeps its
+  letters, and n on the queue focuses the last field`). The fields go to
+  `enqueue_fields` in one call; `queue::field_problems` gives each field's
+  reason from the same `links` a paste goes through, so the page keeps only
+  the refused fields, with the reason, and decides nothing about what a link
+  is (`each_field_says_why_it_would_queue_nothing`, `the link fields go to
+  the shell together, and only those it refused stay, with why`). Checked in
+  the running app: two links and a word typed into three fields synced both
+  links with one finish menu, and the word's field stayed with its reason.
+- **The empty-queue question is App's, not the queue screen's.** A queued
+  link starting moves the page to the track list, which took the question
+  away with the screen while its keys stayed live, and the next Enter
+  emptied the queue (`the empty-queue question keeps its keys on whatever
+  screen is up`). The queue's keys stand aside for a pick gate, and its
+  cursor is clamped to the rows there are, since the worker takes links
+  while the screen is up (`the queue's keys stand aside for a pick gate`,
+  `x takes the last row after the queue shrank under the cursor`).

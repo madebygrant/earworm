@@ -32,7 +32,8 @@ its details and actions in a sheet on the right and the keys along the bottom](d
 
 Download the `.dmg`, AppImage or `.deb` from the
 [latest release](https://github.com/madebygrant/earworm/releases/latest), or
-build it from a clone with `scripts/install-desktop.sh`. The Mac app isn't
+build it from a clone with `scripts/install.sh`, which installs the
+terminal app too if you ask. The Mac app isn't
 signed, so macOS stops it once on first launch.
 [Here's how to get past that](docs/install.md#first-launch-on-macos). The
 [desktop guide](docs/gui.md) goes through it screen by screen.
@@ -79,9 +80,10 @@ yt-dlp gets you audio files. earworm turns them into a music library.
 
 ## How a run goes
 
-1. Give earworm a link.
+1. Give earworm a link, or paste several and it queues them.
 2. It lists the playlist and asks which tracks you want. Enter takes them
-   all, and `space` and `/` pick out the rest. You'll want this the first
+   all, and `space` and `/` pick out the rest. Queued links skip this and
+   download whole. You'll want this the first
    time a playlist turns out to be 361 tracks of seminar recordings.
 3. It downloads, identifies, tags, adds art, names the files and writes the
    `.m3u8`.

@@ -464,6 +464,14 @@
         "file": "/music/Krautrock/01 - Neu! - Hallogallo.opus",
         "thumb": null
       }
+    },
+    {
+      "Queue": {
+        "links": [
+          "https://www.youtube.com/playlist?list=PL1"
+        ],
+        "rev": 3
+      }
     }
   ],
   "statuses": [

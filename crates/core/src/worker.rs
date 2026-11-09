@@ -15,6 +15,7 @@ use crate::config::{self, Config, composed, decomposed};
 use crate::custom;
 use crate::export;
 use crate::import;
+use crate::queue;
 use crate::lookup;
 use crate::manifest;
 use crate::player;
@@ -24,9 +25,10 @@ use crate::ytdlp;
 
 pub fn run(mut cfg: Config, tx: Sender<Msg>, cancel: Arc<AtomicBool>, stop: Arc<AtomicBool>, cmds: Receiver<Cmd>) {
     let mut tracks = Vec::new();
-    let result = match ask_start(&mut cfg, &tx) {
-        Start::Playlist => pipeline(&cfg, &tx, &cancel, &mut tracks, Pass::plain(cfg.pick)),
-        Start::Resync(saved) => resync(&mut cfg, &tx, &cancel, &mut tracks, saved),
+    let earlier = match ask_start(&mut cfg, &tx) {
+        Start::Playlist => Some(pipeline(&cfg, &tx, &cancel, &mut tracks, Pass::plain(cfg.pick))),
+        Start::Resync(saved) => Some(resync(&mut cfg, &tx, &cancel, &mut tracks, saved)),
+        Start::Queue => None,
         /* Nothing has been synced and nothing has failed, so there is no
            outcome to report: the library screen is the whole answer. */
         Start::Library(shelves) => {
@@ -45,6 +47,16 @@ pub fn run(mut cfg: Config, tx: Sender<Msg>, cancel: Arc<AtomicBool>, stop: Arc<
             return;
         }
     };
+    // `None` when nothing ran: quitting came first, or the queue was emptied before its first link.
+    let Some(result) = drain(&mut cfg, &tx, &cancel, &mut tracks, earlier, &mut queued_run) else {
+        if cancel.load(Ordering::SeqCst) {
+            let _ = tx.send(Msg::Quit);
+            return;
+        }
+        let _ = tx.send(Msg::Library { shelves: library_all(&cfg.dir), show: true });
+        serve(&mut cfg, &tx, &mut tracks, cmds, &cancel, &stop);
+        return;
+    };
     if finish(&mut cfg, &tx, &cancel, &mut tracks, result) {
         serve(&mut cfg, &tx, &mut tracks, cmds, &cancel, &stop);
     }
@@ -52,6 +64,8 @@ pub fn run(mut cfg: Config, tx: Sender<Msg>, cancel: Arc<AtomicBool>, stop: Arc<
 
 enum Start {
     Playlist,
+    /// Links already in `cfg.queue`: several from the command line, or a saved queue taken up again.
+    Queue,
     /// Carries the folders it found, so the answer is not looked up twice.
     Resync(Vec<Shelf>),
     Library(Vec<Shelf>),
@@ -62,11 +76,27 @@ enum Start {
    question: its rows are the playlists the URL question was going to be
    about, and one of them can be opened without downloading anything. */
 fn ask_start(cfg: &mut Config, tx: &Sender<Msg>) -> Start {
+    let asked = !cfg.url.is_empty() || !cfg.queued.is_empty() || cfg.import.is_some() || cfg.resync;
+    // One at a time, so an argument that is no link at all, which pasted text passes over, is still named.
+    let mut queued = false;
+    for arg in std::mem::take(&mut cfg.queued) {
+        let added = enqueue(cfg, tx, &arg);
+        queued |= added.added > 0;
+        if added.added + added.repeats + added.rejected.len() == 0 {
+            let _ = tx.send(Msg::Log(format!("{arg}: not a YouTube link")));
+        }
+    }
+    // After this run's own links, which come first. Asked, never started on its own, since a queue left a
+    // week ago is not necessarily still wanted; and not on `--resync`, which nobody is there to answer.
+    let resumed = !cfg.resync && offer_saved_queue(cfg, tx);
+    if queued || (resumed && !asked) {
+        return Start::Queue;
+    }
     // A file that will not import lands at the prompt with its path typed, saying why.
     if let Some(path) = cfg.import.take() {
         let link = settle(&path, &cfg.unlocked).ok().or_else(|| {
             let _ = tx.send(Msg::Stage("waiting for a playlist URL".into()));
-            prompt_url(tx, Escape::Quit, &cfg.unlocked, &path)
+            prompt_url(tx, Escape::Quit, &cfg.unlocked, &path, true)
         });
         return match link {
             Some(link) => {
@@ -84,7 +114,7 @@ fn ask_start(cfg: &mut Config, tx: &Sender<Msg>) -> Start {
         }
         let _ = tx.send(Msg::Stage("waiting for a playlist URL".into()));
         let typed = cfg.url.clone();
-        return match prompt_url(tx, Escape::Quit, &cfg.unlocked, &typed) {
+        return match prompt_url(tx, Escape::Quit, &cfg.unlocked, &typed, true) {
             Some(link) => {
                 link.adopt(cfg, tx);
                 Start::Playlist
@@ -101,7 +131,7 @@ fn ask_start(cfg: &mut Config, tx: &Sender<Msg>) -> Start {
     }
 
     let _ = tx.send(Msg::Stage("waiting for a playlist URL".into()));
-    match prompt_url(tx, Escape::Quit, &cfg.unlocked, "") {
+    match prompt_url(tx, Escape::Quit, &cfg.unlocked, "", true) {
         Some(link) => {
             link.adopt(cfg, tx);
             /* The only format question before the first download: the run
@@ -123,7 +153,8 @@ fn ask_start(cfg: &mut Config, tx: &Sender<Msg>) -> Start {
    handing back the text means fixing it instead of retyping it. `None` is a
    cancel, and `escape` is what the caller does with one: only the very first
    question has nothing to go back to. */
-fn prompt_url(tx: &Sender<Msg>, escape: Escape, unlocked: &Unlocked, typed: &str) -> Option<Link> {
+/// `links` is whether a paste of several links may queue the rest, which an attach must not: one folder, one playlist.
+fn prompt_url(tx: &Sender<Msg>, escape: Escape, unlocked: &Unlocked, typed: &str, links: bool) -> Option<Link> {
     let asker = Asker {
         tx: tx.clone(),
         enabled: true,
@@ -141,7 +172,7 @@ fn prompt_url(tx: &Sender<Msg>, escape: Escape, unlocked: &Unlocked, typed: &str
         _ => "a playlist, a video or a file of links",
     };
     loop {
-        let answer = asker.input_noted(&header, note, &typed, escape)?;
+        let answer = if links { asker.input_link(&header, note, &typed, escape) } else { asker.input_noted(&header, note, &typed, escape) }?;
         // Asked of the answer, not the opening: the console can unlock mid-prompt.
         match settle(&answer, unlocked) {
             Ok(link) => return Some(link),
@@ -158,18 +189,172 @@ struct Link {
     url: String,
     name: Option<String>,
     ids: Vec<String>,
+    /// An imported file's playlist links, queued to follow this one. Each gets yt-dlp's folder, never the heading's.
+    more: Vec<String>,
 }
 
 impl Link {
     fn plain(url: String) -> Link {
-        Link { url, name: None, ids: Vec::new() }
+        Link { url, name: None, ids: Vec::new(), more: Vec::new() }
     }
 
     // Sets the folder either way: a plain link must not write into the last run's.
     fn adopt(self, cfg: &mut Config, tx: &Sender<Msg>) {
+        enqueue(cfg, tx, &self.more.join("\n"));
         cfg.folder = self.name.map(|name| import_folder(&cfg.dir, name, &self.url, &self.ids, tx));
         cfg.url = self.url;
     }
+}
+
+/// Queues the links in `text` and logs what it refused.
+fn enqueue(cfg: &Config, tx: &Sender<Msg>, text: &str) -> queue::Added {
+    let (added, msg) = cfg.queue.add(text, &cfg.unlocked);
+    if let Some(msg) = msg {
+        let _ = tx.send(msg);
+    }
+    for refused in &added.rejected {
+        let _ = tx.send(Msg::Log(format!("{}: {}", refused.text, refused.why)));
+    }
+    added
+}
+
+/// The links a closed session left behind, offered back. True when they were queued again. Esc leaves the
+/// file for the next start, since closing a question is not an answer to it.
+fn offer_saved_queue(cfg: &Config, tx: &Sender<Msg>) -> bool {
+    let saved = queue::saved(&cfg.dir);
+    if saved.is_empty() {
+        return false;
+    }
+    let asker = Asker { tx: tx.clone(), enabled: true };
+    let n = saved.len();
+    let plural = if n == 1 { "link was" } else { "links were" };
+    let options = vec![format!("download {}", if n == 1 { "it" } else { "them" }), "forget them".to_string()];
+    match asker.choose_noted(&format!("{n} queued {plural} left when earworm last closed"), &saved.join("\n"), options) {
+        Some(0) => {
+            let added = enqueue(cfg, tx, &saved.join("\n"));
+            // Unlocked last session and not this one: kept for a start with the console's code, not dropped.
+            let locked: Vec<String> = added.rejected.iter().filter(|r| r.why == LOCKED).map(|r| r.text.clone()).collect();
+            cfg.queue.keep(&locked);
+            added.added > 0
+        }
+        Some(_) => {
+            queue::forget(&cfg.dir);
+            false
+        }
+        // Closing the question is not an answer to it: the links ride along in this session's saves.
+        None => {
+            cfg.queue.keep(&saved);
+            false
+        }
+    }
+}
+
+/// One queued link's run: unattended, as `--resync` is, so a long queue is not stopped by a question
+/// per link. No pick gate and no format question, whatever `pick` says.
+fn queued_run(cfg: &mut Config, tx: &Sender<Msg>, cancel: &AtomicBool, tracks: &mut Vec<Track>) -> Result<String> {
+    pipeline(cfg, tx, cancel, tracks, Pass::plain(false))
+}
+
+type Step<'a> = dyn FnMut(&mut Config, &Sender<Msg>, &AtomicBool, &mut Vec<Track>) -> Result<String> + 'a;
+
+// A failed save costs only the resume, so it is logged and the downloads carry on.
+fn save_queue(cfg: &Config, tx: &Sender<Msg>) {
+    if let Err(err) = cfg.queue.save(&cfg.dir) {
+        let _ = tx.send(Msg::Log(format!("could not keep the queue for next time: {err}")));
+    }
+}
+
+/// What a walk of several playlists counts for its one summary: `resync`'s and the queue's.
+#[derive(Default)]
+struct Tally {
+    ran: usize,
+    failed: usize,
+    listed: usize,
+}
+
+impl Tally {
+    // One dead playlist should not cost the rest, so a failure is logged and counted rather than returned.
+    fn record(&mut self, tx: &Sender<Msg>, name: &str, tracks: &[Track], result: Result<String>) {
+        self.ran += 1;
+        let said = match result {
+            Ok(summary) => {
+                self.listed += tracks.iter().filter(|t| t.listed).count();
+                summary
+            }
+            Err(err) => {
+                self.failed += 1;
+                err.to_string()
+            }
+        };
+        let _ = tx.send(Msg::Log(format!("{name}: {said}")));
+    }
+
+    fn worked(&self) -> usize {
+        self.ran - self.failed
+    }
+}
+
+/// Runs whatever is queued after `earlier`, the run that just ended if there was one, so `finish` asks
+/// once for the lot. Waiting links are left queued when quitting stops it. `None` when nothing ran at all.
+fn drain(
+    cfg: &mut Config,
+    tx: &Sender<Msg>,
+    cancel: &AtomicBool,
+    tracks: &mut Vec<Track>,
+    earlier: Option<Result<String>>,
+    step: &mut Step,
+) -> Option<Result<String>> {
+    // The URL prompt's link, which `add_behind` marked running, has finished unless quitting stopped it.
+    if !cancel.load(Ordering::SeqCst) {
+        cfg.queue.done();
+    }
+    if cfg.queue.is_empty() || cancel.load(Ordering::SeqCst) {
+        return earlier;
+    }
+    if cfg.pick {
+        let _ = tx.send(Msg::Log("queued links skip the pick gate".into()));
+    }
+    let mut tally = Tally::default();
+    while !cancel.load(Ordering::SeqCst) {
+        let Some((url, msg)) = cfg.queue.pop() else { break };
+        let _ = tx.send(msg);
+        save_queue(cfg, tx);
+        let _ = tx.send(Msg::Restart);
+        tracks.clear();
+        Link::plain(url.clone()).adopt(cfg, tx);
+        let result = step(cfg, tx, cancel, tracks);
+        // Stopped short by quitting, it stays the running link and is saved first for the next start. Judged by
+        // the tracks, not by `cancel` alone, which a quit can set a moment after the link finished.
+        let finished = !tracks.is_empty() && tracks.iter().all(|t| t.status.settled() && t.status != Status::Failed);
+        if !cancel.load(Ordering::SeqCst) || (result.is_ok() && finished) {
+            cfg.queue.done();
+        }
+        let folder = folder_of(tracks).and_then(|f| f.file_name().map(|n| n.to_string_lossy().into_owned()));
+        tally.record(tx, folder.as_deref().unwrap_or(&url), tracks, result);
+    }
+    save_queue(cfg, tx);
+    // A front end emptied it between the check above and the first pop.
+    if tally.ran == 0 {
+        return earlier;
+    }
+
+    let plural = if tally.ran == 1 { "link" } else { "links" };
+    let mut queued = format!("{} of {} {plural}, {} tracks", tally.worked(), tally.ran, tally.listed);
+    // The menu after this sees only the last link's tracks, so the log is where the rest are.
+    if tally.failed > 0 {
+        queued = format!("{queued}  ·  {} failed  ·  l has which", tally.failed);
+    } else if tally.ran > 1 || earlier.is_some() {
+        queued = format!("{queued}  ·  l has each");
+    }
+    // Failed only when nothing worked, so the exit status still says whether anything was downloaded.
+    let worked = tally.worked() > 0 || earlier.as_ref().is_some_and(|r| r.is_ok());
+    // The run before keeps its own words: a resync's count of playlists is not one link.
+    let summary = match earlier {
+        None => queued,
+        Some(Ok(before)) => format!("{before}  ·  queue: {queued}"),
+        Some(Err(err)) => format!("failed: {err}  ·  queue: {queued}"),
+    };
+    Some(if worked { Ok(summary) } else { Err(anyhow::anyhow!(summary)) })
 }
 
 // Any other same-named folder would be taken over: its `#url` and `.m3u8` rewritten and every
@@ -195,11 +380,8 @@ fn import_folder(dir: &Path, name: String, url: &str, ids: &[String], tx: &Sende
 
 /// A link, or a markdown file of links, or the prompt header that says why not.
 fn settle(answer: &str, unlocked: &Unlocked) -> Result<Link, String> {
-    if let Some(url) = youtube_url(answer) {
-        if locked(&url, unlocked) {
-            return Err(LOCKED.into());
-        }
-        return Ok(Link::plain(url));
+    if let Some(url) = settle_url(answer, unlocked) {
+        return url.map(Link::plain).map_err(String::from);
     }
     if answer.trim().is_empty() {
         return Err("Paste a YouTube link".into());
@@ -208,7 +390,21 @@ fn settle(answer: &str, unlocked: &Unlocked) -> Result<Link, String> {
     if found.music && !unlocked.has(Feature::Music) {
         return Err(LOCKED.into());
     }
-    Ok(Link { url: found.url(), name: found.name, ids: found.ids })
+    // A file of playlists only has no queue link of its own, so its first open playlist leads. The rest,
+    // locked ones included, go to the queue, which refuses those on its own and says so.
+    if found.ids.is_empty() {
+        let mut lists = found.lists;
+        let lead = lists.iter().position(|l| matches!(settle_url(l, unlocked), Some(Ok(_)))).ok_or(LOCKED)?;
+        let first = lists.remove(lead);
+        return Ok(Link { more: lists, ..Link::plain(first) });
+    }
+    Ok(Link { url: found.url(), name: found.name, ids: found.ids, more: found.lists })
+}
+
+/// The link half of `settle`, which `queue` shares: `None` when the answer is not a link at all.
+pub(crate) fn settle_url(answer: &str, unlocked: &Unlocked) -> Option<Result<String, &'static str>> {
+    let url = youtube_url(answer)?;
+    Some(if locked(&url, unlocked) { Err(LOCKED) } else { Ok(url) })
 }
 
 pub(crate) const HOSTS: [&str; 5] = [
@@ -370,14 +566,17 @@ fn finish(
             Some(Answer::Another) => {
                 // Cancelling the URL question goes back here, not out, and
                 // leaves the last run's outcome exactly as it was.
-                let Some(link) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "") else {
+                let Some(link) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "", true) else {
                     continue;
                 };
                 let _ = tx.send(Msg::Restart);
                 tracks.clear();
                 link.adopt(cfg, tx);
                 let gate = cfg.pick;
-                result = pipeline(cfg, tx, cancel, tracks, Pass::plain(gate)).map_err(|e| e.to_string());
+                let ran = pipeline(cfg, tx, cancel, tracks, Pass::plain(gate));
+                if let Some(ran) = drain(cfg, tx, cancel, tracks, Some(ran), &mut queued_run) {
+                    result = ran.map_err(|e| e.to_string());
+                }
             }
             /* Closes the menu like Keep does: the answer is on the list
                behind it, and nothing more is being asked of the worker. */
@@ -855,8 +1054,7 @@ fn resync(
         );
     }
 
-    let mut synced = 0;
-    let mut listed = 0;
+    let mut tally = Tally::default();
     let mut skipped = 0;
     for (n, shelf) in found.iter().enumerate() {
         if cancel.load(Ordering::SeqCst) {
@@ -882,20 +1080,11 @@ fn resync(
         cfg.url = url;
         cfg.folder = manifest::load(&shelf.path).name;
 
-        match pipeline(cfg, tx, cancel, tracks, Pass::plain(false)) {
-            Ok(summary) => {
-                synced += 1;
-                listed += tracks.iter().filter(|t| t.listed).count();
-                let _ = tx.send(Msg::Log(format!("{name}: {summary}")));
-            }
-            // One dead playlist should not cost the rest of the library.
-            Err(err) => {
-                let _ = tx.send(Msg::Log(format!("{name}: {err}")));
-            }
-        }
+        let result = pipeline(cfg, tx, cancel, tracks, Pass::plain(false));
+        tally.record(tx, name, tracks, result);
     }
 
-    let mut summary = format!("{synced} of {} playlists, {listed} tracks", found.len());
+    let mut summary = format!("{} of {} playlists, {} tracks", tally.worked(), found.len(), tally.listed);
     if skipped > 0 {
         let word = if skipped == 1 { "folder has" } else { "folders have" };
         summary = format!("{summary}  ·  {skipped} {word} no URL  ·  l has which");
@@ -3210,7 +3399,16 @@ fn serve(
         }
         let cmd = match cmds.recv_timeout(PROBE) {
             Ok(cmd) => cmd,
-            // Only the far end hanging up ends the loop; a timeout re-checks.
+            // Only the far end hanging up ends the loop; a timeout re-checks, and starts what was queued meanwhile.
+            // No `Idle` after it: none of this answers a command, and an `Idle` would clear the `busy` of one
+            // sent meanwhile that has not run yet.
+            Err(mpsc::RecvTimeoutError::Timeout) if !cfg.queue.is_empty() => {
+                known = None;
+                if !wrap_up(cfg, tx, cancel, tracks, None) {
+                    return;
+                }
+                continue;
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => continue,
             Err(mpsc::RecvTimeoutError::Disconnected) => return,
         };
@@ -3437,23 +3635,29 @@ fn serve(
                 None
             }
         };
-        if index_use == IndexUse::DropAfter {
+        // Links queued during the command download next, and they change tags as any sync does.
+        if index_use == IndexUse::DropAfter || !cfg.queue.is_empty() {
             known = None;
         }
-
-        if let Some(result) = synced {
-            // Counts and sync times have moved, so the library screen is stale.
-            let _ = tx.send(Msg::Library {
-                shelves: library_all(&cfg.dir),
-                show: false,
-            });
-            if !finish(cfg, tx, cancel, tracks, result) {
-                return;
-            }
+        if !wrap_up(cfg, tx, cancel, tracks, synced) {
+            return;
         }
         // Last, so the keys stay dead until everything above has landed.
         let _ = tx.send(Msg::Idle);
     }
+}
+
+/// Runs what is queued behind `synced`, then asks `finish` once if anything ran. False when the answer was to quit.
+fn wrap_up(cfg: &mut Config, tx: &Sender<Msg>, cancel: &AtomicBool, tracks: &mut Vec<Track>, synced: Option<Result<String>>) -> bool {
+    let Some(result) = drain(cfg, tx, cancel, tracks, synced, &mut queued_run) else {
+        return true;
+    };
+    // Counts and sync times have moved, so the library screen is stale.
+    let _ = tx.send(Msg::Library {
+        shelves: library_all(&cfg.dir),
+        show: false,
+    });
+    finish(cfg, tx, cancel, tracks, result)
 }
 
 // A custom playlist's row carries its file as the path, and these commands treat a path as a directory to move or delete.
@@ -3528,7 +3732,7 @@ fn start_url(
     tracks: &mut Vec<Track>,
     asker: &Asker,
 ) -> Option<Result<String>> {
-    let Some(link) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "") else {
+    let Some(link) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "", true) else {
         let _ = tx.send(Msg::Flash("cancelled".into()));
         return None;
     };
@@ -3752,11 +3956,12 @@ fn sync_open(
     let folder = folder_of(tracks).context("no folder is open to sync")?;
     if attaching {
         let name = folder.file_name().unwrap_or_default().to_string_lossy().to_string();
-        let Some(link) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "") else {
+        let Some(link) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "", false) else {
             bail!("cancelled  ·  nothing was downloaded");
         };
         // The folder being attached is the one named below, whatever an imported file calls itself.
-        Link { name: None, ..link }.adopt(cfg, tx);
+        // One folder, one playlist: an imported file's other playlists are not queued behind an attach.
+        Link { name: None, more: Vec::new(), ..link }.adopt(cfg, tx);
         /* Before the run, because `output_template` reads it: without it the
            download writes the whole playlist into a second folder named after
            the playlist upstream and leaves this one sitting beside it. */
@@ -5176,7 +5381,7 @@ pub mod tests {
     #[test]
     fn a_locked_link_off_the_command_line_waits_at_the_prompt() {
         let link = "https://music.youtube.com/playlist?list=PL1";
-        let mut cfg = config(true);
+        let mut cfg = queue_config("ask-1");
         cfg.url = link.into();
         let (tx, rx) = channel();
         std::thread::scope(|scope| {
@@ -5226,7 +5431,7 @@ pub mod tests {
         let unlocked = Unlocked::default();
         let (tx, rx) = channel();
         std::thread::scope(|scope| {
-            let worker = scope.spawn(|| prompt_url(&tx, Escape::Keep, &unlocked, ""));
+            let worker = scope.spawn(|| prompt_url(&tx, Escape::Keep, &unlocked, "", true));
             let mut headers = Vec::new();
             for answer in ["~/no/such/mix.md", dragged.as_str()] {
                 while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
@@ -5314,7 +5519,7 @@ pub mod tests {
         let (tx, rx) = channel();
         std::thread::scope(|scope| {
             // Typed already, as a link off the command line arrives.
-            let worker = scope.spawn(|| prompt_url(&tx, Escape::Quit, &unlocked, link));
+            let worker = scope.spawn(|| prompt_url(&tx, Escape::Quit, &unlocked, link, true));
             let mut asked = Vec::new();
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
                 let Msg::Ask { id: reply, prompt: crate::protocol::Prompt::Input { header, value, .. } } = msg else {
@@ -5799,6 +6004,285 @@ pub mod tests {
                 "a failed run was reported as {outcome:?}, so the exit status is 0"
             );
         }
+    }
+
+    const QA: &str = "https://www.youtube.com/playlist?list=PLa";
+    const QB: &str = "https://www.youtube.com/playlist?list=PLb";
+
+    // Its own folder, since a drain saves the queue there and `config`'s empty dir would mean the working one.
+    fn queue_config(tag: &str) -> Config {
+        let mut cfg = config(true);
+        cfg.dir = scratch(tag);
+        cfg
+    }
+
+    fn queued(cfg: &Config, links: &[&str]) {
+        let (added, _) = cfg.queue.add(&links.join("\n"), &cfg.unlocked);
+        assert_eq!(added.added, links.len());
+    }
+
+    // A dead link must not cost the ones behind it, and the menu that ends a run is asked once for the lot.
+    #[test]
+    fn a_queue_runs_past_a_failure_and_finish_asks_once() {
+        let (tx, rx) = mpsc::channel();
+        let cancel = AtomicBool::new(false);
+        let mut cfg = queue_config("drain-1");
+        let mut tracks = Vec::new();
+        queued(&cfg, &[QA, QB]);
+        let mut ran = Vec::new();
+        let mut step = |cfg: &mut Config, _: &Sender<Msg>, _: &AtomicBool, _: &mut Vec<Track>| {
+            ran.push(cfg.url.clone());
+            if cfg.url == QA { Err(anyhow::anyhow!("private playlist")) } else { Ok("3 tracks".to_string()) }
+        };
+
+        let (asks, dones) = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                let result = drain(&mut cfg, &tx, &cancel, &mut tracks, None, &mut step).expect("nothing ran");
+                finish(&mut cfg, &tx, &cancel, &mut tracks, result)
+            });
+            let (mut asks, mut dones) = (0, Vec::new());
+            while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
+                match msg {
+                    Msg::Done { result, .. } => dones.push(result),
+                    // Esc on the menu keeps it open and ends `finish`.
+                    Msg::Ask { id, .. } => {
+                        asks += 1;
+                        assert!(crate::protocol::answer(id, Reply::Cancel));
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(worker.join().unwrap(), "Esc on the menu ended the session");
+            (asks, dones)
+        });
+
+        assert_eq!(ran, [QA, QB], "the link behind the failure did not run");
+        assert_eq!((asks, dones.len()), (1, 1), "the menu was not asked exactly once");
+        assert_eq!(dones[0], Ok("1 of 2 links, 0 tracks  ·  1 failed  ·  l has which".to_string()));
+        assert!(cfg.queue.is_empty());
+    }
+
+    #[test]
+    fn a_queue_where_nothing_worked_is_a_failure() {
+        let (tx, _rx) = mpsc::channel();
+        let mut cfg = queue_config("drain-2");
+        queued(&cfg, &[QA]);
+        let mut step = |_: &mut Config, _: &Sender<Msg>, _: &AtomicBool, _: &mut Vec<Track>| Err(anyhow::anyhow!("gone"));
+        let result = drain(&mut cfg, &tx, &AtomicBool::new(false), &mut Vec::new(), None, &mut step).unwrap();
+        assert!(result.is_err(), "the exit status would say something downloaded");
+    }
+
+    // The run that just ended keeps its own words, since a resync is not one link, and with nothing queued
+    // it comes back untouched.
+    #[test]
+    fn the_run_before_the_queue_is_one_of_its_links() {
+        let (tx, _rx) = mpsc::channel();
+        let cancel = AtomicBool::new(false);
+        let mut cfg = queue_config("drain-3");
+        let mut step = |_: &mut Config, _: &Sender<Msg>, _: &AtomicBool, _: &mut Vec<Track>| -> Result<String> { panic!("ran with nothing queued") };
+        let alone = drain(&mut cfg, &tx, &cancel, &mut Vec::new(), Some(Ok("12 tracks".into())), &mut step);
+        assert_eq!(alone.unwrap().unwrap(), "12 tracks");
+        assert!(drain(&mut cfg, &tx, &cancel, &mut Vec::new(), None, &mut step).is_none());
+
+        queued(&cfg, &[QA]);
+        let mut step = |_: &mut Config, _: &Sender<Msg>, _: &AtomicBool, _: &mut Vec<Track>| Ok("ok".to_string());
+        let both = drain(&mut cfg, &tx, &cancel, &mut Vec::new(), Some(Ok("6 of 7 playlists, 400 tracks".into())), &mut step);
+        assert_eq!(both.unwrap().unwrap(), "6 of 7 playlists, 400 tracks  ·  queue: 1 of 1 link, 0 tracks  ·  l has each");
+    }
+
+    #[test]
+    fn quitting_mid_queue_leaves_the_rest_waiting() {
+        let (tx, _rx) = mpsc::channel();
+        let cancel = AtomicBool::new(false);
+        let mut cfg = queue_config("drain-4");
+        queued(&cfg, &[QA, QB]);
+        let mut step = |_: &mut Config, _: &Sender<Msg>, cancel: &AtomicBool, _: &mut Vec<Track>| {
+            cancel.store(true, Ordering::SeqCst);
+            Ok("ok".to_string())
+        };
+        drain(&mut cfg, &tx, &cancel, &mut Vec::new(), None, &mut step);
+        assert_eq!(cfg.queue.links(), [QB]);
+        // The link quitting cut short is saved ahead of the one that never started.
+        assert_eq!(queue::saved(&cfg.dir), [QA, QB]);
+    }
+
+    // Each link writes into its own folder: one left set by an import's heading would pull them all into it.
+    #[test]
+    fn each_queued_link_clears_the_last_runs_folder() {
+        let (tx, _rx) = mpsc::channel();
+        let mut cfg = queue_config("drain-5");
+        cfg.folder = Some("Night drive".into());
+        queued(&cfg, &[QA]);
+        let mut folder = Some(Some(String::new()));
+        let mut step = |cfg: &mut Config, _: &Sender<Msg>, _: &AtomicBool, _: &mut Vec<Track>| {
+            folder = Some(cfg.folder.clone());
+            Ok("ok".to_string())
+        };
+        drain(&mut cfg, &tx, &AtomicBool::new(false), &mut Vec::new(), None, &mut step);
+        assert_eq!(folder, Some(None));
+    }
+
+    // A queue left at quitting is asked about, never started on its own, and is the start when nothing else was asked for.
+    #[test]
+    fn a_saved_queue_is_offered_back_and_resumed_on_yes() {
+        let (tx, rx) = mpsc::channel();
+        let mut cfg = queue_config("resume");
+        std::fs::write(cfg.dir.join(".queue"), format!("{QA}\n{QB}\n")).unwrap();
+        let start = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| ask_start(&mut cfg, &tx));
+            loop {
+                if let Msg::Ask { id, prompt: crate::protocol::Prompt::Choice { header, .. } } = rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+                    assert!(header.starts_with("2 queued links"), "{header}");
+                    assert!(crate::protocol::answer(id, Reply::Choice(0)));
+                    break;
+                }
+            }
+            worker.join().unwrap()
+        });
+        assert!(matches!(start, Start::Queue));
+        assert_eq!(cfg.queue.links(), [QA, QB]);
+    }
+
+    #[test]
+    fn a_saved_queue_forgotten_is_gone_and_one_left_open_stays() {
+        let (tx, rx) = mpsc::channel();
+        let cfg = queue_config("forget");
+        let file = cfg.dir.join(".queue");
+        for (reply, kept) in [(Reply::Cancel, true), (Reply::Choice(1), false)] {
+            std::fs::write(&file, format!("{QA}\n")).unwrap();
+            let resumed = std::thread::scope(|scope| {
+                let worker = scope.spawn(|| offer_saved_queue(&cfg, &tx));
+                loop {
+                    if let Msg::Ask { id, .. } = rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+                        assert!(crate::protocol::answer(id, reply.clone()));
+                        break;
+                    }
+                }
+                worker.join().unwrap()
+            });
+            assert!(!resumed);
+            assert_eq!(file.exists(), kept, "{reply:?}");
+            assert!(cfg.queue.is_empty());
+            // Esc's links ride along: a link queued and run later this session, and the saves it makes as
+            // it is taken and when the queue runs dry, keep them.
+            if kept {
+                cfg.queue.add(QB, &cfg.unlocked);
+                cfg.queue.pop();
+                cfg.queue.done();
+                cfg.queue.save(&cfg.dir).unwrap();
+                assert_eq!(queue::saved(&cfg.dir), [QA], "Esc on the offer lost the saved queue");
+            }
+        }
+    }
+
+    // Unattended, so nobody is there to answer; and this run's own links go ahead of the ones saved.
+    #[test]
+    fn a_resync_is_not_asked_and_this_runs_links_come_before_the_saved_ones() {
+        let (tx, rx) = mpsc::channel();
+        let mut cfg = queue_config("resync-offer");
+        std::fs::write(cfg.dir.join(".queue"), format!("{QB}\n")).unwrap();
+        cfg.resync = true;
+        assert!(matches!(ask_start(&mut cfg, &tx), Start::Resync(_)));
+        assert!(!rx.try_iter().any(|m| matches!(m, Msg::Ask { .. })), "--resync stopped at a question");
+
+        cfg.resync = false;
+        cfg.queued = vec![QA.into()];
+        let start = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| ask_start(&mut cfg, &tx));
+            loop {
+                if let Msg::Ask { id, .. } = rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+                    assert!(crate::protocol::answer(id, Reply::Choice(0)));
+                    break;
+                }
+            }
+            worker.join().unwrap()
+        });
+        assert!(matches!(start, Start::Queue));
+        assert_eq!(cfg.queue.links(), [QA, QB]);
+    }
+
+    // The console's unlock is a session's, so a music link saved unlocked is kept rather than dropped.
+    #[test]
+    fn a_saved_link_this_session_has_locked_is_kept_for_later() {
+        const MUSIC: &str = "https://music.youtube.com/playlist?list=OLAK5uy_x";
+        let (tx, rx) = mpsc::channel();
+        let cfg = queue_config("locked-resume");
+        std::fs::write(cfg.dir.join(".queue"), format!("{MUSIC}\n{QA}\n")).unwrap();
+        let resumed = std::thread::scope(|scope| {
+            let worker = scope.spawn(|| offer_saved_queue(&cfg, &tx));
+            loop {
+                if let Msg::Ask { id, .. } = rx.recv_timeout(Duration::from_secs(5)).unwrap() {
+                    assert!(crate::protocol::answer(id, Reply::Choice(0)));
+                    break;
+                }
+            }
+            worker.join().unwrap()
+        });
+        assert!(resumed);
+        assert_eq!(cfg.queue.links(), [QA]);
+        cfg.queue.save(&cfg.dir).unwrap();
+        assert_eq!(queue::saved(&cfg.dir), [QA, MUSIC]);
+    }
+
+    #[test]
+    fn several_urls_on_the_command_line_start_a_queue_and_name_what_they_refused() {
+        let (tx, rx) = mpsc::channel();
+        let mut cfg = queue_config("ask-2");
+        cfg.queued = vec![QA.into(), "junk".into(), QB.into()];
+        assert!(matches!(ask_start(&mut cfg, &tx), Start::Queue));
+        assert_eq!(cfg.queue.links(), [QA, QB]);
+        drop(tx);
+        let logs: Vec<String> = rx.into_iter().filter_map(|m| if let Msg::Log(l) = m { Some(l) } else { None }).collect();
+        assert_eq!(logs, ["junk: not a YouTube link"]);
+    }
+
+    // The videos stay one queue link under the heading's folder; each playlist follows on its own.
+    #[test]
+    fn an_import_queues_its_playlists_behind_its_videos() {
+        let dir = scratch("import-lists");
+        let file = dir.join("mix.md");
+        std::fs::write(&file, format!("# Mix\nhttps://youtu.be/dQw4w9WgXcQ\n{QA}\n{QB}\n")).unwrap();
+        let link = settle(&file.display().to_string(), &Unlocked::default()).unwrap();
+        assert_eq!(link.ids, ["dQw4w9WgXcQ"]);
+        assert_eq!(link.more, [QA, QB]);
+
+        let (tx, _rx) = mpsc::channel();
+        let mut cfg = config(true);
+        cfg.dir = dir.clone();
+        link.adopt(&mut cfg, &tx);
+        assert_eq!(cfg.folder.as_deref(), Some("Mix"));
+        assert_eq!(cfg.queue.links(), [QA, QB]);
+
+        std::fs::write(&file, format!("{QA}\n{QB}\n")).unwrap();
+        let link = settle(&file.display().to_string(), &Unlocked::default()).unwrap();
+        assert_eq!((link.url.as_str(), link.name, link.more), (QA, None, vec![QB.to_string()]));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // A locked playlist costs only itself: the videos still import, and the queue refuses it by name.
+    #[test]
+    fn a_locked_playlist_in_an_import_is_refused_alone() {
+        const MUSIC: &str = "https://music.youtube.com/playlist?list=OLAK5uy_x";
+        let dir = scratch("import-locked");
+        let file = dir.join("mix.md");
+        std::fs::write(&file, format!("https://youtu.be/dQw4w9WgXcQ\n{MUSIC}\n")).unwrap();
+        let link = settle(&file.display().to_string(), &Unlocked::default()).expect("the videos were locked out with it");
+        let (tx, rx) = mpsc::channel();
+        let mut cfg = config(true);
+        cfg.dir = dir.clone();
+        link.adopt(&mut cfg, &tx);
+        assert!(cfg.queue.is_empty());
+        drop(tx);
+        assert!(rx.into_iter().any(|m| matches!(&m, Msg::Log(l) if l == &format!("{MUSIC}: {LOCKED}"))));
+
+        // With only playlists, the first one open leads, and all locked is the prompt's locked answer.
+        std::fs::write(&file, format!("{MUSIC}\n{QA}\n")).unwrap();
+        let link = settle(&file.display().to_string(), &Unlocked::default()).unwrap();
+        assert_eq!((link.url.as_str(), link.more), (QA, vec![MUSIC.to_string()]));
+        std::fs::write(&file, format!("{MUSIC}\n")).unwrap();
+        assert_eq!(settle(&file.display().to_string(), &Unlocked::default()), Err(LOCKED.to_string()));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /* Attaching a URL to a folder earworm did not download runs a matching
@@ -6390,7 +6874,7 @@ pub mod tests {
        asks nothing at all. */
     #[test]
     fn a_url_from_the_command_line_skips_the_first_questions() {
-        let mut cfg = config(true);
+        let mut cfg = queue_config("ask-3");
         cfg.url = "https://www.youtube.com/playlist?list=PL1".into();
         let (tx, rx) = mpsc::channel();
         assert!(matches!(ask_start(&mut cfg, &tx), Start::Playlist));
@@ -8674,6 +9158,7 @@ pub mod tests {
     pub fn config(rename: bool) -> Config {
         Config {
             url: String::new(),
+            queued: Vec::new(),
             dir: PathBuf::new(),
             theme: crate::theme::Palette::default(),
             icons: crate::icons::Icons::Text,
@@ -8710,6 +9195,7 @@ pub mod tests {
             tools: Default::default(),
             acoustid_key: None,
             unlocked: Default::default(),
+            queue: Default::default(),
             sources: Default::default(),
         }
     }

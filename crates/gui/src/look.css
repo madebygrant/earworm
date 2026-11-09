@@ -397,3 +397,24 @@ main.app.no-detail { grid-template-columns: minmax(0, 1fr); }
 .look .toolbar .go { display: none; padding: 7px 16px; border-radius: 999px; font-weight: 700; background: var(--accent); color: var(--ink); }
 .look .toolbar .go.plain { background: none; color: var(--text); border: 1px solid var(--line); }
 @media (max-width: 1100px) { .look .toolbar .go { display: inline-flex; gap: 8px; align-items: center; } }
+
+/* The queue: its Clear button shows at every width, unlike the pick gate's, which the sheet has when wide. */
+.look .toolbar .clear, .look .dialog .acts button { display: inline-flex; gap: 8px; align-items: center; padding: 7px 16px; border-radius: 999px; font-weight: 700; background: none; color: var(--text); border: 1px solid var(--line); }
+.look .dialog .acts { display: flex; gap: 10px; }
+.look .dialog .acts .yes { background: var(--accent); color: var(--ink); border: none; }
+.look td .unqueue { padding: 4px; border-radius: 8px; background: none; color: var(--muted); border: none; }
+.look td .unqueue:hover { color: var(--text); background: var(--card2); }
+/* The queue's link fields, over the list of what waits. */
+.look .adder { flex: none; display: flex; flex-direction: column; gap: 8px; margin-bottom: 16px; max-width: 760px; }
+.look .adder .field { display: flex; align-items: center; gap: 10px; padding: 8px 10px 8px 14px; background: var(--card); border: 1px solid var(--line); border-radius: 12px; color: var(--muted); }
+.look .adder .field:focus-within { border-color: var(--accent); }
+.look .adder .field.bad { border-color: var(--error); }
+.look .adder input { flex: 1; min-width: 0; outline: none; font: 600 15px var(--font); color: var(--text); caret-color: var(--accent); }
+.look .adder input::placeholder { color: var(--muted); font-weight: 500; }
+.look .adder .drop { padding: 4px; border-radius: 8px; color: var(--muted); }
+.look .adder .drop:hover { color: var(--text); background: var(--card2); }
+.look .adder .why { margin: -2px 0 2px 14px; color: var(--error); font-size: 13px; font-weight: 600; }
+.look .adder .acts { display: flex; gap: 10px; }
+.look .adder .acts button { display: inline-flex; gap: 8px; align-items: center; padding: 7px 16px; border-radius: 999px; font-weight: 700; color: var(--text); border: 1px solid var(--line); }
+.look .adder .acts .yes { margin-left: auto; background: var(--accent); color: var(--ink); border: none; }
+.look .adder .acts .yes:disabled { opacity: .45; cursor: default; }

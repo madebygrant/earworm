@@ -9,7 +9,7 @@ import type {
 import { variant } from "./protocol";
 import { runStats } from "./run";
 
-export type View = "Tracks" | "Library" | "Found" | "Playlist" | "Pick" | "Artists" | "Artist" | "Settings";
+export type View = "Tracks" | "Library" | "Found" | "Playlist" | "Pick" | "Artists" | "Artist" | "Settings" | "Queue";
 
 export interface Page {
   name: string;
@@ -81,6 +81,9 @@ export interface State {
   /** Bumped when a cover changed under a track, so anything showing one reloads it. */
   artwork: number;
   quit: boolean;
+  /** The links waiting for the worker, and the `rev` of the message that said so. */
+  queue: string[];
+  queueRev: number;
 }
 
 export type Effect =
@@ -135,6 +138,8 @@ export function initial(statuses: Word[] = []): State {
     thumbsAsked: [],
     artwork: 0,
     quit: false,
+    queue: [],
+    queueRev: 0,
   };
 }
 
@@ -324,6 +329,9 @@ const handlers: Handlers = {
   Artwork: (s) => ({ ...s, artwork: s.artwork + 1, thumbs: {}, thumbsAsked: [] }),
   Quit: (s) => ({ ...s, quit: true }),
   Thumb: (s, { file, thumb }) => ({ ...s, thumbs: { ...s.thumbs, [file]: thumb } }),
+  // The worker and the shell both send it, so two can cross; the higher `rev` is the newer list. A replay
+  // ends on the latest for the same reason, whatever order the history holds them in.
+  Queue: (s, { rev, links }) => (rev > s.queueRev ? { ...s, queue: links, queueRev: rev } : s),
 };
 
 /** Every message the reducer knows, for the test that holds it to the recorded ones. */

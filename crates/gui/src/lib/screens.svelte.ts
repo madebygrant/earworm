@@ -8,6 +8,7 @@ import { app, flash } from "./store.svelte";
 import { say, send, ui } from "./ui.svelte";
 
 export type Section = "Releases" | "Top" | "Related";
+export type Field = { text: string; why: string | null };
 
 export const screens = $state({
   help: false,
@@ -56,6 +57,14 @@ export const screens = $state({
   relatedAsked: false,
   settingsAt: 0,
   settingsBack: "Library" as View,
+  // The queue's cursor, as a position, and the screen `Q` was pressed on, which Esc goes back to.
+  queueAt: 0,
+  queueBack: "Library" as View,
+  // `X` asks before it empties the queue.
+  clearing: false,
+  // The queue screen's link fields, each with why it queued nothing; `focusField` asks the screen to focus one.
+  fields: [{ text: "", why: null }] as Field[],
+  focusField: null as number | null,
   // The achievements on show and when they went up, then those waiting for a calm screen.
   toast: null as { prizes: Prize[]; at: number } | null,
   waiting: [] as Prize[],
@@ -407,6 +416,99 @@ export async function artistFolders() {
 }
 
 // ---- settings (`,`)
+
+// ---- the queue (`Q`)
+
+export function openQueue() {
+  if (m().view === "Queue") return;
+  screens.queueBack = m().view;
+  screens.queueAt = 0;
+  go("Queue");
+}
+
+export function leaveQueue() {
+  go(screens.queueBack);
+}
+
+// The cursor on a row that is there: the queue shrinks under it as the worker takes links.
+export function queueCursor(): number {
+  return Math.min(screens.queueAt, Math.max(0, m().queue.length - 1));
+}
+
+export function queueMove(by: number | "first" | "last") {
+  const at = step(m().queue.map((_, i) => i), queueCursor(), by);
+  if (at !== undefined) screens.queueAt = at;
+}
+
+// By the link under the cursor, which the shell removes only if it is still waiting.
+export async function unqueue(link = m().queue[queueCursor()]) {
+  if (link === undefined) return say("nothing queued");
+  if (!(await invoke<boolean>("unqueue", { link }))) say("already started");
+}
+
+export async function clearQueue() {
+  screens.clearing = false;
+  say((await invoke<boolean>("clear_queue")) ? "queue cleared" : "nothing queued");
+}
+
+/** Queues the links in a paste and says what became of them. `lead` is the URL prompt's own answer. */
+export async function enqueue(text: string, lead: string | null = null) {
+  say(await invoke<string>("enqueue", { text, lead }));
+}
+
+export function addField(at = screens.fields.length - 1, text = "") {
+  screens.fields.splice(at + 1, 0, { text, why: null });
+  screens.focusField = at + 1;
+}
+
+// The form keeps one empty field rather than none.
+export function dropField(at: number) {
+  screens.fields.splice(at, 1);
+  if (!screens.fields.length) screens.fields.push({ text: "", why: null });
+  screens.focusField = Math.max(0, at - 1);
+}
+
+// The fields that queued go; the rest stay with the shell's reason under each. A field edited or added while
+// the shell answered is left as it is, so nothing typed meanwhile is lost.
+export async function queueFields() {
+  const sent = screens.fields.filter((f) => f.text.trim());
+  if (!sent.length) return say("type a link first");
+  const typed = sent.map((f) => f.text.trim());
+  const { said, problems } = await invoke<{ said: string; problems: (string | null)[] }>("enqueue_fields", { fields: typed });
+  say(said);
+  const outcome = new Map(sent.map((f, i) => [f, { text: typed[i], why: problems[i] ?? null }]));
+  const left = screens.fields.flatMap((f) => {
+    const was = outcome.get(f);
+    if (!was || f.text.trim() !== was.text) return f.text.trim() ? [f] : [];
+    return was.why ? [was] : [];
+  });
+  screens.fields = left.length ? left : [{ text: "", why: null }];
+  // A queued link can move the page to the track list first, and a request left waiting would take the keys
+  // the next time the queue opens.
+  if (m().view === "Queue") screens.focusField = 0;
+}
+
+// The URL prompt's paste: several links answer it with the first and queue the rest, as in the terminal.
+// The shell answers the question by its id, so an Enter that lands first is not answered twice. Its reply
+// comes too late to let the browser paste, so a paste of one goes in at the caret by hand, read after the
+// wait so nothing typed meanwhile is lost, through `set`. `answered` is the box's own bookkeeping.
+export async function pasteLinks(e: ClipboardEvent, set: (value: string) => void, answered: () => void = () => {}) {
+  const open = m().prompt;
+  if (!open || !("Input" in open.prompt) || !open.prompt.Input.links) return;
+  const box = e.currentTarget as HTMLInputElement;
+  const text = e.clipboardData?.getData("text") ?? "";
+  e.preventDefault();
+  const { lead, said } = await invoke<{ lead: string | null; said: string | null }>("paste_links", { text, id: open.id });
+  if (lead !== null) {
+    if (m().prompt?.id === open.id) app.model = { ...app.model, prompt: null };
+    answered();
+    if (said) say(said);
+    return;
+  }
+  if (m().prompt?.id !== open.id) return;
+  const [from, to] = [box.selectionStart ?? box.value.length, box.selectionEnd ?? box.value.length];
+  set(box.value.slice(0, from) + text.split(/\s+/).join(" ").trim() + box.value.slice(to));
+}
 
 export function openSettings() {
   if (m().view === "Settings") return;

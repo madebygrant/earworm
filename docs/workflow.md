@@ -5,6 +5,7 @@
 ```sh
 earworm                                  # asks for a URL
 earworm 'https://youtube.com/playlist?list=...'
+earworm URL URL URL                      # several, one after another
 earworm URL --dir ~/Music/new
 earworm URL --no-pick                    # don't stop to choose, fetch it all
 earworm URL --format flac                # m4a by default
@@ -31,13 +32,40 @@ The prompt also takes the path to a markdown file of YouTube links, which is
 what `--import` reads. Dragging the file into the terminal pastes its path.
 Every `watch?v=`, `youtu.be` and `watch_videos` link in it becomes one
 playlist, in the order the links first appear, and the folder is named after
-the file's `#` heading. `shorts/` and `live/` links count too. The download
+the file's `#` heading. `shorts/` and `live/` links count too. A
+`playlist?list=` link in the file is its own download instead, named by
+YouTube like any other playlist and queued behind the videos. A file of
+playlists only has no videos to lead with, so its first playlist runs as the
+import does, pick gate and all, and the rest are queued behind it. The download
 goes through YouTube's queue link, which holds 50 videos, so a file with more
 is refused rather than cut short. Run the same file again, or an edited copy
 with the same heading that still shares a track with it, and it syncs that
 folder. Any other folder of that name is left alone, and the import goes into
-`Name (2)` instead. A file with `music.youtube.com` links is locked like the links
-themselves.
+`Name (2)` instead. A file with `music.youtube.com` video links is locked like
+the links themselves; a locked playlist link in it is refused on its own.
+
+## Several links at once
+
+Paste several links and earworm queues them, then downloads them one after
+another. A paste works on any screen. At the link prompt it answers with the
+first link and queues the rest behind it; in a filter or a tag form it is
+typed as text. Words and list bullets around the links are skipped, so a
+list copied out of a note works; anything that looks like a link but isn't a
+YouTube one is refused and named in the log. The same playlist pasted twice
+(with or without `www.`, `&si=` and the like) is queued once.
+
+Queued links run the way `--resync` does: no pick gate and no format
+question for each one, a failed link logged and passed over, and one finish
+menu at the end with the count for the lot. The header shows how many are
+waiting, and `Q` opens the queue, where `x` takes a link off and `X` empties
+it. Several URLs on the command line start a queue too.
+
+`q` with links waiting asks first; the finish menu's quit row doesn't, since
+choosing it is already the answer. Either way what was left, starting with
+the link it was in the middle of, is saved in `.queue` in the music folder,
+and the next start asks whether to download it. Esc on that question leaves
+the links for the start after. Links pasted while the finish menu is open
+wait for it to be answered.
 
 ## When a run finishes
 

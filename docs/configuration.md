@@ -44,6 +44,9 @@ ffmpeg = "~/bin/ffmpeg"
 
 ## Flags
 
+`earworm URL` downloads one playlist; `earworm URL URL ...` queues them all
+and downloads them one after another, without the pick gate.
+
 | Flag | Effect |
 | --- | --- |
 | `-d`, `--dir` | output directory (default `~/Music`) |
@@ -65,7 +68,7 @@ ffmpeg = "~/bin/ffmpeg"
 | `--no-notify` | don't ring the bell when a long run finishes |
 | `--no-update-check` | never ask GitHub about a newer release |
 | `--no-achievements` | no achievement popups, and no file of earned ones |
-| `--import FILE` | download the YouTube links in a markdown file as one playlist |
+| `--import FILE` | download the YouTube video links in a markdown file as one playlist; playlist links in it are queued after ([details](workflow.md#running-it)) |
 | `--resync` | sync every playlist already under `--dir` |
 | `--list` | print the playlists already under `--dir` and exit |
 | `--check` | check the tools, the key and the config, then exit |

@@ -21,6 +21,16 @@ const tracks = (...statuses: Track["status"][]): Track[] =>
   statuses.map((status, i) => ({ ...(sample("Tracks") as { Tracks: Track[] }).Tracks[0], index: i + 1, status }));
 
 describe("the reducer", () => {
+  // The worker's pops and the shell's edits both send it, and a reload replays them all: the highest rev wins.
+  it("keeps the newest queue whatever order its messages arrive in", () => {
+    const q = (rev: number, ...links: string[]): Msg => ({ Queue: { rev, links } });
+    let s = run(initial(statuses), q(1, "a"), q(3, "c"), q(2, "a", "b"));
+    expect(s.queue).toEqual(["c"]);
+    expect(s.queueRev).toBe(3);
+    s = run(s, q(4));
+    expect(s.queue).toEqual([]);
+  });
+
   it("handles every message the worker sends and no message it does not", () => {
     expect([...new Set(msgs.map(variant))].sort()).toEqual(VARIANTS);
   });

@@ -33,6 +33,18 @@ Drop the `--tag` to build from the newest code instead, and see
 [releases](https://github.com/madebygrant/earworm/releases) for the current
 version.
 
+### From a clone
+
+```sh
+scripts/install.sh
+```
+
+It asks whether to install the terminal app, the [desktop
+app](#the-desktop-app) or both, checks for what the build needs, and builds
+with a progress line, keeping the output in a log it shows you if a step
+fails. `--cli`, `--desktop` or `--both` skip the question, and `--dry-run`
+says what it would run.
+
 ## The desktop app
 
 Each [release](https://github.com/madebygrant/earworm/releases) has a `.dmg`

@@ -99,3 +99,50 @@
 - **A bulk action clears the marks with `Msg::Unmark` on completion,** not when
   the key is pressed, and only when something was written. Clearing on dispatch
   throws away a twenty-track selection the moment someone escapes the prompt.
+- **The download queue is the one piece of state both threads change.** The
+  worker reads no commands during a run, which is when somebody pastes the
+  next batch, so `queue::Queue` is shared like `cancel` and `stop` rather than
+  fed by a `Cmd`. It holds no sender: a front end holding the queue would keep
+  the worker's channel open after a panic, and the disconnect check above
+  would never fire. Each change returns the `Msg::Queue` for its caller to
+  send, and since either thread can send one, two can arrive out of order, so
+  a front end keeps the highest `rev`
+  (`every_change_says_so_with_a_higher_rev_and_nothing_else_does`). A link
+  is removed by its text, not its row, because the worker can pop the head
+  between the draw and the key (`a_remove_after_the_head_was_taken_leaves_the_rest`).
+  Repeats are matched on the video or list id, and the link running now is
+  one (`one_download_spelt_several_ways_is_queued_once`,
+  `the_running_link_is_a_repeat_until_it_is_done`).
+- **The queue is kept in `.queue` beside the playlist folders, and written
+  by the worker and on the way out, never on every change.** Changes come
+  from the UI thread, and the worker owns the file writes, so the worker
+  saves as it takes a link and when the queue runs dry, and each front end
+  saves once its render loop has ended. A link added and lost to a crash
+  before either is the cost. `Queue::save` holds its own lock, since the two
+  can meet at quit and `write_atomically` has one temp file per process.
+- **A session writes `.queue` only once it has loaded or changed the queue.**
+  Saving an empty queue removes the file, so a session that never touched it
+  would wipe what the last one left, at its exit or at the first link it ran.
+  Links set aside by Esc on the offer, or refused because this session has
+  not unlocked YouTube Music, are kept and ride along in every save
+  (`an_untouched_queue_leaves_the_file_and_kept_links_ride_along`,
+  `a_saved_queue_forgotten_is_gone_and_one_left_open_stays`,
+  `a_saved_link_this_session_has_locked_is_kept_for_later`). Two front ends
+  open on one folder that both touch the queue still overwrite each other:
+  the last to save wins.
+- **What quitting stopped short is saved first.** A queued link stays the
+  running one unless its tracks all settled, so a quit landing just after it
+  finished does not offer it again; the URL prompt's own link counts as
+  running too, through `add_behind`, until its run ends
+  (`quitting_mid_queue_leaves_the_rest_waiting`,
+  `what_is_left_is_saved_with_the_running_link_first_and_nothing_left_removes_the_file`,
+  `the_prompts_lead_counts_as_running_until_done`). A run with nothing
+  queued behind it leaves no file.
+- **The next start asks before downloading any of it,** since a queue left a
+  week ago is not necessarily still wanted, and asks after queueing this
+  run's own links, which go first. `--resync` is never asked: nobody is
+  there to answer (`a_saved_queue_is_offered_back_and_resumed_on_yes`,
+  `a_resync_is_not_asked_and_this_runs_links_come_before_the_saved_ones`).
+  The drain and `ask_start` tests run in their own folders, because
+  `config`'s empty `dir` would read and save `.queue` in the working
+  directory.

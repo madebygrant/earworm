@@ -549,6 +549,10 @@ pub enum Prompt {
         /// The answer is a path, so a front end with the system's file dialog can offer it.
         #[serde(default)]
         browse: Option<Browse>,
+        /// The answer is a link, so a paste of several answers with the first and queues the rest. Only the URL
+        /// prompt: a paste of links into a rename would otherwise name a folder after one.
+        #[serde(default)]
+        links: bool,
     },
 }
 
@@ -737,6 +741,9 @@ pub enum Msg {
         #[serde(serialize_with = "lossy::opt_path")]
         thumb: Option<PathBuf>,
     },
+    /// The links waiting, in the order the worker takes them. Both threads change the queue and either
+    /// can send this, so two can arrive out of order: a front end keeps the highest `rev` and drops the rest.
+    Queue { rev: u64, links: Vec<String> },
 }
 
 // Paths in a message go out as text, lossily: serde_json refuses a path that is not UTF-8, which on
@@ -914,17 +921,20 @@ impl Asker {
         self.prompt(header, note, value, escape, None)
     }
 
+    /// The URL prompt, which takes a paste of several links. See `Prompt::Input::links`.
+    pub fn input_link(&self, header: &str, note: &str, value: &str, escape: Escape) -> Option<String> {
+        self.ask_input(Prompt::Input { header: header.into(), note: note.into(), value: value.into(), escape, browse: None, links: true })
+    }
+
     fn prompt(&self, header: &str, note: &str, value: &str, escape: Escape, browse: Option<Browse>) -> Option<String> {
+        self.ask_input(Prompt::Input { header: header.into(), note: note.into(), value: value.into(), escape, browse, links: false })
+    }
+
+    fn ask_input(&self, prompt: Prompt) -> Option<String> {
         if !self.enabled {
             return None;
         }
-        match self.ask(Prompt::Input {
-            header: header.into(),
-            note: note.into(),
-            value: value.into(),
-            escape,
-            browse,
-        }) {
+        match self.ask(prompt) {
             Reply::Text(t) => Some(t.trim().to_string()),
             _ => None,
         }
@@ -1266,6 +1276,7 @@ pub mod test_support {
             Msg::Artwork,
             Msg::Quit,
             Msg::Thumb { file: p(), thumb: None },
+            Msg::Queue { rev: 3, links: vec!["https://www.youtube.com/playlist?list=PL1".into()] },
         ]
     }
 

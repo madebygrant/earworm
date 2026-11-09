@@ -48,6 +48,7 @@ export async function handleKey(e: KeyboardEvent) {
   if (app.model.prompt) return;
   if (ui.quitting) return quitKey(e);
   if (screens.discard) return discardKey(e);
+  if (screens.clearing) return clearingKey(e);
   // The sheet swallows the key that closes it, or closing it would be a guess about what the key also did.
   if (screens.help && e.key !== "q") {
     e.preventDefault();
@@ -58,12 +59,15 @@ export async function handleKey(e: KeyboardEvent) {
   if (view === "Settings") return settingsKey(e);
   // Never where it would be a typed comma: a query box or the picker.
   // Not over the pick gate, which the worker is blocked on and which would stay drawn over the settings.
-  if (e.key === "," && !ui.typing && !screens.artistTyping && view !== "Pick" && app.model.picking === null) {
+  const boxed = e.target instanceof HTMLInputElement;
+  if (e.key === "," && !ui.typing && !screens.artistTyping && !boxed && view !== "Pick" && app.model.picking === null) {
     e.preventDefault();
     return sc.openSettings();
   }
   // Letters type in the picker, so its keys come before every guard on a focused input.
   if (view === "Pick") return pickerKey(e);
+  // Not over the pick gate, which the worker is blocked on: its keys must reach it from any screen.
+  if (view === "Queue" && app.model.picking === null) return queueKey(e);
   if (view === "Artists" && screens.artistTyping) return artistQueryKey(e);
   if (ui.typing) return filterKey(e);
   if (e.ctrlKey && !CTRL.includes(e.key)) return;
@@ -88,7 +92,43 @@ function discardKey(e: KeyboardEvent) {
   else if (e.ctrlKey && e.key === "c") void quit();
 }
 
+// A paste outside a box is links to queue, as in the terminal, over a menu too. A box and the console take
+// their own, and the URL field decides there whether several links are an answer and a queue.
+export function windowPaste(e: ClipboardEvent) {
+  const target = e.target instanceof Element ? e.target : null;
+  if (target?.closest("input, textarea, [contenteditable]") || consoleHooks.isOpen()) return;
+  e.preventDefault();
+  void sc.enqueue(e.clipboardData?.getData("text") ?? "");
+}
+
+// y or Enter empties the queue; never `q`, which here would be a quit reflex emptying it. ^c quits, as on
+// every other question.
+function clearingKey(e: KeyboardEvent) {
+  e.preventDefault();
+  screens.clearing = false;
+  if (["y", "Y", "Enter"].includes(e.key)) void sc.clearQueue();
+  else if (e.ctrlKey && e.key === "c") void quit();
+}
+
 const help = (e: KeyboardEvent) => (e.key === "h" || e.key === "?") && (screens.help = true);
+
+// The links waiting. `x` and Delete take one off, as they take a track off a custom playlist, and `n` is a new
+// link, as on the library: the last link field.
+function queueKey(e: KeyboardEvent) {
+  const k = e.key;
+  // A link field keeps its letters; Queue.svelte handles its Enter and Esc.
+  if (e.target instanceof HTMLInputElement) return;
+  if (listMove(e, sc.queueMove) || help(e)) return;
+  if (k === "q" || (e.ctrlKey && k === "c")) return askQuit();
+  if (k === "Escape" || k === "Q") return sc.leaveQueue();
+  if (k === "l") return void (ui.logs = !ui.logs);
+  if (k === "n") {
+    e.preventDefault();
+    return void (screens.focusField = screens.fields.length - 1);
+  }
+  if (k === "x" || k === "Delete") return void sc.unqueue();
+  if (k === "X") return app.model.queue.length ? void (screens.clearing = true) : say("nothing queued");
+}
 
 // Letters type into the box, so help is F1, the marked view F2 and quitting ^c.
 function pickerKey(e: KeyboardEvent) {
@@ -231,8 +271,9 @@ function quitKey(e: KeyboardEvent) {
   if (["y", "Y", "q", "Enter"].includes(e.key) || (e.ctrlKey && e.key === "c")) void quit();
 }
 
+// Asks while links wait too, since quitting stops them until the next start.
 export function askQuit() {
-  if (working()) ui.quitting = true;
+  if (working() || app.model.queue.length) ui.quitting = true;
   else void quit();
 }
 
@@ -384,6 +425,7 @@ async function trackKey(e: KeyboardEvent) {
   if (k === "q" || (e.ctrlKey && k === "c")) return askQuit();
   if (help(e)) return;
   if (k === "Escape") return escapeTracks();
+  if (k === "Q") return sc.openQueue();
   if (k === "/") {
     e.preventDefault();
     ui.typing = true;
@@ -510,6 +552,8 @@ async function libraryKey(e: KeyboardEvent) {
     say(`showing ${label}`);
   } else if (k === "w") ui.mode = ui.mode === "tiles" ? "list" : "tiles";
   else if (k === "l") ui.logs = !ui.logs;
+  // Ahead of the gate: opening the queue sends nothing, and a long run is when you want to see it.
+  else if (k === "Q") sc.openQueue();
   else if (!canBrowse()) return;
   else if (k === "R") void send("ResyncAll");
   else if (k === "n") void send("Url");

@@ -18,6 +18,7 @@ pub mod player;
 pub mod playlists;
 pub mod portable;
 pub mod protocol;
+pub mod queue;
 pub mod tag;
 pub mod theme;
 pub mod tools;
