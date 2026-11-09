@@ -32,7 +32,8 @@ its details and actions in a sheet on the right and the keys along the bottom](d
 
 Download the `.dmg`, AppImage or `.deb` from the
 [latest release](https://github.com/madebygrant/earworm/releases/latest), or
-build it from a clone with `scripts/install-desktop.sh`. The Mac app isn't
+build it from a clone with `scripts/install.sh`, which installs the
+terminal app too if you ask. The Mac app isn't
 signed, so macOS stops it once on first launch.
 [Here's how to get past that](docs/install.md#first-launch-on-macos). The
 [desktop guide](docs/gui.md) goes through it screen by screen.
