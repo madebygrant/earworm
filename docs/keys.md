@@ -44,6 +44,7 @@ Linux `^c` quits, as it does here.
 | `tab` `^s` | next field, swap artist and title (in the edit form) |
 | `r` | retry every failed track (after the run) |
 | `S` | sync the open playlist, asking for a URL if it has none |
+| `Q` | the queue of links waiting to download |
 | `D` | delete the files of tracks a sync found had left the playlist |
 | `p` | play this playlist in cliamp (only while cliamp is running) |
 | `a` `i` `enter` | all, invert, download (at the pick gate) |
@@ -73,7 +74,8 @@ Linux `^c` quits, as it does here.
 | `space` | play/pause cliamp |
 | `S` | sync the playlist under the cursor (asks for a URL if it has none) |
 | `R` | sync every playlist |
-| `n` | sync a new URL |
+| `n` | sync a new URL, or paste several to queue them |
+| `Q` | the queue of links waiting to download |
 | `N` | make a custom playlist, in the track picker |
 | `E` | export this folder or custom playlist |
 | `^t` | next colour theme, and remember it |
@@ -158,14 +160,37 @@ Letters type into the search, so help is `F1` and quitting is `ctrl+c`.
 
 What each row means is in [configuration](configuration.md#the-settings-screen).
 
+## Queue
+
+`Q` on the library or the track list. Links download in this order, each
+with no pick gate; the one downloading has already left the list.
+
+| Key | Action |
+| --- | --- |
+| `j` `k` `↑` `↓` `g` `G` | move |
+| `^d` `^u` `PgDn` `PgUp` | move by a screenful |
+| `x` `Delete` | take the link off the queue |
+| `X` | empty the queue, after a question (`y` or `enter`) |
+| `l` | toggle the yt-dlp output pane, where refused links are named |
+| `h` `?` | keys and current settings |
+| `Esc` `Q` | back to the screen you came from |
+| `q` `ctrl+c` | quit, asking first while links wait |
+
+A paste on any screen queues the links in it, unless a box has the keys:
+the link prompt answers with the first and queues the rest, and a filter or
+a form takes it as typed text. [Several links at
+once](workflow.md#several-links-at-once) has the rest.
+
 ## The details
 
 `Esc` steps back one level and never ends the session, with one exception:
 on the very first link prompt, with nothing on disk yet, it quits. While a run
-or a command is going it still clears a filter or marks, but it won't leave
-the screen. `q` and `ctrl+c` are the way out. `q` asks before it kills a
+or a command is going, or links are waiting in the queue, it still clears a
+filter or marks, but it won't leave the screen. `q` and `ctrl+c` are the way out. `q` asks before it kills a
 download, since that's the last thing in the tool one keypress can lose. A
-second `q` answers the question, so `qq` never makes you read the box.
+second `q` answers the question, so `qq` never makes you read the box. It
+also asks while links are waiting in the queue, on every screen, since
+quitting stops the queue until the next start offers it back.
 
 ## Statuses
 

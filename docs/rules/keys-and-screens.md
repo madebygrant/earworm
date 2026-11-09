@@ -107,8 +107,8 @@
   which there would be a quit reflex emptying the queue
   (`the_queue_screen_removes_by_link_and_asks_before_emptying`). Waiting
   links count as `working()`, so Esc does not leave a queue between two
-  links and `q` asks first on every screen, since nothing keeps the queue
-  past the session; `^c` still quits outright, the question included
+  links and `q` asks first on every screen, since quitting stops the queue
+  until the next start; `^c` still quits outright, the question included
   (`quitting_with_links_waiting_asks_first`,
   `q_asks_on_every_screen_while_links_wait_and_ctrl_c_still_quits`).
   The paste hint on the URL prompt is the TUI's, drawn when `links` is set,

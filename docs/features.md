@@ -45,6 +45,10 @@ terminal and in the [desktop app](gui.md).
   disk convert on their next sync in whatever way costs the least re-encoding.
   Why some never re-encode at all is [documented](formats.md), because
   the answer surprised me too.
+- **Queue as many links as you like.** Paste a list of playlists, albums and
+  videos on any screen and they download one after another, unattended,
+  with one summary at the end. Quit part-way and the next start offers to
+  pick up where it stopped. [Details](workflow.md#several-links-at-once).
 - **Retries and undos.** `r` re-downloads whatever failed. `u` puts back the
   last tag edit.
 

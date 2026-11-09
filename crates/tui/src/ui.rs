@@ -378,11 +378,11 @@ fn draw_confirm(frame: &mut Frame, app: &App, what: Confirm) {
     let (done, total) = app.progress();
     let n = app.queued.len();
     let links = if n == 1 { "link" } else { "links" };
-    // What it costs, not what it does: "quit?" is already in the title. Nothing keeps the queue past this session.
+    // What it costs, not what it does: "quit?" is already in the title. The queue stops, and `.queue` keeps it.
     let mut lines = if !app.downloading() && n > 0 {
         vec![
             Line::from(Span::styled(format!(" {n} {links} queued"), Style::new().fg(p.text))),
-            Line::from(dim(" leaving now drops them", p)),
+            Line::from(dim(" leaving now stops them until the next start", p)),
         ]
     } else {
         let mut lines = vec![
@@ -390,7 +390,7 @@ fn draw_confirm(frame: &mut Frame, app: &App, what: Confirm) {
             Line::from(dim(" leaving now stops the download", p)),
         ];
         if n > 0 {
-            lines.push(Line::from(dim(format!(" and drops {n} queued {links}"), p)));
+            lines.push(Line::from(dim(format!(" and the {n} queued {links} until the next start"), p)));
         }
         lines
     };
@@ -3011,6 +3011,16 @@ mod tests {
         assert!(header.contains("+2 queued  format opus"), "{header}");
         let header = frame(&mut app, 40, 24).remove(0);
         assert!(!header.contains("queued") && !header.contains('+'), "half a count was drawn: {header}");
+    }
+
+    // `.queue` keeps them for the next start, so the question must not say they are lost.
+    #[test]
+    fn the_quit_question_says_queued_links_wait_for_the_next_start() {
+        let mut app = queued_app();
+        app.confirm = Some(crate::app::Confirm::Quit);
+        let screen = frame(&mut app, 100, 24).join("\n");
+        assert!(screen.contains("2 links queued") && screen.contains("until the next start"), "{screen}");
+        assert!(!screen.contains("drops"), "{screen}");
     }
 
     #[test]

@@ -1593,7 +1593,7 @@ impl App {
     /// predicate for Esc and for `q`, or the two answer the same question
     /// differently and the safe key is safe on a different set of screens.
     /// `running` covers a scan, when the list is still empty, which a queue the worker started by itself
-    /// has before every link. Waiting links count too, since quitting drops them.
+    /// has before every link. Waiting links count too, since quitting stops them until the next start.
     pub fn working(&self) -> bool {
         self.busy || self.running || (self.done.is_none() && !self.tracks.is_empty()) || !self.queued.is_empty()
     }
@@ -1620,7 +1620,7 @@ impl App {
         self.say(added.said());
     }
 
-    /// `q` on a screen with no run of its own: it quits, unless links are waiting, which quitting drops.
+    /// `q` on a screen with no run of its own: it quits, unless links are waiting, which quitting stops.
     pub fn quit_key(&mut self) {
         if self.queued.is_empty() {
             self.quit = true;

@@ -79,9 +79,10 @@ yt-dlp gets you audio files. earworm turns them into a music library.
 
 ## How a run goes
 
-1. Give earworm a link.
+1. Give earworm a link, or paste several and it queues them.
 2. It lists the playlist and asks which tracks you want. Enter takes them
-   all, and `space` and `/` pick out the rest. You'll want this the first
+   all, and `space` and `/` pick out the rest. Queued links skip this and
+   download whole. You'll want this the first
    time a playlist turns out to be 361 tracks of seminar recordings.
 3. It downloads, identifies, tags, adds art, names the files and writes the
    `.m3u8`.

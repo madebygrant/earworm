@@ -263,7 +263,7 @@ function quitKey(e: KeyboardEvent) {
   if (["y", "Y", "q", "Enter"].includes(e.key) || (e.ctrlKey && e.key === "c")) void quit();
 }
 
-// Asks while links wait too, since nothing keeps the queue past the session.
+// Asks while links wait too, since quitting stops them until the next start.
 export function askQuit() {
   if (working() || app.model.queue.length) ui.quitting = true;
   else void quit();
@@ -544,10 +544,11 @@ async function libraryKey(e: KeyboardEvent) {
     say(`showing ${label}`);
   } else if (k === "w") ui.mode = ui.mode === "tiles" ? "list" : "tiles";
   else if (k === "l") ui.logs = !ui.logs;
+  // Ahead of the gate: opening the queue sends nothing, and a long run is when you want to see it.
+  else if (k === "Q") sc.openQueue();
   else if (!canBrowse()) return;
   else if (k === "R") void send("ResyncAll");
   else if (k === "n") void send("Url");
-  else if (k === "Q") sc.openQueue();
   else if (k === "N") void send("NewPlaylist");
   // Like `/`: the box takes the focus before the key's default, which would type the t into it.
   else if (k === "t") e.preventDefault(), void sc.findTracks();

@@ -46,6 +46,13 @@ every other track absent from the listing while it sits in the playlist
 untouched, and yt-dlp exits 0 either way. Open a folder from the library, see
 `gone` rows, and `D` isn't there until you press `S`.
 
+Links still queued when earworm quits go in `.queue` in the music folder, one
+per line, the one it was in the middle of first. The worker writes it as it
+takes each link and each front end writes it on the way out, never on every
+paste, and a session that never touched the queue leaves it alone. It is
+removed once nothing is left, which includes links set aside at the start's
+question with Esc: those stay in it until they are answered.
+
 The album tag gets the playlist name only when the lookup found no real album,
 since the release a track actually came from is the better answer.
 

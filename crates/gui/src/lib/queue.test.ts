@@ -139,3 +139,13 @@ it("a paste outside a box is queued, and a box or the console keeps its own", as
   windowPaste(pasted("https://youtu.be/a", document.body));
   expect(calls).toContainEqual(["enqueue", { text: "https://youtu.be/a", lead: null }]);
 });
+
+// Opening the queue sends no command, so a busy library still opens it, as the terminal's does.
+it("Q opens the queue from a busy library", async () => {
+  const { app } = await import("./store.svelte");
+  const { handleKey } = await import("./keys");
+  app.model = { ...app.model, view: "Library", prompt: null, picking: null, busy: true, queue: ["a"], queueRev: 1 };
+  await handleKey(key("Q"));
+  expect(app.model.view).toBe("Queue");
+  app.model = { ...app.model, busy: false };
+});

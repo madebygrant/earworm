@@ -1159,7 +1159,7 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     match code {
         KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.quit = true,
         KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
-        // Asks only with links waiting, which quitting drops.
+        // Asks only with links waiting, which quitting stops until the next start.
         KeyCode::Char('q') => app.ask_quit(),
         KeyCode::Char('Q') => app.open_queue(),
         // Unwinds the filter first, like it does on the track list.
