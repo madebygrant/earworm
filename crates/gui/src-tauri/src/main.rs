@@ -75,6 +75,8 @@ struct Shell {
     unlocked: Arc<Unlocked>,
     /// Shared with the worker, as `unlocked` is: a paste adds to it while a run is going.
     queue: Arc<earworm_core::queue::Queue>,
+    /// The music folder, where the queue is kept for the next start. `None` when the config did not build.
+    dir: Option<PathBuf>,
     /// The achievement state file and what it holds, or `None` when achievements are off for the session.
     achieved: Mutex<Option<(PathBuf, std::collections::BTreeSet<String>)>>,
     update_check: bool,
@@ -706,6 +708,12 @@ fn shut_down(shell: &Shell) {
     while tag::writing() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
+    // What the page added since the worker last saved, which it does only as it takes a link.
+    if let Some(dir) = &shell.dir
+        && let Err(err) = shell.queue.save(dir)
+    {
+        eprintln!("earworm: the queue could not be kept for next time: {err}");
+    }
 }
 
 // Debug builds with `EARWORM_SESSION` set write the session's messages there on the way out, which is what
@@ -777,6 +785,7 @@ fn main() {
                 overridden: cfg.theme_overridden,
                 unlocked: Arc::clone(&cfg.unlocked),
                 queue: Arc::clone(&cfg.queue),
+                dir: Some(cfg.dir.clone()),
                 // Read once at start, as the terminal does: a file that cannot be read turns the feature off.
                 achieved: Mutex::new(
                     cfg.achievements
@@ -844,6 +853,7 @@ impl Shell {
             overridden: false,
             unlocked: Arc::new(Unlocked::default()),
             queue: Arc::default(),
+            dir: None,
             achieved: Mutex::new(None),
             update_check: false,
             told: AtomicBool::new(false),

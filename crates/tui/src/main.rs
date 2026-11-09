@@ -56,6 +56,7 @@ fn main() -> Result<()> {
     let config_file = cfg.config_file.clone();
     let unlocked = Arc::clone(&cfg.unlocked);
     let queue = Arc::clone(&cfg.queue);
+    let dir = cfg.dir.clone();
     /* Read before the terminal is taken, like the config. No usable home, or a
        file that exists and cannot be read, turns the feature off for the
        session: announcements that cannot be recorded would only repeat. */
@@ -143,8 +144,13 @@ fn main() -> Result<()> {
     while tag::writing() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
+    // Out here, where the render loop has ended: a UI thread writing on every paste is what the worker is for.
+    let kept = app.downloads.save(&dir);
     let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
+    if let Err(err) = kept {
+        eprintln!("earworm: the queue could not be kept for next time: {err}");
+    }
     /* Left as it was found, near enough: a tab still reading "earworm · Focus
        · 12/40" an hour after the run is a lie the shell would otherwise have
        to notice. Most prompts set their own on the next line anyway. */

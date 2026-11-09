@@ -2,11 +2,30 @@
 //! reads no commands during a run, which is exactly when somebody pastes the next batch.
 
 use std::collections::{HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
 use crate::cheats::Unlocked;
 use crate::protocol::Msg;
 use crate::worker::{settle_url, split_url};
+
+// Beside the playlist folders, like `.artists`: a dotfile, so the library walk never lists it.
+const FILE: &str = ".queue";
+
+fn file(dir: &Path) -> PathBuf {
+    dir.join(FILE)
+}
+
+/// The links left when earworm last closed, the one it was downloading first.
+pub fn saved(dir: &Path) -> Vec<String> {
+    let text = std::fs::read_to_string(file(dir)).unwrap_or_default();
+    text.lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
+}
+
+/// Drops the file, for a start whose answer was not to resume.
+pub fn forget(dir: &Path) {
+    let _ = std::fs::remove_file(file(dir));
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Rejected {
@@ -80,6 +99,11 @@ struct State {
     links: VecDeque<String>,
     running: Option<String>,
     rev: u64,
+    /// Saved links set aside this session, by an Esc on the offer or a lock, carried into every save.
+    kept: Vec<String>,
+    /// This session loaded or changed the queue. Until it has, a save leaves the file alone: it is the last
+    /// session's, or another front end's open on the same folder.
+    touched: bool,
 }
 
 /// Each change returns the `Msg::Queue` its caller sends. The queue holds no sender of its own: a front
@@ -88,6 +112,8 @@ struct State {
 #[derive(Default)]
 pub struct Queue {
     state: Mutex<State>,
+    // The worker's save and a front end's exit save can meet, and `write_atomically` has one temp file per process.
+    saving: Mutex<()>,
 }
 
 impl Queue {
@@ -101,6 +127,11 @@ impl Queue {
         let (found, rejected) = links(text, unlocked);
         let mut added = Added { rejected, ..Added::default() };
         let msg = self.change(|state| {
+            // The prompt runs it now, so a quit before it finishes saves it first, as a queued link would be.
+            if let Some(lead) = lead {
+                state.running = Some(lead.to_string());
+                state.touched = true;
+            }
             let lead = lead.map(key);
             let before = state.links.len();
             state.links.retain(|l| Some(key(l)) != lead);
@@ -139,6 +170,13 @@ impl Queue {
         self.lock().running = None;
     }
 
+    /// Sets saved links aside without queueing them, so the next save keeps them for the start after.
+    pub fn keep(&self, links: &[String]) {
+        let mut state = self.lock();
+        state.kept.extend(links.iter().cloned());
+        state.touched = true;
+    }
+
     // By the link, not its row: the worker can pop the head between a front end drawing the list and the
     // key that removes from it, and a stale row number would take the next link instead.
     pub fn remove(&self, link: &str) -> Option<Msg> {
@@ -164,11 +202,31 @@ impl Queue {
         self.lock().links.is_empty()
     }
 
+    /// Writes what is left for the next start, the link running now first, since quitting stops it short.
+    /// Nothing left removes the file. Called by the worker as it takes links and by a front end on its way
+    /// out, never on every change: those come from a UI thread, and the worker owns the file writes.
+    pub fn save(&self, dir: &Path) -> anyhow::Result<()> {
+        let _one = self.saving.lock().unwrap_or_else(|e| e.into_inner());
+        let left: Vec<String> = {
+            let state = self.lock();
+            if !state.touched {
+                return Ok(());
+            }
+            state.running.iter().chain(&state.links).chain(&state.kept).cloned().collect()
+        };
+        if left.is_empty() {
+            forget(dir);
+            return Ok(());
+        }
+        crate::config::write_atomically(&file(dir), &(left.join("\n") + "\n"))
+    }
+
     fn change(&self, edit: impl FnOnce(&mut State) -> bool) -> Option<Msg> {
         let mut state = self.lock();
         if !edit(&mut state) {
             return None;
         }
+        state.touched = true;
         state.rev += 1;
         Some(Msg::Queue { rev: state.rev, links: state.links.iter().cloned().collect() })
     }
@@ -284,6 +342,57 @@ mod tests {
         assert_eq!((added.added, added.repeats), (1, 1), "the lead itself counted as a repeat");
         assert_eq!(queue.links(), [A, "https://youtu.be/ccccccccccc"]);
         assert_eq!(said(msg).1, queue.links());
+    }
+
+    // The URL prompt runs its link outside the queue, so quitting during it must still save it, first.
+    #[test]
+    fn the_prompts_lead_counts_as_running_until_done() {
+        let dir = std::env::temp_dir().join(format!("earworm-queue-lead-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let queue = Queue::default();
+        queue.add_behind(Some(A), &format!("{A} {B}"), &Unlocked::default());
+        queue.save(&dir).unwrap();
+        assert_eq!(saved(&dir), [A, B]);
+        queue.done();
+        queue.save(&dir).unwrap();
+        assert_eq!(saved(&dir), [B]);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    // A session that never loaded or changed the queue must not wipe the file the last one left.
+    #[test]
+    fn an_untouched_queue_leaves_the_file_and_kept_links_ride_along() {
+        let dir = std::env::temp_dir().join(format!("earworm-queue-keep-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(file(&dir), format!("{A}\n")).unwrap();
+        Queue::default().save(&dir).unwrap();
+        assert_eq!(saved(&dir), [A], "an untouched session deleted the saved queue");
+
+        let queue = Queue::default();
+        queue.keep(&[A.to_string()]);
+        queue.add(B, &Unlocked::default());
+        queue.pop();
+        queue.done();
+        queue.save(&dir).unwrap();
+        assert_eq!(saved(&dir), [A], "the kept link was lost when the session's own queue ran dry");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn what_is_left_is_saved_with_the_running_link_first_and_nothing_left_removes_the_file() {
+        let dir = std::env::temp_dir().join(format!("earworm-queue-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let queue = Queue::default();
+        queue.add(&format!("{A} {B}"), &Unlocked::default());
+        queue.pop();
+        queue.save(&dir).unwrap();
+        assert_eq!(saved(&dir), [A, B], "the link cut short by quitting was not kept");
+        queue.done();
+        queue.clear();
+        queue.save(&dir).unwrap();
+        assert!(!file(&dir).exists());
+        assert!(saved(&dir).is_empty());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     // The worker popping the head between a front end drawing [A, B] and the user removing A must not cost B.

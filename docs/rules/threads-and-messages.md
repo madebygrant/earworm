@@ -113,3 +113,36 @@
   Repeats are matched on the video or list id, and the link running now is
   one (`one_download_spelt_several_ways_is_queued_once`,
   `the_running_link_is_a_repeat_until_it_is_done`).
+- **The queue is kept in `.queue` beside the playlist folders, and written
+  by the worker and on the way out, never on every change.** Changes come
+  from the UI thread, and the worker owns the file writes, so the worker
+  saves as it takes a link and when the queue runs dry, and each front end
+  saves once its render loop has ended. A link added and lost to a crash
+  before either is the cost. `Queue::save` holds its own lock, since the two
+  can meet at quit and `write_atomically` has one temp file per process.
+- **A session writes `.queue` only once it has loaded or changed the queue.**
+  Saving an empty queue removes the file, so a session that never touched it
+  would wipe what the last one left, at its exit or at the first link it ran.
+  Links set aside by Esc on the offer, or refused because this session has
+  not unlocked YouTube Music, are kept and ride along in every save
+  (`an_untouched_queue_leaves_the_file_and_kept_links_ride_along`,
+  `a_saved_queue_forgotten_is_gone_and_one_left_open_stays`,
+  `a_saved_link_this_session_has_locked_is_kept_for_later`). Two front ends
+  open on one folder that both touch the queue still overwrite each other:
+  the last to save wins.
+- **What quitting stopped short is saved first.** A queued link stays the
+  running one unless its tracks all settled, so a quit landing just after it
+  finished does not offer it again; the URL prompt's own link counts as
+  running too, through `add_behind`, until its run ends
+  (`quitting_mid_queue_leaves_the_rest_waiting`,
+  `what_is_left_is_saved_with_the_running_link_first_and_nothing_left_removes_the_file`,
+  `the_prompts_lead_counts_as_running_until_done`). A run with nothing
+  queued behind it leaves no file.
+- **The next start asks before downloading any of it,** since a queue left a
+  week ago is not necessarily still wanted, and asks after queueing this
+  run's own links, which go first. `--resync` is never asked: nobody is
+  there to answer (`a_saved_queue_is_offered_back_and_resumed_on_yes`,
+  `a_resync_is_not_asked_and_this_runs_links_come_before_the_saved_ones`).
+  The drain and `ask_start` tests run in their own folders, because
+  `config`'s empty `dir` would read and save `.queue` in the working
+  directory.
