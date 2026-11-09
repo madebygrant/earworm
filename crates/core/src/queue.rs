@@ -46,7 +46,7 @@ fn candidate(token: &str) -> Option<&str> {
 
 /// What makes two links the same download: the host without `www.` or `m.`, the route, and only the
 /// `v` and `list` parameters, so `youtu.be/x`, `watch?v=x&si=...` and `WWW.YouTube.com` all match.
-fn key(url: &str) -> String {
+pub(crate) fn key(url: &str) -> String {
     let Some((host, path)) = split_url(url) else { return url.to_string() };
     let (route, query) = path.split_once('?').unwrap_or((path, ""));
     let host = host.trim_start_matches("www.").trim_start_matches("m.");

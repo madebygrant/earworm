@@ -18,8 +18,9 @@ use serde::Deserialize;
     long_about = None
 )]
 pub struct Cli {
-    /// Playlist or video URL. Omit it and earworm asks for one.
-    pub url: Option<String>,
+    /// Playlist or video URLs. Several download one after another, with no
+    /// pick gate. Omit them and earworm asks for one.
+    pub url: Vec<String>,
 
     /// Output directory
     #[arg(short, long, default_value = "~/Music")]
@@ -761,6 +762,8 @@ pub fn config_path() -> PathBuf {
 
 pub struct Config {
     pub url: String,
+    /// The URLs from the command line when there is more than one, for `ask_start` to queue.
+    pub queued: Vec<String>,
     pub dir: PathBuf,
     /// yt-dlp's name for the format, not the extension. See `FORMATS`.
     pub format: String,
@@ -836,6 +839,8 @@ pub struct Config {
     pub theme_overridden: bool,
     /// What the `^z ^x` console has unlocked this session, shared with the UI.
     pub unlocked: std::sync::Arc<crate::cheats::Unlocked>,
+    /// The links waiting for the worker, shared with the UI as `unlocked` is.
+    pub queue: std::sync::Arc<crate::queue::Queue>,
     /// Where each setting the screen lists came from, by key.
     pub sources: BTreeMap<&'static str, Source>,
 }
@@ -949,8 +954,15 @@ impl Config {
         )?;
         let theme_overridden = file.colors.as_ref().is_some_and(|c| !c.is_empty());
 
+        // One URL is the run it always was; several are a queue.
+        let (url, queued) = match &cli.url[..] {
+            [] => (String::new(), Vec::new()),
+            [one] => (one.clone(), Vec::new()),
+            _ => (String::new(), cli.url),
+        };
         Ok(Config {
-            url: cli.url.unwrap_or_default(),
+            url,
+            queued,
             dir: expand(&dir),
             folder: None,
             import: cli.import,
@@ -985,6 +997,7 @@ impl Config {
             theme_warnings,
             theme_overridden,
             unlocked: Default::default(),
+            queue: Default::default(),
             sources,
             // The environment wins, so a key can be swapped for one run.
             acoustid_key: std::env::var("ACOUSTID_API_KEY")
@@ -1080,6 +1093,20 @@ mod tests {
         let mut argv = vec!["earworm".to_string(), "--config".into(), file.path.clone()];
         argv.extend(args.iter().map(|a| a.to_string()));
         run(argv)
+    }
+
+    // One URL keeps the attended run it always had; only several become a queue.
+    #[test]
+    fn one_url_is_a_run_and_several_are_a_queue() {
+        assert!(build("", &[]).url.is_empty());
+        let one = build("", &["https://youtu.be/a"]);
+        assert_eq!((one.url.as_str(), one.queued.len()), ("https://youtu.be/a", 0));
+        let two = build("", &["https://youtu.be/a", "https://youtu.be/b"]);
+        assert_eq!((two.url.as_str(), two.queued), ("", vec!["https://youtu.be/a".to_string(), "https://youtu.be/b".into()]));
+        let argv = |extra: &'static str| ["earworm", "https://youtu.be/a", "https://youtu.be/b", extra];
+        for flag in ["--resync", "--list", "--check"] {
+            assert!(Cli::command().try_get_matches_from(argv(flag)).is_err(), "{flag} took several URLs");
+        }
     }
 
     /* The one setting here that is off unless the file says otherwise, and

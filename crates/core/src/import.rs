@@ -18,6 +18,8 @@ const MAX_NAME: usize = 200;
 pub struct Found {
     pub name: Option<String>,
     pub ids: Vec<String>,
+    /// Playlist links, each queued as its own download after the videos.
+    pub lists: Vec<String>,
     /// Whether any link was a `music.youtube.com` one, which the cheat lock covers.
     pub music: bool,
 }
@@ -82,7 +84,7 @@ pub fn read(answer: &str) -> Result<Found, Fault> {
     }
     let text = std::fs::read_to_string(&path).map_err(|_| Fault::Unreadable)?;
     let mut found = parse(&text);
-    if found.ids.is_empty() {
+    if found.ids.is_empty() && found.lists.is_empty() {
         return Err(Fault::NoLinks);
     }
     if found.ids.len() > QUEUE_MAX {
@@ -104,7 +106,7 @@ pub fn parse(text: &str) -> Found {
             line.strip_prefix("# ").filter(|_| !fenced)
         })
         .and_then(|heading| folder_name(heading.trim_end_matches('#')));
-    let mut found = Found { name, ids: Vec::new(), music: false };
+    let mut found = Found { name, ids: Vec::new(), lists: Vec::new(), music: false };
     let mut seen = HashSet::new();
     // Not a comma: `video_ids=` separates its ids with them.
     for token in text.split(|c: char| c.is_whitespace() || "|()<>[]\"'`*".contains(c)) {
@@ -112,6 +114,16 @@ pub fn parse(text: &str) -> Found {
         let path = path.split('#').next().unwrap_or("");
         let (route, query) = path.split_once('?').unwrap_or((path, ""));
         let param = |key: &str| query.split('&').find_map(|p| p.strip_prefix(key));
+        if route.trim_end_matches('/') == "playlist" {
+            if let Some(list) = param("list=").filter(|l| !l.is_empty()) {
+                let url = format!("https://{host}/playlist?list={list}");
+                // Not `music`: that locks the whole file, and a locked playlist is the queue's to refuse alone.
+                if !found.lists.iter().any(|held| crate::queue::key(held) == crate::queue::key(&url)) {
+                    found.lists.push(url);
+                }
+            }
+            continue;
+        }
         let ids: Vec<&str> = match route.trim_end_matches('/') {
             "watch" => param("v=").into_iter().collect(),
             "watch_videos" => param("video_ids=").map(|v| v.split(',').collect()).unwrap_or_default(),
@@ -222,6 +234,29 @@ mod tests {
         let found = parse(text);
         assert_eq!(found.ids, ["dQw4w9WgXcQ", "UEZ-apKKDKQ"]);
         assert!(!found.music, "only a music link sets the lock");
+    }
+
+    // A playlist is its own download, not more ids for the queue link, and one spelt two ways is one.
+    #[test]
+    fn playlist_links_are_kept_apart_from_the_videos() {
+        let text = "- https://www.youtube.com/playlist?list=PL1&si=x\n- https://youtube.com/playlist?list=PL1\n\
+                    - https://music.youtube.com/playlist?list=OLAK5uy_x https://youtu.be/dQw4w9WgXcQ";
+        let found = parse(text);
+        assert_eq!(found.ids, ["dQw4w9WgXcQ"]);
+        assert_eq!(found.lists, ["https://www.youtube.com/playlist?list=PL1", "https://music.youtube.com/playlist?list=OLAK5uy_x"]);
+        assert!(!found.music, "a locked playlist would lock the videos with it");
+    }
+
+    #[test]
+    fn a_file_of_only_playlists_imports() {
+        let dir = std::env::temp_dir().join(format!("earworm-import-lists-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("lists.md");
+        std::fs::write(&file, "https://www.youtube.com/playlist?list=PL1\n").unwrap();
+        let found = read(&file.display().to_string()).unwrap();
+        assert!(found.ids.is_empty());
+        assert_eq!(found.lists.len(), 1);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
