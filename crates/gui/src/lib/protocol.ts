@@ -77,7 +77,7 @@ export type Browse = "Folder" | "File";
 export type Prompt =
   | { Choice: { header: string; note: string; options: string[]; escape: Escape; pictures: (string | null)[] } }
   | { Form: { header: string; note: string; fields: [string, string][]; escape: Escape } }
-  | { Input: { header: string; note: string; value: string; escape: Escape; browse: Browse | null } };
+  | { Input: { header: string; note: string; value: string; escape: Escape; browse: Browse | null; links?: boolean } };
 
 // One match from core's picker matcher: where it is in the library and which characters matched.
 export interface Hit { shelf: number; file: number; score: number; at: number[]; folder_at: number[]; label: string }

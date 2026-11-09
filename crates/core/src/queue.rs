@@ -75,11 +75,26 @@ pub struct Queue {
 
 impl Queue {
     pub fn add(&self, text: &str, unlocked: &Unlocked) -> (Added, Option<Msg>) {
+        self.add_behind(None, text, unlocked)
+    }
+
+    /// `add`, for links pasted behind `lead`, which the URL prompt is about to run: it counts as a repeat, and
+    /// leaves the queue if it was waiting there, or the queue would download it again.
+    pub fn add_behind(&self, lead: Option<&str>, text: &str, unlocked: &Unlocked) -> (Added, Option<Msg>) {
         let (found, rejected) = links(text, unlocked);
         let mut added = Added { rejected, ..Added::default() };
         let msg = self.change(|state| {
-            let mut held: HashSet<String> = state.links.iter().chain(&state.running).map(|l| key(l)).collect();
+            let lead = lead.map(key);
+            let before = state.links.len();
+            state.links.retain(|l| Some(key(l)) != lead);
+            let mut held: HashSet<String> = state.links.iter().chain(&state.running).map(|l| key(l)).chain(lead.clone()).collect();
+            let mut lead_seen = false;
             for link in found {
+                // The lead itself, once: it is the prompt's answer, not a repeat.
+                if !lead_seen && lead.as_deref() == Some(key(&link).as_str()) {
+                    lead_seen = true;
+                    continue;
+                }
                 if held.insert(key(&link)) {
                     state.links.push_back(link);
                     added.added += 1;
@@ -87,7 +102,7 @@ impl Queue {
                     added.repeats += 1;
                 }
             }
-            added.added > 0
+            added.added > 0 || state.links.len() != before + added.added
         });
         (added, msg)
     }
@@ -240,6 +255,18 @@ mod tests {
         assert_eq!(queue.add(A, &unlocked).0.repeats, 1, "the link being downloaded was queued again");
         queue.done();
         assert_eq!(queue.add(A, &unlocked).0.added, 1);
+    }
+
+    // The link the URL prompt runs is not queued again, spelt another way or already waiting.
+    #[test]
+    fn links_pasted_behind_the_prompts_lead_skip_it() {
+        let queue = Queue::default();
+        let unlocked = Unlocked::default();
+        queue.add(&format!("{A} {B}"), &unlocked);
+        let (added, msg) = queue.add_behind(Some(B), &format!("{B} https://youtu.be/bbbbbbbbbbb https://youtu.be/ccccccccccc"), &unlocked);
+        assert_eq!((added.added, added.repeats), (1, 1), "the lead itself counted as a repeat");
+        assert_eq!(queue.links(), [A, "https://youtu.be/ccccccccccc"]);
+        assert_eq!(said(msg).1, queue.links());
     }
 
     // The worker popping the head between a front end drawing [A, B] and the user removing A must not cost B.

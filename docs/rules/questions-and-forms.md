@@ -11,8 +11,12 @@
   people who meant it.
 - **`working()` is the one predicate behind Esc and `q`.** Two notions of "in
   flight" would make the safe key safe on a different set of screens from the
-  one that asks. It is `busy` or an unsettled run that has tracks, so it is
-  false before the first list arrives.
+  one that asks. It is `busy`, a run in flight (`running`, set by
+  `Msg::Restart` and cleared by `Done`, `Idle` or the library being shown),
+  an unsettled run that has tracks, or links waiting in the queue. The first
+  run sends no `Restart`, so it is still false before that run's list
+  arrives; a queued link's scan, which has no tracks yet either, is not
+  (`a_run_is_going_from_its_restart_until_it_is_done`).
 - **`App.fields` is the only text state, and a single prompt is a form with
   one box.** Keeping a separate `input` beside the form's values meant two
   sources of truth and a sync on every Tab. `input()` is the focused box;

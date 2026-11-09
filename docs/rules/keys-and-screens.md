@@ -82,3 +82,36 @@
   (`a_setting_says_whether_the_file_a_flag_or_the_default_set_it`). The theme
   row says `config` once `^t` has saved it, from `App.theme_saved`, since that
   save never passes the worker.
+- **A paste is links to queue, unless a box has the keys.** Bracketed paste
+  is on, so a paste arrives whole instead of as keys whose first newline was
+  Enter. A prompt's box, the filter, the artists query, the picker and the
+  console take it as typed text on one line; anywhere else it goes to the
+  queue. The URL prompt is the one box that does both: several links answer
+  it with the first and queue the rest. It is told apart by
+  `Prompt::Input::links`, not by its header, because a rename is a text
+  prompt too and a folder named after a pasted link is what the flag
+  prevents. The attach prompt behind `S` leaves it off, since one folder
+  takes one playlist. The console has the keys over the URL prompt, so it
+  takes the paste first, and the prompt's own link is not queued behind it
+  under any spelling (`a_paste_with_the_console_open_goes_to_the_console`,
+  `the_prompts_own_link_is_not_queued_behind_it`,
+  `a_paste_of_links_at_the_url_prompt_answers_with_the_first_and_queues_the_rest`,
+  `a_paste_into_any_other_prompt_is_typed_on_one_line`,
+  `a_paste_into_the_filter_box_is_typed_and_anywhere_else_is_queued`).
+  `paste_mode` turns it off in a panic hook chained onto ratatui's, or a
+  crash leaves the shell wrapping every later paste in escape codes.
+- **`Q` is the queue, from the library and the track list.** `x` and Delete
+  take a link off it, as they take a track off a custom playlist, and by the
+  link rather than the row (`removing_a_link_the_worker_already_took_leaves_the_rest`).
+  `X` empties it after a question whose yes is `y` or Enter and never `q`,
+  which there would be a quit reflex emptying the queue
+  (`the_queue_screen_removes_by_link_and_asks_before_emptying`). Waiting
+  links count as `working()`, so Esc does not leave a queue between two
+  links and `q` asks first on every screen, since nothing keeps the queue
+  past the session; `^c` still quits outright, the question included
+  (`quitting_with_links_waiting_asks_first`,
+  `q_asks_on_every_screen_while_links_wait_and_ctrl_c_still_quits`).
+  The paste hint on the URL prompt is the TUI's, drawn when `links` is set,
+  not part of the worker's note, which every front end shows. The track list's help is
+  already as tall as 24 rows allow, so `Q` is a status-bar hint there while
+  links wait, and a help row only on the library.

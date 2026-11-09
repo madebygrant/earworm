@@ -94,7 +94,7 @@ fn ask_start(cfg: &mut Config, tx: &Sender<Msg>) -> Start {
     if let Some(path) = cfg.import.take() {
         let link = settle(&path, &cfg.unlocked).ok().or_else(|| {
             let _ = tx.send(Msg::Stage("waiting for a playlist URL".into()));
-            prompt_url(tx, Escape::Quit, &cfg.unlocked, &path)
+            prompt_url(tx, Escape::Quit, &cfg.unlocked, &path, true)
         });
         return match link {
             Some(link) => {
@@ -112,7 +112,7 @@ fn ask_start(cfg: &mut Config, tx: &Sender<Msg>) -> Start {
         }
         let _ = tx.send(Msg::Stage("waiting for a playlist URL".into()));
         let typed = cfg.url.clone();
-        return match prompt_url(tx, Escape::Quit, &cfg.unlocked, &typed) {
+        return match prompt_url(tx, Escape::Quit, &cfg.unlocked, &typed, true) {
             Some(link) => {
                 link.adopt(cfg, tx);
                 Start::Playlist
@@ -129,7 +129,7 @@ fn ask_start(cfg: &mut Config, tx: &Sender<Msg>) -> Start {
     }
 
     let _ = tx.send(Msg::Stage("waiting for a playlist URL".into()));
-    match prompt_url(tx, Escape::Quit, &cfg.unlocked, "") {
+    match prompt_url(tx, Escape::Quit, &cfg.unlocked, "", true) {
         Some(link) => {
             link.adopt(cfg, tx);
             /* The only format question before the first download: the run
@@ -151,7 +151,8 @@ fn ask_start(cfg: &mut Config, tx: &Sender<Msg>) -> Start {
    handing back the text means fixing it instead of retyping it. `None` is a
    cancel, and `escape` is what the caller does with one: only the very first
    question has nothing to go back to. */
-fn prompt_url(tx: &Sender<Msg>, escape: Escape, unlocked: &Unlocked, typed: &str) -> Option<Link> {
+/// `links` is whether a paste of several links may queue the rest, which an attach must not: one folder, one playlist.
+fn prompt_url(tx: &Sender<Msg>, escape: Escape, unlocked: &Unlocked, typed: &str, links: bool) -> Option<Link> {
     let asker = Asker {
         tx: tx.clone(),
         enabled: true,
@@ -169,7 +170,7 @@ fn prompt_url(tx: &Sender<Msg>, escape: Escape, unlocked: &Unlocked, typed: &str
         _ => "a playlist, a video or a file of links",
     };
     loop {
-        let answer = asker.input_noted(&header, note, &typed, escape)?;
+        let answer = if links { asker.input_link(&header, note, &typed, escape) } else { asker.input_noted(&header, note, &typed, escape) }?;
         // Asked of the answer, not the opening: the console can unlock mid-prompt.
         match settle(&answer, unlocked) {
             Ok(link) => return Some(link),
@@ -514,7 +515,7 @@ fn finish(
             Some(Answer::Another) => {
                 // Cancelling the URL question goes back here, not out, and
                 // leaves the last run's outcome exactly as it was.
-                let Some(link) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "") else {
+                let Some(link) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "", true) else {
                     continue;
                 };
                 let _ = tx.send(Msg::Restart);
@@ -3680,7 +3681,7 @@ fn start_url(
     tracks: &mut Vec<Track>,
     asker: &Asker,
 ) -> Option<Result<String>> {
-    let Some(link) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "") else {
+    let Some(link) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "", true) else {
         let _ = tx.send(Msg::Flash("cancelled".into()));
         return None;
     };
@@ -3904,7 +3905,7 @@ fn sync_open(
     let folder = folder_of(tracks).context("no folder is open to sync")?;
     if attaching {
         let name = folder.file_name().unwrap_or_default().to_string_lossy().to_string();
-        let Some(link) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "") else {
+        let Some(link) = prompt_url(tx, Escape::Keep, &cfg.unlocked, "", false) else {
             bail!("cancelled  ·  nothing was downloaded");
         };
         // The folder being attached is the one named below, whatever an imported file calls itself.
@@ -5379,7 +5380,7 @@ pub mod tests {
         let unlocked = Unlocked::default();
         let (tx, rx) = channel();
         std::thread::scope(|scope| {
-            let worker = scope.spawn(|| prompt_url(&tx, Escape::Keep, &unlocked, ""));
+            let worker = scope.spawn(|| prompt_url(&tx, Escape::Keep, &unlocked, "", true));
             let mut headers = Vec::new();
             for answer in ["~/no/such/mix.md", dragged.as_str()] {
                 while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
@@ -5467,7 +5468,7 @@ pub mod tests {
         let (tx, rx) = channel();
         std::thread::scope(|scope| {
             // Typed already, as a link off the command line arrives.
-            let worker = scope.spawn(|| prompt_url(&tx, Escape::Quit, &unlocked, link));
+            let worker = scope.spawn(|| prompt_url(&tx, Escape::Quit, &unlocked, link, true));
             let mut asked = Vec::new();
             while let Ok(msg) = rx.recv_timeout(Duration::from_secs(5)) {
                 let Msg::Ask { id: reply, prompt: crate::protocol::Prompt::Input { header, value, .. } } = msg else {

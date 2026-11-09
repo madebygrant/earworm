@@ -549,6 +549,10 @@ pub enum Prompt {
         /// The answer is a path, so a front end with the system's file dialog can offer it.
         #[serde(default)]
         browse: Option<Browse>,
+        /// The answer is a link, so a paste of several answers with the first and queues the rest. Only the URL
+        /// prompt: a paste of links into a rename would otherwise name a folder after one.
+        #[serde(default)]
+        links: bool,
     },
 }
 
@@ -917,17 +921,20 @@ impl Asker {
         self.prompt(header, note, value, escape, None)
     }
 
+    /// The URL prompt, which takes a paste of several links. See `Prompt::Input::links`.
+    pub fn input_link(&self, header: &str, note: &str, value: &str, escape: Escape) -> Option<String> {
+        self.ask_input(Prompt::Input { header: header.into(), note: note.into(), value: value.into(), escape, browse: None, links: true })
+    }
+
     fn prompt(&self, header: &str, note: &str, value: &str, escape: Escape, browse: Option<Browse>) -> Option<String> {
+        self.ask_input(Prompt::Input { header: header.into(), note: note.into(), value: value.into(), escape, browse, links: false })
+    }
+
+    fn ask_input(&self, prompt: Prompt) -> Option<String> {
         if !self.enabled {
             return None;
         }
-        match self.ask(Prompt::Input {
-            header: header.into(),
-            note: note.into(),
-            value: value.into(),
-            escape,
-            browse,
-        }) {
+        match self.ask(prompt) {
             Reply::Text(t) => Some(t.trim().to_string()),
             _ => None,
         }

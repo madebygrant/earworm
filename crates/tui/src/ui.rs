@@ -348,6 +348,17 @@ fn recolour(frame: &mut Frame) {
    instead of driven, which is one row and no state. */
 fn draw_confirm(frame: &mut Frame, app: &App, what: Confirm) {
     let p = app.theme;
+    if what == Confirm::ClearQueue {
+        let n = app.queued.len();
+        let lines = vec![
+            Line::from(Span::styled(format!(" {n} {} waiting", if n == 1 { "link" } else { "links" }), Style::new().fg(p.text))),
+            Line::default(),
+            Line::from(vec![Span::styled(" y  empty it", Style::new().fg(p.warn)), dim("     esc  keep them", p)]),
+        ];
+        let width = lines.iter().map(|l| l.width() as u16).max().unwrap_or(0) + 3;
+        popup(frame, "empty the queue?", lines, width, p);
+        return;
+    }
     if what == Confirm::Discard {
         let (add, remove) = app.pick_changes();
         let said = match (add.len(), remove.len()) {
@@ -365,12 +376,24 @@ fn draw_confirm(frame: &mut Frame, app: &App, what: Confirm) {
         return;
     }
     let (done, total) = app.progress();
-    let mut lines = vec![Line::from(Span::styled(
-        format!(" {done} of {total} finished so far"),
-        Style::new().fg(p.text),
-    ))];
-    // What it costs, not what it does: "quit?" is already in the title.
-    lines.push(Line::from(dim(" leaving now stops the download", p)));
+    let n = app.queued.len();
+    let links = if n == 1 { "link" } else { "links" };
+    // What it costs, not what it does: "quit?" is already in the title. Nothing keeps the queue past this session.
+    let mut lines = if !app.downloading() && n > 0 {
+        vec![
+            Line::from(Span::styled(format!(" {n} {links} queued"), Style::new().fg(p.text))),
+            Line::from(dim(" leaving now drops them", p)),
+        ]
+    } else {
+        let mut lines = vec![
+            Line::from(Span::styled(format!(" {done} of {total} finished so far"), Style::new().fg(p.text))),
+            Line::from(dim(" leaving now stops the download", p)),
+        ];
+        if n > 0 {
+            lines.push(Line::from(dim(format!(" and drops {n} queued {links}"), p)));
+        }
+        lines
+    };
     lines.push(Line::default());
     lines.push(Line::from(vec![
         Span::styled(" q  quit", Style::new().fg(p.warn)),
@@ -555,7 +578,7 @@ fn draw_filter_bar(frame: &mut Frame, app: &App, area: Rect) {
         View::Found => (app.found_cache.len(), crate::view::found_total(&app.library, app.only)),
         View::Tracks => (app.shown(), app.tracks.len()),
         // No filter here: the list is the playlist's own order. The artists screen has a band of its own.
-        View::Playlist | View::Pick | View::Artists | View::Artist | View::Settings => (0, 0),
+        View::Playlist | View::Pick | View::Artists | View::Artist | View::Settings | View::Queue => (0, 0),
     };
     let caret = if app.typing_filter { "\u{2588}" } else { "" };
     let word = match (app.view, app.only, app.review) {
@@ -666,6 +689,7 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         View::Artists if !app.busy => "artists".to_string(),
         View::Artist => app.page.name.clone(),
         View::Settings => "settings".to_string(),
+        View::Queue => "queue".to_string(),
         _ => app.stage.clone(),
     };
     spans.push(Span::styled(stage, Style::new().fg(p.text)));
@@ -691,6 +715,9 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         }
         spans.push(dim("  ·  ", p));
         spans.push(Span::styled(format!("{} tracks here", app.page.tracks), Style::new().fg(p.text)));
+    } else if app.view == View::Queue {
+        spans.push(dim("  ·  ", p));
+        spans.push(Span::styled(format!("{} waiting", app.queued.len()), Style::new().fg(p.text)));
     } else if app.view == View::Artists && app.artists.loaded {
         let all = app.artists.rows.len();
         let starred = app.artists.rows.iter().filter(|r| r.starred).count();
@@ -750,6 +777,11 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
     } else if app.view == View::Library || app.done.is_some() {
         right.push(dim(app.settings.clone(), p));
     }
+    // With the rest of the right half, so it goes with it rather than leaving a count with no bar beside it.
+    if !app.queued.is_empty() && app.view != View::Queue {
+        let gap = if right.is_empty() { "" } else { "  " };
+        right.insert(0, Span::styled(format!("+{} queued{gap}", app.queued.len()), Style::new().fg(p.accent)));
+    }
 
     let used: usize = spans.iter().map(|s| cols(&s.content)).sum();
     let wanted: usize = right.iter().map(|s| cols(&s.content)).sum();
@@ -798,6 +830,7 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
         View::Artists => draw_artists(frame, app, area),
         View::Artist => draw_artist_page(frame, app, area),
         View::Settings => draw_settings(frame, app, area),
+        View::Queue => draw_queue(frame, app, area),
     }
 }
 
@@ -1161,6 +1194,36 @@ fn draw_artists(frame: &mut Frame, app: &mut App, area: Rect) {
     app.artists.scroll = app::scroll_to(app.artists.scroll, at, items.len(), area.height as usize);
     let mut state = ListState::default().with_offset(app.artists.scroll);
     state.select(Some(at));
+    frame.render_stateful_widget(List::new(items), area, &mut state);
+}
+
+// The links waiting, in the order the worker takes them. The one downloading has already left the list.
+fn draw_queue(frame: &mut Frame, app: &mut App, area: Rect) {
+    let p = app.theme;
+    app.viewport = area.height as usize;
+    if app.queued.is_empty() {
+        let said = " nothing queued  ·  paste links on any screen to add them   esc goes back";
+        frame.render_widget(Paragraph::new(Line::from(dim(said, p))), area);
+        return;
+    }
+    let cursor = app.queue_cursor.min(app.queued.len() - 1);
+    let number = app.queued.len().to_string().len();
+    let width = (area.width as usize).saturating_sub(number + 4);
+    let items: Vec<ListItem> = app
+        .queued
+        .iter()
+        .enumerate()
+        .map(|(at, link)| {
+            ListItem::new(Line::from(vec![
+                Span::styled(if at == cursor { "▌" } else { " " }, Style::new().fg(p.cursor)),
+                dim(format!(" {:>number$}  ", at + 1), p),
+                Span::styled(truncate(link, width), row_style(at == cursor, p)),
+            ]))
+        })
+        .collect();
+    app.queue_scroll = app::scroll_to(app.queue_scroll, cursor, items.len(), area.height as usize);
+    let mut state = ListState::default().with_offset(app.queue_scroll);
+    state.select(Some(cursor));
     frame.render_stateful_widget(List::new(items), area, &mut state);
 }
 
@@ -2149,6 +2212,11 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
     } else if app.view == View::Settings {
         hints.push(("   enter change".to_string(), Style::new().fg(p.accent)));
         hints.push(("   esc back".to_string(), Style::new().fg(p.muted)));
+    } else if app.view == View::Queue {
+        hints.push(("   paste adds links".to_string(), Style::new().fg(p.accent)));
+        hints.push(("   x remove".to_string(), Style::new().fg(p.muted)));
+        hints.push(("   X clear".to_string(), Style::new().fg(p.muted)));
+        hints.push(("   esc back".to_string(), Style::new().fg(p.muted)));
     } else if !app.tracks.is_empty() && app.picking.is_none() {
         if app.can_command() {
             extra.push(("   e edit".to_string(), Style::new().fg(p.accent)));
@@ -2174,6 +2242,10 @@ fn draw_status(frame: &mut Frame, app: &App, area: Rect) {
         } else {
             extra.push(("   / filter".to_string(), Style::new().fg(p.muted)));
         }
+    }
+    // Here rather than in the track list's help, which is already as tall as a 24-row terminal allows.
+    if !app.queued.is_empty() && matches!(app.view, View::Library | View::Tracks) && app.picking.is_none() {
+        extra.push(("   Q queue".to_string(), Style::new().fg(p.muted)));
     }
     /* Absent entirely when cliamp is not installed, since a player nobody has
        is not news. Installed but stopped is worth saying: it is the answer to
@@ -2294,7 +2366,16 @@ fn draw_help(frame: &mut Frame, app: &App) {
         ("", "^d ^u  PgDn PgUp", "by a screenful"),
         ("", "g G", "first, last"),
     ];
-    if app.view == View::Settings {
+    if app.view == View::Queue {
+        rows.extend([
+            ("add", "paste", "links, on any screen; the URL prompt takes several too"),
+            ("edit", "x  Delete", "take this link off the queue"),
+            ("", "X", "empty the queue"),
+            ("view", "l", "yt-dlp output"),
+            ("back", "Esc  Q", "the screen before"),
+            ("quit", "q  ^c", ""),
+        ]);
+    } else if app.view == View::Settings {
         rows.extend([
             ("change", "enter  space", "switch it, or pick the next choice"),
             ("view", "l", "yt-dlp output"),
@@ -2388,7 +2469,8 @@ fn draw_help(frame: &mut Frame, app: &App) {
         rows.extend([
             ("sync", "S", "sync this playlist"),
             ("", "R", "sync every playlist"),
-            ("", "n", "sync a new URL"),
+            ("", "n", "sync a new URL, or paste several to queue them"),
+            ("", "Q", "the links waiting to download"),
             ("set", ",", "settings: format, theme, lookups and the rest"),
             ("view", "l", "yt-dlp output"),
             ("quit", "q  Esc  ^c", ""),
@@ -2666,10 +2748,12 @@ fn draw_prompt(frame: &mut Frame, app: &App) {
             }));
             (header, rows)
         }
-        Prompt::Input { header, note, .. } => {
+        Prompt::Input { header, note, links, .. } => {
             let mut rows = Vec::new();
+            // Said here and not in the worker's note, which every front end shows, whether it takes a paste or not.
+            let note = if *links { format!("{note}  ·  paste several to queue them") } else { note.clone() };
             if !note.is_empty() {
-                rows.push((note.clone(), Style::new().fg(p.muted)));
+                rows.push((note, Style::new().fg(p.muted)));
                 rows.push((String::new(), Style::new()));
             }
             // Drawn between the halves, so the block is where the next
@@ -2902,6 +2986,49 @@ mod tests {
     use ratatui::layout::Rect;
     use ratatui::style::Modifier;
     use std::time::Duration;
+
+    fn frame(app: &mut App, width: u16, height: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|f| super::draw(f, app)).unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..height).map(|y| (0..width).map(|x| buffer[(x, y)].symbol().to_string()).collect()).collect()
+    }
+
+    fn queued_app() -> App {
+        let mut app = App::new(std::sync::mpsc::channel().0, "format opus".into());
+        app.intro_done = true;
+        app.view = View::Library;
+        app.apply(Msg::Library { shelves: vec![Shelf { name: "Krautrock".into(), ..Shelf::default() }], show: true });
+        app.apply(Msg::Queue { rev: 1, links: vec!["https://youtu.be/aaaaaaaaaaa".into(), "https://youtu.be/bbbbbbbbbbb".into()] });
+        app
+    }
+
+    // On the right with the settings, and dropped whole with them on a narrow terminal rather than cut.
+    #[test]
+    fn the_header_counts_the_queue_and_drops_it_whole() {
+        let mut app = queued_app();
+        let header = frame(&mut app, 100, 24).remove(0);
+        assert!(header.contains("+2 queued  format opus"), "{header}");
+        let header = frame(&mut app, 40, 24).remove(0);
+        assert!(!header.contains("queued") && !header.contains('+'), "half a count was drawn: {header}");
+    }
+
+    #[test]
+    fn the_queue_screen_lists_the_links_in_order_with_the_cursor() {
+        let mut app = queued_app();
+        app.open_queue();
+        app.queue_step(true, 1);
+        let screen = frame(&mut app, 80, 24);
+        assert!(screen[0].contains("queue  ·  2 waiting"), "{}", screen[0]);
+        let first = screen.iter().position(|r| r.contains("https://youtu.be/aaaaaaaaaaa")).expect("no first link");
+        assert!(screen[first + 1].contains("https://youtu.be/bbbbbbbbbbb"), "out of order");
+        assert!(screen[first + 1].starts_with('▌') && !screen[first].starts_with('▌'), "the cursor is not on the second");
+        assert!(screen[23].contains("x remove"), "{}", screen[23]);
+
+        app.apply(Msg::Queue { rev: 2, links: Vec::new() });
+        let screen = frame(&mut app, 80, 24);
+        assert!(screen.iter().any(|r| r.contains("nothing queued")), "the empty queue says nothing");
+    }
 
     /// The bottom row of a rendered frame, trailing spaces trimmed.
     fn status_row(width: u16, tracks: Vec<Track>, logs: Vec<String>) -> String {
@@ -3620,7 +3747,7 @@ mod tests {
                 header: "YouTube playlist URL".into(),
                 note: "a playlist, a video or a file of links  ·  esc quits".into(),
                 value: String::new(),
-                escape: crate::protocol::Escape::Quit, browse: None,
+                escape: crate::protocol::Escape::Quit, browse: None, links: false,
             } });
         app.intro_done = true;
         let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
@@ -5068,7 +5195,7 @@ mod tests {
                     note: String::new(),
                     header: "Title".into(),
                     value: "Autobahn".into(),
-                    escape: crate::protocol::Escape::Skip, browse: None,
+                    escape: crate::protocol::Escape::Skip, browse: None, links: false,
                 } });
             for _ in 0..back {
                 app.input_move(false);
@@ -5950,7 +6077,7 @@ mod tests {
                 note: String::new(),
                 header: "YouTube playlist URL".into(),
                 value: String::new(),
-                escape: crate::protocol::Escape::Quit, browse: None,
+                escape: crate::protocol::Escape::Quit, browse: None, links: false,
             } });
         assert!(!asked.intro(), "it hid the question the worker is waiting on");
 

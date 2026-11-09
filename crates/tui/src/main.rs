@@ -3,8 +3,8 @@ mod ui;
 
 // The core's modules at this crate's root, so `crate::config` and friends read as they did before the split.
 use earworm_core::{
-    achievements, artists, cheats, config, deps, export, icons, lookup, manifest, picker, protocol, tag, theme,
-    tools, update, view, worker, ytdlp,
+    achievements, artists, cheats, config, deps, export, icons, lookup, manifest, picker, protocol, queue, tag,
+    theme, tools, update, view, worker, ytdlp,
 };
 
 use std::io::{IsTerminal, Write};
@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches};
-use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use ratatui::crossterm::event::{self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::crossterm::{execute, terminal::SetTitle};
 
 use app::{App, View};
@@ -55,6 +55,7 @@ fn main() -> Result<()> {
     let theme_warnings = cfg.theme_warnings.clone();
     let config_file = cfg.config_file.clone();
     let unlocked = Arc::clone(&cfg.unlocked);
+    let queue = Arc::clone(&cfg.queue);
     /* Read before the terminal is taken, like the config. No usable home, or a
        file that exists and cannot be read, turns the feature off for the
        session: announcements that cannot be recorded would only repeat. */
@@ -90,6 +91,7 @@ fn main() -> Result<()> {
     let picker = graphics_picker();
 
     let mut terminal = ratatui::init();
+    paste_mode();
     let mut app = App::new(cmd_tx, settings);
     app.stop = stop;
     app.setting_rows = setting_rows;
@@ -103,6 +105,7 @@ fn main() -> Result<()> {
     app.theme_overridden = overridden;
     app.config_file = config_file;
     app.unlocked = unlocked;
+    app.downloads = queue;
     let mut writer = None;
     if let Some((path, known)) = achieved {
         let (tx, handle) = achievements::writer(path);
@@ -140,6 +143,7 @@ fn main() -> Result<()> {
     while tag::writing() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
+    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
     /* Left as it was found, near enough: a tab still reading "earworm · Focus
        · 12/40" an hour after the run is a lie the shell would otherwise have
@@ -459,11 +463,12 @@ fn run(
         /* The intro is the only thing on screen that moves between messages,
            so it is the only thing that needs frames faster than the idle poll. */
         let wait = if app.intro() || app.celebrating().is_some() { 33 } else { 120 };
-        if event::poll(Duration::from_millis(wait))?
-            && let Event::Key(key) = event::read()?
-            && key.kind == KeyEventKind::Press
-        {
-            handle_key(app, key.code, key.modifiers);
+        if event::poll(Duration::from_millis(wait))? {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => handle_key(app, key.code, key.modifiers),
+                Event::Paste(text) => handle_paste(app, &text),
+                _ => {}
+            }
         }
     }
     Ok(())
@@ -500,6 +505,51 @@ fn window_title(app: &App) -> String {
         None => {}
     }
     title
+}
+
+// Off on every way out, a panic included, or the shell is left wrapping every later paste in escape codes.
+// Chained onto ratatui's hook, which restores the rest of the terminal.
+fn paste_mode() {
+    let _ = execute!(std::io::stdout(), EnableBracketedPaste);
+    let restore = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let _ = execute!(std::io::stdout(), DisableBracketedPaste);
+        restore(info);
+    }));
+}
+
+/// A box with the keys takes a paste as typed text, on one line. Anywhere else a paste is links to queue.
+fn handle_paste(app: &mut App, text: &str) {
+    // Unlike a key, a paste is not swallowed by the intro: it is gone if it is.
+    app.intro_done = true;
+    // The URL prompt answers with the first link and queues the rest behind it. Not under the console, which
+    // has the keys over it, as `handle_key` decides.
+    if app.console.is_none()
+        && let Some((Prompt::Input { links: true, .. }, _)) = &app.prompt
+        && let (found, _) = queue::links(text, &app.unlocked)
+        && let [first, _, ..] = &found[..]
+    {
+        let first = first.clone();
+        app.enqueue_behind(Some(&first), text);
+        app.input_clear();
+        first.chars().for_each(|c| app.input_insert(c));
+        handle_prompt_key(app, KeyCode::Enter, KeyModifiers::NONE);
+        return;
+    }
+    let typed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let keys: Option<fn(&mut App, KeyCode, KeyModifiers)> = match &app.prompt {
+        _ if app.console.is_some() => Some(handle_console_key),
+        Some((Prompt::Input { .. } | Prompt::Form { .. }, _)) => Some(handle_prompt_key),
+        Some(_) => None,
+        None if app.typing_filter => Some(handle_filter_key),
+        None if app.view == View::Artists && app.artists.typing => Some(handle_artists_key),
+        None if app.view == View::Pick => Some(handle_pick_list_key),
+        None => None,
+    };
+    match keys {
+        Some(keys) => typed.chars().for_each(|c| keys(app, KeyCode::Char(c), KeyModifiers::NONE)),
+        None => app.enqueue(text),
+    }
 }
 
 fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
@@ -579,6 +629,10 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         app.open_settings();
         return;
     }
+    if app.view == View::Queue {
+        handle_queue_key(app, code, mods);
+        return;
+    }
     if app.view == View::Pick {
         handle_pick_list_key(app, code, mods);
         return;
@@ -622,6 +676,7 @@ fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.quit = true,
         KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
         KeyCode::Char('q') => app.ask_quit(),
+        KeyCode::Char('Q') => app.open_queue(),
         /* One step at a time, and the order lives on `escape_tracks`: the
            filter first, then the marks, then the library. */
         KeyCode::Esc => app.escape_tracks(),
@@ -762,7 +817,7 @@ fn handle_found_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     match code {
         KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.quit = true,
         KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
-        KeyCode::Char('q') => app.quit = true,
+        KeyCode::Char('q') => app.quit_key(),
         /* Back to the library rather than out: the search is a step from it,
            and Esc unwinds one step everywhere else in the tool. The query is
            kept, since it is what narrowed the folder list too. */
@@ -826,7 +881,7 @@ fn handle_artists_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     match code {
         KeyCode::Char('c') if ctrl => app.quit = true,
         KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
-        KeyCode::Char('q') => app.quit = true,
+        KeyCode::Char('q') => app.quit_key(),
         // The query first, as on every other screen, then back to the library.
         KeyCode::Esc if !app.artists.query.is_empty() => app.artist_query(String::clear),
         KeyCode::Esc => app.view = View::Library,
@@ -851,12 +906,36 @@ fn handle_artists_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     }
 }
 
+fn handle_queue_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    match code {
+        KeyCode::Char('c') if ctrl => app.quit = true,
+        KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
+        KeyCode::Char('q') => app.ask_quit(),
+        KeyCode::Esc | KeyCode::Char('Q') => app.leave_queue(),
+        KeyCode::Char('l') => app.show_logs = !app.show_logs,
+        KeyCode::Char('j') | KeyCode::Down => app.queue_step(true, 1),
+        KeyCode::Char('k') | KeyCode::Up => app.queue_step(false, 1),
+        KeyCode::Char('d') if ctrl => app.queue_step(true, app.viewport.max(1)),
+        KeyCode::Char('u') if ctrl => app.queue_step(false, app.viewport.max(1)),
+        KeyCode::PageDown => app.queue_step(true, app.viewport.max(1)),
+        KeyCode::PageUp => app.queue_step(false, app.viewport.max(1)),
+        KeyCode::Char('g') => app.queue_cursor = 0,
+        KeyCode::Char('G') => app.queue_step(true, usize::MAX),
+        // The custom playlist's keys for taking a row off a list, since that is what this is too.
+        KeyCode::Char('x') | KeyCode::Delete => app.unqueue(),
+        KeyCode::Char('X') if app.queued.is_empty() => app.say("nothing queued"),
+        KeyCode::Char('X') => app.confirm = Some(app::Confirm::ClearQueue),
+        _ => {}
+    }
+}
+
 fn handle_settings_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     match code {
         KeyCode::Char('c') if ctrl => app.quit = true,
         KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
-        KeyCode::Char('q') => app.quit = true,
+        KeyCode::Char('q') => app.quit_key(),
         KeyCode::Esc | KeyCode::Char(',') => app.leave_settings(),
         KeyCode::Char('l') => app.show_logs = !app.show_logs,
         KeyCode::Char('j') | KeyCode::Down => app.settings_step(true, 1),
@@ -876,7 +955,7 @@ fn handle_page_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     match code {
         KeyCode::Char('c') if ctrl => app.quit = true,
         KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
-        KeyCode::Char('q') => app.quit = true,
+        KeyCode::Char('q') => app.quit_key(),
         // A search of ten top tracks is a minute of yt-dlp, and nothing else stops it short of quitting.
         KeyCode::Esc if app.searching => app.stop_search(),
         // Back through related artists' pages, then to the artists screen, whose cursor never moved.
@@ -907,7 +986,7 @@ fn handle_playlist_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     match code {
         KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.quit = true,
         KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
-        KeyCode::Char('q') => app.quit = true,
+        KeyCode::Char('q') => app.quit_key(),
         KeyCode::Esc => app.view = View::Library,
         KeyCode::Char('l') => app.show_logs = !app.show_logs,
         KeyCode::Char('j') | KeyCode::Down => app.custom_step(true),
@@ -957,6 +1036,15 @@ fn handle_confirm_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('q') | KeyCode::Enter
     ) || (matches!(code, KeyCode::Char('c')) && mods.contains(KeyModifiers::CONTROL));
     let what = app.confirm.take();
+    // Not `q`: that is the quit question's yes, and here it would be a reflex emptying the queue.
+    if what == Some(app::Confirm::ClearQueue) {
+        match code {
+            KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.quit = true,
+            KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => app.clear_queue(),
+            _ => {}
+        }
+        return;
+    }
     if what == Some(app::Confirm::Discard) {
         // Esc means keep picking here, as it does on the quit question.
         if matches!(code, KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter) {
@@ -975,7 +1063,7 @@ fn handle_confirm_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 fn handle_pick_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     match code {
         KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.quit = true,
-        KeyCode::Char('q') => app.quit = true,
+        KeyCode::Char('q') => app.quit_key(),
         KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
         /* Enter on an empty selection downloads nothing, which is what Esc
            is for and not what Enter looks like. It is one `a` away from
@@ -1065,7 +1153,9 @@ fn handle_library_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     match code {
         KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.quit = true,
         KeyCode::Char('h') | KeyCode::Char('?') => app.show_help = true,
-        KeyCode::Char('q') => app.quit = true,
+        // Asks only with links waiting, which quitting drops.
+        KeyCode::Char('q') => app.ask_quit(),
+        KeyCode::Char('Q') => app.open_queue(),
         // Unwinds the filter first, like it does on the track list.
         KeyCode::Esc if app.shelf_narrowed() => app.clear_filter(),
         /* The library is the screen behind everything else, so Esc has nothing
@@ -1579,7 +1669,7 @@ mod tests {
                 header: cheats::LOCKED.into(),
                 note: String::new(),
                 value: "music.youtube.com/playlist?list=PL1".into(),
-                escape: crate::protocol::Escape::Quit, browse: None,
+                escape: crate::protocol::Escape::Quit, browse: None, links: false,
             } });
 
         open_console(&mut app);
@@ -2067,8 +2157,9 @@ mod tests {
         // What the worker sends on opening a folder, which clears the filter the results came from.
         app.apply(crate::protocol::Msg::Restart);
         assert!(app.filter.is_empty());
-        app.busy = false;
-        app.done = Some(Ok(String::new()));
+        // And what it sends when the folder is open: `open_shelf` ends in `Done`, `serve` in `Idle`.
+        app.apply(crate::protocol::Msg::Done { result: Ok(String::new()), stage: "opened".into() });
+        app.apply(crate::protocol::Msg::Idle);
         app.leave_tracks();
         assert_eq!(app.view, View::Found);
         assert!(!query.is_empty() && app.filter == query, "the results came back without their query");
@@ -2513,7 +2604,7 @@ mod tests {
                 note: String::new(),
                 header: "Title".into(),
                 value: String::new(),
-                escape: crate::protocol::Escape::Skip, browse: None,
+                escape: crate::protocol::Escape::Skip, browse: None, links: false,
             },
             crate::protocol::open_question().0,
         ));
@@ -3042,5 +3133,200 @@ mod tests {
         app.apply(crate::protocol::Msg::NewReleases(vec![("Can".into(), 42, "Live 1975".into()), ("Neu!".into(), 7, "Neu! 4".into())]));
         let left: Vec<&str> = app.new_releases.iter().map(|(a, ..)| a.as_str()).collect();
         assert_eq!(left, ["Neu!"]);
+    }
+
+    const LA: &str = "https://www.youtube.com/playlist?list=PLa";
+    const LB: &str = "https://www.youtube.com/playlist?list=PLb";
+    const LC: &str = "https://youtu.be/ccccccccccc";
+
+    fn url_prompt(app: &mut App, links: bool) -> std::sync::mpsc::Receiver<Reply> {
+        let (reply, answered) = crate::protocol::open_question();
+        app.apply(crate::protocol::Msg::Ask { id: reply, prompt: Prompt::Input {
+                header: "YouTube playlist URL".into(),
+                note: String::new(),
+                value: String::new(),
+                escape: crate::protocol::Escape::Keep, browse: None, links,
+            } });
+        answered
+    }
+
+    // The worker is blocked on this prompt, so the first link answers it and the rest wait behind it.
+    #[test]
+    fn a_paste_of_links_at_the_url_prompt_answers_with_the_first_and_queues_the_rest() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        let answered = url_prompt(&mut app, true);
+        handle_paste(&mut app, &format!("{LA}\n{LB}\nnot://a link\n{LC}\n"));
+        assert!(matches!(answered.try_recv(), Ok(Reply::Text(link)) if link == LA), "the prompt was not answered with the first");
+        assert!(app.prompt.is_none());
+        assert_eq!(app.downloads.links(), [LB, LC]);
+        assert_eq!(app.queued, [LB, LC], "the screen's copy did not follow");
+        assert!(app.logs.iter().any(|l| l.starts_with("not://a")), "the refused one was not logged");
+    }
+
+    // A rename is a text prompt too, and a folder named after a pasted link is the bug the flag exists for.
+    #[test]
+    fn a_paste_into_any_other_prompt_is_typed_on_one_line() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        let answered = url_prompt(&mut app, false);
+        handle_paste(&mut app, &format!("{LA}\n{LB}\n"));
+        assert!(answered.try_recv().is_err(), "a paste answered a prompt that does not take links");
+        assert_eq!(app.input(), format!("{LA} {LB}"));
+        assert!(app.downloads.is_empty());
+
+        // One link at the URL prompt is a link typed, for Enter to send.
+        let mut app = App::new(std::sync::mpsc::channel().0, String::new());
+        app.intro_done = true;
+        let answered = url_prompt(&mut app, true);
+        handle_paste(&mut app, LA);
+        assert!(answered.try_recv().is_err());
+        assert_eq!(app.input(), LA);
+    }
+
+    #[test]
+    fn a_paste_into_the_filter_box_is_typed_and_anywhere_else_is_queued() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        app.view = View::Library;
+        app.typing_filter = true;
+        handle_paste(&mut app, "night drive");
+        assert_eq!(app.filter, "night drive");
+        assert!(app.downloads.is_empty());
+
+        app.typing_filter = false;
+        handle_paste(&mut app, &format!("- {LA}\n- {LB}\n"));
+        assert_eq!(app.queued, [LA, LB]);
+        assert!(app.stage.starts_with("queued 2"), "{}", app.stage);
+        // A fresh one, since a second flash waits behind the first.
+        let mut app = App::new(std::sync::mpsc::channel().0, String::new());
+        app.intro_done = true;
+        handle_paste(&mut app, "just some words");
+        assert_eq!(app.stage, "no links in that paste");
+    }
+
+    #[test]
+    fn the_queue_screen_removes_by_link_and_asks_before_emptying() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        app.view = View::Library;
+        app.enqueue(&format!("{LA} {LB} {LC}"));
+        handle_key(&mut app, KeyCode::Char('Q'), KeyModifiers::NONE);
+        assert_eq!(app.view, View::Queue);
+
+        handle_key(&mut app, KeyCode::Char('j'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(app.downloads.links(), [LA, LC], "x took the wrong link");
+
+        handle_key(&mut app, KeyCode::Char('X'), KeyModifiers::NONE);
+        assert_eq!(app.confirm, Some(Confirm::ClearQueue));
+        handle_key(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert_eq!(app.downloads.links().len(), 2, "q emptied the queue");
+        assert!(!app.quit, "q on the question quit the tool");
+        handle_key(&mut app, KeyCode::Char('X'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('y'), KeyModifiers::NONE);
+        assert!(app.downloads.is_empty() && app.queued.is_empty());
+
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.view, View::Library);
+    }
+
+    // The worker took the head after the screen drew it: x on that row must not take the next link instead.
+    #[test]
+    fn removing_a_link_the_worker_already_took_leaves_the_rest() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        // Through the handle, so no earlier flash is showing for the one asserted below to wait behind.
+        let (_, said) = app.downloads.add(&format!("{LA} {LB}"), &app.unlocked);
+        app.apply(said.unwrap());
+        app.open_queue();
+        app.downloads.pop();
+        handle_key(&mut app, KeyCode::Char('x'), KeyModifiers::NONE);
+        assert_eq!(app.downloads.links(), [LB]);
+        assert_eq!(app.stage, "already started");
+    }
+
+    // Quitting drops the queue, so the library's q asks while links wait, and only then.
+    #[test]
+    fn quitting_with_links_waiting_asks_first() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        app.view = View::Library;
+        app.enqueue(LA);
+        handle_key(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert_eq!(app.confirm, Some(Confirm::Quit));
+        assert!(!app.quit);
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        app.clear_queue();
+        handle_key(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
+        assert!(app.quit);
+    }
+
+    // The console has the keys over the URL prompt, so a paste of links is its text, not the prompt's answer.
+    #[test]
+    fn a_paste_with_the_console_open_goes_to_the_console() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        let answered = url_prompt(&mut app, true);
+        app.console = Some(app::Console::default());
+        handle_paste(&mut app, &format!("{LA}\n{LB}"));
+        assert!(answered.try_recv().is_err(), "the hidden prompt was answered");
+        assert!(app.downloads.is_empty());
+        assert!(!app.console.as_ref().unwrap().text.is_empty(), "the console got nothing");
+    }
+
+    // The prompt runs the first link, so the same playlist later in the paste, or already waiting, is not queued.
+    #[test]
+    fn the_prompts_own_link_is_not_queued_behind_it() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        app.enqueue(LA);
+        let answered = url_prompt(&mut app, true);
+        handle_paste(&mut app, &format!("{LA}\nwww.youtube.com/playlist?list=PLa&si=x\n{LB}"));
+        assert!(matches!(answered.try_recv(), Ok(Reply::Text(link)) if link == LA));
+        assert_eq!(app.downloads.links(), [LB]);
+    }
+
+    // A scan between two queued links has no tracks yet, and Esc there must not leave the run for the library.
+    #[test]
+    fn a_run_is_going_from_its_restart_until_it_is_done() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        app.apply(protocol::Msg::Library { shelves: vec![protocol::Shelf { name: "A".into(), ..Default::default() }], show: false });
+        app.apply(protocol::Msg::Restart);
+        assert!(app.working(), "a scan with no tracks yet read as idle");
+        handle_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.view, View::Tracks, "Esc left a run that is still going");
+        app.apply(protocol::Msg::Done { result: Ok("done".into()), stage: "finished".into() });
+        assert!(!app.working());
+    }
+
+    #[test]
+    fn q_asks_on_every_screen_while_links_wait_and_ctrl_c_still_quits() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        for view in [View::Settings, View::Artists, View::Artist, View::Playlist, View::Found] {
+            let mut app = App::new(tx.clone(), String::new());
+            app.intro_done = true;
+            app.view = view;
+            app.enqueue(LA);
+            handle_key(&mut app, KeyCode::Char('q'), KeyModifiers::NONE);
+            assert!(!app.quit && app.confirm == Some(Confirm::Quit), "{view:?} quit without asking");
+        }
+        let mut app = App::new(tx, String::new());
+        app.intro_done = true;
+        app.enqueue(LA);
+        app.open_queue();
+        handle_key(&mut app, KeyCode::Char('X'), KeyModifiers::NONE);
+        handle_key(&mut app, KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(app.quit, "^c on the queue question did not quit");
     }
 }
