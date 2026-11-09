@@ -8,6 +8,7 @@ vi.mock("@tauri-apps/api/core", () => ({
     calls.push([cmd, args]);
     if (cmd === "unqueue" || cmd === "clear_queue") return true;
     if (cmd === "enqueue") return "queued 2";
+    if (cmd === "enqueue_fields") return { said: "queued 1", problems: (args as { fields: string[] }).fields.map((f) => (f.includes("youtube") ? null : "not a link")) };
     if (cmd === "paste_links") return (args as { text: string }).text.includes("\n") ? { lead: "a", said: "queued 1" } : { lead: null, said: null };
     return null;
   },
@@ -148,4 +149,50 @@ it("Q opens the queue from a busy library", async () => {
   await handleKey(key("Q"));
   expect(app.model.view).toBe("Queue");
   app.model = { ...app.model, busy: false };
+});
+
+it("a link field keeps its letters, and n on the queue focuses the last field", async () => {
+  const { app } = await import("./store.svelte");
+  const { screens } = await import("./screens.svelte");
+  const { ui } = await import("./ui.svelte");
+  const { handleKey } = await import("./keys");
+  app.model = { ...app.model, view: "Queue", prompt: null, queue: ["a"], queueRev: 1 };
+  const target = document.createElement("input");
+  for (const k of ["x", "X", "q", ",", "Q", "Escape"]) await handleKey(key(k, { target }));
+  expect(calls).toEqual([]);
+  expect(ui.quitting).toBe(false);
+  expect(screens.clearing).toBe(false);
+  expect(app.model.view).toBe("Queue");
+  screens.fields = [{ text: "", why: null }, { text: "", why: null }];
+  await handleKey(key("n"));
+  expect(screens.focusField).toBe(1);
+});
+
+it("the link fields go to the shell together, and only those it refused stay, with why", async () => {
+  const { screens, queueFields } = await import("./screens.svelte");
+  screens.fields = [
+    { text: " https://youtube.com/playlist?list=a ", why: null },
+    { text: "", why: null },
+    { text: "hello", why: null },
+  ];
+  await queueFields();
+  expect(calls).toEqual([["enqueue_fields", { fields: ["https://youtube.com/playlist?list=a", "hello"] }]]);
+  expect(screens.fields).toEqual([{ text: "hello", why: "not a link" }]);
+  screens.fields = [{ text: "https://youtube.com/watch?v=b", why: null }];
+  await queueFields();
+  expect(screens.fields).toEqual([{ text: "", why: null }]);
+});
+
+it("a field typed in while the shell answered keeps what was typed, and focus waits only on the queue screen", async () => {
+  const { app } = await import("./store.svelte");
+  const { screens, queueFields } = await import("./screens.svelte");
+  app.model = { ...app.model, view: "Tracks" };
+  screens.focusField = null;
+  screens.fields = [{ text: "https://youtube.com/watch?v=a", why: null }, { text: "", why: null }];
+  const going = queueFields();
+  screens.fields[0].text = "https://youtube.com/watch?v=a2";
+  screens.fields[1].text = "https://youtube.com/watch?v=b";
+  await going;
+  expect(screens.fields.map((f) => f.text)).toEqual(["https://youtube.com/watch?v=a2", "https://youtube.com/watch?v=b"]);
+  expect(screens.focusField).toBe(null);
 });

@@ -97,8 +97,8 @@ from `src/lib/bar.ts`; the `h` sheet is `screens/Help.svelte` over
 sits in, and `Art.svelte` draws a folder's sleeve or mosaic with
 `src/lib/wall.ts`. A run in progress is `Room.svelte` over `src/lib/run.ts`;
 a finished one, or a folder opened from disk, is `Run.svelte`. The queue is
-`Queue.svelte`, over the shell's `enqueue`, `paste_links`, `unqueue` and
-`clear_queue`, which send what they change through `publish`.
+`Queue.svelte`, its link fields over the queued list, over the shell's
+`enqueue`, `enqueue_fields`, `paste_links`, `unqueue` and `clear_queue`, which send what they change through `publish`.
 `src/look.css` is the only stylesheet. Run it
 with `pnpm dev` in `crates/gui` and `cargo run -p earworm-gui`, or
 `pnpm tauri dev`; `pnpm test` runs the page's tests: the reducer's, and the

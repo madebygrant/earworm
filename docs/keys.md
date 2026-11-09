@@ -169,6 +169,7 @@ with no pick gate; the one downloading has already left the list.
 | --- | --- |
 | `j` `k` `↑` `↓` `g` `G` | move |
 | `^d` `^u` `PgDn` `PgUp` | move by a screenful |
+| `n` | type a new link, in the last link field (desktop app only) |
 | `x` `Delete` | take the link off the queue |
 | `X` | empty the queue, after a question (`y` or `enter`) |
 | `l` | toggle the yt-dlp output pane, where refused links are named |

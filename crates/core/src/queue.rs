@@ -73,6 +73,22 @@ pub fn links(text: &str, unlocked: &Unlocked) -> (Vec<String>, Vec<Rejected>) {
     (links, rejected)
 }
 
+/// Why each typed field would queue nothing, or `None` for one holding a link: the desktop's link fields keep
+/// the fields with a reason, under it, and clear the rest. A field holding a link and a refusal keeps the reason.
+pub fn field_problems(fields: &[String], unlocked: &Unlocked) -> Vec<Option<String>> {
+    fields
+        .iter()
+        .map(|field| {
+            let (found, rejected) = links(field, unlocked);
+            match rejected.into_iter().next() {
+                Some(refused) => Some(refused.why),
+                None if found.is_empty() => Some("not a link".into()),
+                None => None,
+            }
+        })
+        .collect()
+}
+
 // A link as it sits in prose or markdown: `[name](url)`, `(url)`, `url,`.
 fn candidate(token: &str) -> Option<&str> {
     let token = token.rsplit_once("](").map_or(token, |(_, url)| url);
@@ -283,6 +299,13 @@ mod tests {
         let (found, rejected) = links("https://music.youtube.com/playlist?list=OLAK5uy_x", &unlocked);
         assert_eq!(found.len(), 1);
         assert!(rejected.is_empty());
+    }
+
+    #[test]
+    fn each_field_says_why_it_would_queue_nothing() {
+        let fields = [A, "hello", "https://example.com/x", &format!("{B} https://example.com/y")].map(String::from);
+        let problems = field_problems(&fields, &Unlocked::default());
+        assert_eq!(problems, [None, Some("not a link".into()), Some("not a YouTube link".into()), Some("not a YouTube link".into())]);
     }
 
     #[test]

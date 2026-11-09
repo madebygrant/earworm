@@ -124,8 +124,13 @@ Paste several links anywhere in the window, outside a text box, and earworm
 queues them and downloads them one after another, as in the
 [terminal](workflow.md#several-links-at-once). The link field on the first
 screen and in the `n` dialog takes several too: the first is the answer and
-the rest are queued behind it. The queue screen lists what is waiting, with
-a button on each row to take it off and a Clear button for the lot. `q`
+the rest are queued behind it. The queue screen (`Q`, or the queue's chip)
+has link fields at the top for typing links one at a time: Enter or Another
+link gives you a new field, and Queue (or ⌘Enter) queues them all. A field
+whose link was refused stays, with the reason under it, and a paste of
+several lines into a field becomes a field each. Below them is what is
+waiting, with a button on each row to take it off and a Clear button for the
+lot. `q`
 asks first while links are waiting, and whatever is still queued when you
 close the app is offered back at the next start.
 

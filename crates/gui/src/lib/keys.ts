@@ -59,7 +59,8 @@ export async function handleKey(e: KeyboardEvent) {
   if (view === "Settings") return settingsKey(e);
   // Never where it would be a typed comma: a query box or the picker.
   // Not over the pick gate, which the worker is blocked on and which would stay drawn over the settings.
-  if (e.key === "," && !ui.typing && !screens.artistTyping && view !== "Pick" && app.model.picking === null) {
+  const boxed = e.target instanceof HTMLInputElement;
+  if (e.key === "," && !ui.typing && !screens.artistTyping && !boxed && view !== "Pick" && app.model.picking === null) {
     e.preventDefault();
     return sc.openSettings();
   }
@@ -111,13 +112,20 @@ function clearingKey(e: KeyboardEvent) {
 
 const help = (e: KeyboardEvent) => (e.key === "h" || e.key === "?") && (screens.help = true);
 
-// The links waiting. `x` and Delete take one off, as they take a track off a custom playlist.
+// The links waiting. `x` and Delete take one off, as they take a track off a custom playlist, and `n` is a new
+// link, as on the library: the last link field.
 function queueKey(e: KeyboardEvent) {
   const k = e.key;
+  // A link field keeps its letters; Queue.svelte handles its Enter and Esc.
+  if (e.target instanceof HTMLInputElement) return;
   if (listMove(e, sc.queueMove) || help(e)) return;
   if (k === "q" || (e.ctrlKey && k === "c")) return askQuit();
   if (k === "Escape" || k === "Q") return sc.leaveQueue();
   if (k === "l") return void (ui.logs = !ui.logs);
+  if (k === "n") {
+    e.preventDefault();
+    return void (screens.focusField = screens.fields.length - 1);
+  }
   if (k === "x" || k === "Delete") return void sc.unqueue();
   if (k === "X") return app.model.queue.length ? void (screens.clearing = true) : say("nothing queued");
 }

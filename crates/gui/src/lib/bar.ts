@@ -44,7 +44,7 @@ function screenKeys(m: State): [string, string][] {
     return keys;
   }
   if (m.view === "Settings") return [["enter", "change"], ["esc", "back"]];
-  if (m.view === "Queue") return [[PASTE, "add links"], ["x", "remove"], ["X", "clear"], ["esc", "back"]];
+  if (m.view === "Queue") return [["n", "new link"], [PASTE, "add links"], ["x", "remove"], ["X", "clear"], ["esc", "back"]];
   // While it runs the screen is for watching: the cursor can follow it, and fixing waits for the end.
   const f: [string, string] = ["f", m.follow ? "stop following" : "follow"];
   if (running()) return [f, ["/", "filter"], ["v", m.review ? "all" : "worth a look"]];

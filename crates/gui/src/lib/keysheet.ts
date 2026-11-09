@@ -50,7 +50,8 @@ export const SHEETS: Record<View, [string, Group[]]> = {
   ]],
   Queue: ["queue", [
     ["move", MOVE],
-    ["edit", [["⌘v ^v", "paste links, on any screen"], ["x", "take this one off"], ["X", "empty the queue"]]],
+    ["edit", [["n", "type a new link"], ["⌘v ^v", "paste links, on any screen"], ["x", "take this one off"], ["X", "empty the queue"]]],
+    ["in a link field", [["enter", "another link"], ["⌘enter ^enter", "queue them all"], ["esc", "back to the list"]]],
     ["leave", [["esc Q", "the screen before"], ["l", "the log"], ["q ^c", "quit"]]],
   ]],
   Settings: ["settings", [

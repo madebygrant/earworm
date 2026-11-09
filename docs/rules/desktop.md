@@ -305,6 +305,18 @@
   both front ends. Checked in the running app: three links pasted on the
   library, and three pasted into the `n` dialog, each synced three folders
   with one finish menu.
+- **The queue screen's link fields keep their keys, and the shell says what
+  each one did.** `queueKey` runs before the general guard on a focused
+  input, so without its own guard an `x` typed into a field took a link off
+  the queue, and a `,` anywhere opened the settings (`a link field keeps its
+  letters, and n on the queue focuses the last field`). The fields go to
+  `enqueue_fields` in one call; `queue::field_problems` gives each field's
+  reason from the same `links` a paste goes through, so the page keeps only
+  the refused fields, with the reason, and decides nothing about what a link
+  is (`each_field_says_why_it_would_queue_nothing`, `the link fields go to
+  the shell together, and only those it refused stay, with why`). Checked in
+  the running app: two links and a word typed into three fields synced both
+  links with one finish menu, and the word's field stayed with its reason.
 - **The empty-queue question is App's, not the queue screen's.** A queued
   link starting moves the page to the track list, which took the question
   away with the screen while its keys stayed live, and the next Enter

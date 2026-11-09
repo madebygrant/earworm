@@ -318,6 +318,25 @@ fn enqueue(text: String, lead: Option<String>, app: tauri::AppHandle, shell: Sta
     added.said()
 }
 
+/// What the queue screen's link fields did: the flash, and why each field queued nothing, in their order.
+#[derive(Serialize)]
+struct Typed {
+    said: String,
+    problems: Vec<Option<String>>,
+}
+
+/// The queue screen's link fields, queued as one paste. With nothing queueable, nothing is sent and the
+/// fields say why, rather than a flash about a paste nobody made.
+#[tauri::command]
+fn enqueue_fields(fields: Vec<String>, app: tauri::AppHandle, shell: State<Shell>) -> Typed {
+    let problems = earworm_core::queue::field_problems(&fields, &shell.unlocked);
+    if problems.iter().all(Option::is_some) {
+        return Typed { said: "nothing queued".into(), problems };
+    }
+    let said = enqueue(fields.join("\n"), None, app, shell);
+    Typed { said, problems }
+}
+
 /// What a paste into the URL field did: `lead` answered question `id` and the rest were queued behind it,
 /// or `None` when it held fewer than two links and is the box's to type.
 #[derive(Serialize)]
@@ -816,7 +835,7 @@ fn main() {
             start, send, answer, stop, theme_next, cheat, rows, shelf_rows, search, artist_rows,
             release_rows, take, flip, invert, gate_marks, unread, mark_new, counts, picker_rows, pick_toggle,
             pick_changes, earned, shown, next_icons, switch_flag, lead_artist, new_titles, artist_at, next_kind, next_sort, probe, tools, latest, acoustid_key, quit,
-            enqueue, paste_links, unqueue, clear_queue
+            enqueue, enqueue_fields, paste_links, unqueue, clear_queue
         ])
         .build(tauri::generate_context!())
         .expect("the window could not be built")
