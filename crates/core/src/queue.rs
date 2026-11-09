@@ -22,6 +22,23 @@ pub struct Added {
     pub rejected: Vec<Rejected>,
 }
 
+impl Added {
+    /// What a front end flashes after a paste. One wording, so the two front ends cannot say it differently.
+    pub fn said(&self) -> String {
+        let mut said = match (self.added, self.repeats) {
+            (0, 0) if self.rejected.is_empty() => "no links in that paste".to_string(),
+            (0, 0) => "nothing queued".to_string(),
+            (0, _) => "already queued".to_string(),
+            (n, 0) => format!("queued {n}  ·  Q shows them"),
+            (n, r) => format!("queued {n}  ·  {r} already there  ·  Q shows them"),
+        };
+        if !self.rejected.is_empty() {
+            said = format!("{said}  ·  {} refused  ·  l has which", self.rejected.len());
+        }
+        said
+    }
+}
+
 /// Every link in pasted text, in order. Links only: a file path would mean reading the disk, and this
 /// runs on the UI thread. Words and list bullets around the links are passed over rather than refused.
 pub fn links(text: &str, unlocked: &Unlocked) -> (Vec<String>, Vec<Rejected>) {

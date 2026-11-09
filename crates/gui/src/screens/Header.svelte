@@ -2,7 +2,7 @@
   import type { IconName } from "../lib/icons";
   import { press } from "../lib/keys";
   import { settledCount } from "../lib/reducer";
-  import { leaveSettings, screens } from "../lib/screens.svelte";
+  import { leaveSettings, openQueue, screens } from "../lib/screens.svelte";
   import { app, walkTheme } from "../lib/store.svelte";
   import { running, send, ui, working } from "../lib/ui.svelte";
   import Icon from "./Icon.svelte";
@@ -23,12 +23,12 @@
     : m.view === "Playlist" ? m.custom.name
     : m.view === "Pick" ? screens.pick.name
     : m.view === "Artist" ? m.page.name
-    : ["Found", "Artists", "Settings"].includes(m.view) ? ""
+    : ["Found", "Artists", "Settings", "Queue"].includes(m.view) ? ""
     : m.playlist,
   );
   // A screen's own word, which a message from a key always shows over: a refusal hidden by it reads as a dead key.
   // The library's stage is only ever "library", which the pill already says.
-  const WORD: Partial<Record<string, string>> = { Library: "", Found: "search", Playlist: "custom playlist", Pick: "pick tracks", Artists: "", Artist: "", Settings: "" };
+  const WORD: Partial<Record<string, string>> = { Library: "", Found: "search", Playlist: "custom playlist", Pick: "pick tracks", Artists: "", Artist: "", Settings: "", Queue: "" };
   const word = $derived(m.flash ?? (m.busy ? undefined : WORD[m.view]) ?? m.stage);
   const count = $derived(m.view !== "Tracks" || !m.tracks.length ? "" : `${settledCount(m)} of ${m.tracks.length}`);
 
@@ -84,7 +84,7 @@
     { name: "Settings", icon: "settings", on: m.view === "Settings", go: free && m.view !== "Pick" ? () => press(",") : null },
   ]);
   // Before a link has any tracks, no pill is lit and the screen is the run's.
-  const here = $derived(runOn ? "Run" : (pills.find((p) => p.on)?.name ?? (m.view === "Tracks" ? "Run" : "Library")));
+  const here = $derived(runOn ? "Run" : m.view === "Queue" ? "Queue" : (pills.find((p) => p.on)?.name ?? (m.view === "Tracks" ? "Run" : "Library")));
   // The pill already names the screen, so its own word is not said again.
   const said = $derived(word.toLowerCase() === here.toLowerCase() ? "" : word);
 
@@ -139,6 +139,12 @@
         <button class="run" class:on={runOn} aria-current={runOn} title={runOn ? "this run" : `back to the run: ${run.name}`} disabled={!runGo && !runOn} onclick={() => runGo?.()}>
           <Icon name="run" /><span class="name">{run.name}</span><span class="said {runTone}">{runSaid}</span>
           {#if live}<span class="progress"><i style:width="{(100 * settledCount(m)) / m.tracks.length}%"></i></span>{/if}
+        </button>
+      {/if}
+      <!-- The queue's chip: `Q` from the keyboard, a click from the mouse, and gone when nothing waits. -->
+      {#if m.queue.length || m.view === "Queue"}
+        <button class="run" class:on={m.view === "Queue"} aria-current={m.view === "Queue"} title="links waiting to download" disabled={!free} onclick={() => (m.view === "Queue" ? null : openQueue())}>
+          <Icon name="link" /><span class="name">Queue</span><span class="said">{m.queue.length} waiting</span>
         </button>
       {/if}
       <button class="search" title="Find a track" disabled={!library} onclick={out(() => press("t"))}><Icon name="search" /><span>Find a track</span></button>

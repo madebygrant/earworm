@@ -56,6 +56,11 @@ export const screens = $state({
   relatedAsked: false,
   settingsAt: 0,
   settingsBack: "Library" as View,
+  // The queue's cursor, as a position, and the screen `Q` was pressed on, which Esc goes back to.
+  queueAt: 0,
+  queueBack: "Library" as View,
+  // `X` asks before it empties the queue.
+  clearing: false,
   // The achievements on show and when they went up, then those waiting for a calm screen.
   toast: null as { prizes: Prize[]; at: number } | null,
   waiting: [] as Prize[],
@@ -407,6 +412,67 @@ export async function artistFolders() {
 }
 
 // ---- settings (`,`)
+
+// ---- the queue (`Q`)
+
+export function openQueue() {
+  if (m().view === "Queue") return;
+  screens.queueBack = m().view;
+  screens.queueAt = 0;
+  go("Queue");
+}
+
+export function leaveQueue() {
+  go(screens.queueBack);
+}
+
+// The cursor on a row that is there: the queue shrinks under it as the worker takes links.
+export function queueCursor(): number {
+  return Math.min(screens.queueAt, Math.max(0, m().queue.length - 1));
+}
+
+export function queueMove(by: number | "first" | "last") {
+  const at = step(m().queue.map((_, i) => i), queueCursor(), by);
+  if (at !== undefined) screens.queueAt = at;
+}
+
+// By the link under the cursor, which the shell removes only if it is still waiting.
+export async function unqueue(link = m().queue[queueCursor()]) {
+  if (link === undefined) return say("nothing queued");
+  if (!(await invoke<boolean>("unqueue", { link }))) say("already started");
+}
+
+export async function clearQueue() {
+  screens.clearing = false;
+  say((await invoke<boolean>("clear_queue")) ? "queue cleared" : "nothing queued");
+}
+
+/** Queues the links in a paste and says what became of them. `lead` is the URL prompt's own answer. */
+export async function enqueue(text: string, lead: string | null = null) {
+  say(await invoke<string>("enqueue", { text, lead }));
+}
+
+// The URL prompt's paste: several links answer it with the first and queue the rest, as in the terminal.
+// The shell answers the question by its id, so an Enter that lands first is not answered twice. Its reply
+// comes too late to let the browser paste, so a paste of one goes in at the caret by hand, read after the
+// wait so nothing typed meanwhile is lost, through `set`. `answered` is the box's own bookkeeping.
+export async function pasteLinks(e: ClipboardEvent, set: (value: string) => void, answered: () => void = () => {}) {
+  const open = m().prompt;
+  if (!open || !("Input" in open.prompt) || !open.prompt.Input.links) return;
+  const box = e.currentTarget as HTMLInputElement;
+  const text = e.clipboardData?.getData("text") ?? "";
+  e.preventDefault();
+  const { lead, said } = await invoke<{ lead: string | null; said: string | null }>("paste_links", { text, id: open.id });
+  if (lead !== null) {
+    if (m().prompt?.id === open.id) app.model = { ...app.model, prompt: null };
+    answered();
+    if (said) say(said);
+    return;
+  }
+  if (m().prompt?.id !== open.id) return;
+  const [from, to] = [box.selectionStart ?? box.value.length, box.selectionEnd ?? box.value.length];
+  set(box.value.slice(0, from) + text.split(/\s+/).join(" ").trim() + box.value.slice(to));
+}
 
 export function openSettings() {
   if (m().view === "Settings") return;

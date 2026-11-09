@@ -2,6 +2,7 @@
   import type { Prompt } from "../lib/protocol";
   import { open } from "@tauri-apps/plugin-dialog";
   import { digitChoice } from "../lib/reducer";
+  import { pasteLinks } from "../lib/screens.svelte";
   import { reply } from "../lib/store.svelte";
 
   // The worker's question, over the screen that asked it. Text is typed into real inputs, so the caret,
@@ -23,6 +24,7 @@
       value?: string;
       pictures?: (string | null)[];
       browse?: "Folder" | "File" | null;
+      links?: boolean;
     },
   );
   // The options with a picture are drawn as one, and the rest stay rows under them.
@@ -92,7 +94,7 @@
 <div class="look"><div class="scrim">
   <div class="dialog" class:wide={hasPictures} role="dialog" aria-label={body.header}>
     <h3>{body.header}</h3>
-    {#if body.note}<p class="note">{body.note}</p>{/if}
+    {#if body.note}<p class="note">{body.note}{#if body.links}{"  ·  "}paste several to queue them{/if}</p>{/if}
     {#if kind === "Choice" && hasPictures}
       <div class="choose">
         {#each pictured.filter(([, , pic]) => pic) as [i, label, pic] (i)}
@@ -127,7 +129,7 @@
       </div>
     {:else}
       <div class="form" style="grid-template-columns:{body.browse ? '1fr auto' : '1fr'}">
-        <div class="box focus"><input bind:this={inputs[0]} bind:value={values[0]} spellcheck="false" /></div>
+        <div class="box focus"><input bind:this={inputs[0]} bind:value={values[0]} onpaste={(e) => pasteLinks(e, (v) => (values[0] = v))} spellcheck="false" /></div>
         {#if body.browse}<button class="browse" onclick={browse}>Choose…</button>{/if}
       </div>
     {/if}

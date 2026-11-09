@@ -2,7 +2,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount, untrack } from "svelte";
-  import { clearFilter, handleKey, press } from "./lib/keys";
+  import { clearFilter, handleKey, press, windowPaste } from "./lib/keys";
   import type { Shelf } from "./lib/protocol";
   import { firstScreen, settledCount } from "./lib/reducer";
   import { app, boot, hooks } from "./lib/store.svelte";
@@ -30,6 +30,8 @@
   import Run from "./screens/Run.svelte";
   import Library from "./screens/Library.svelte";
   import Room from "./screens/Room.svelte";
+  import Queue from "./screens/Queue.svelte";
+  import ClearQueue from "./screens/ClearQueue.svelte";
   import sprite from "./icons.svg?raw";
 
   const m = $derived(app.model);
@@ -143,6 +145,7 @@
   });
 
   hooks.restart = clearFilter;
+
   onMount(() => void boot());
 
   // Dev builds report what is on screen, for checks that cannot take a screenshot.
@@ -171,6 +174,7 @@
       artist: screens.artist,
       page: m.view === "Artist" ? { name: m.page.name, section: screens.section, releases: screens.releaseRows.length, error: m.page.error } : null,
       settingsAt: m.view === "Settings" ? m.settings.rows[screens.settingsAt]?.key : null,
+      queue: m.queue,
       hints: [...document.querySelectorAll(".bar .hints > span")].map((e) => e.textContent?.trim()).join(" | "),
       byArtist: ui.byArtist?.[0] ?? null,
       filter: ui.filter,
@@ -185,7 +189,7 @@
 </script>
 
 <!-- A click never leaves a button holding the focus, or the next space or Enter would press it again. -->
-<svelte:window onkeydown={handleKey} onmousedown={(e) => (e.target as HTMLElement).closest("button") && e.preventDefault()} />
+<svelte:window onkeydown={handleKey} onpaste={windowPaste} onmousedown={(e) => (e.target as HTMLElement).closest("button") && e.preventDefault()} />
 
 <!-- Once, for every Icon's <use>; positioned out of the body's grid. -->
 {@html sprite}
@@ -212,6 +216,8 @@
     <ArtistPage />
   {:else if m.view === "Settings"}
     <Settings />
+  {:else if m.view === "Queue"}
+    <Queue />
   {:else if running}
     <Room />
   {:else if m.view === "Tracks" && m.tracks.length}
@@ -229,6 +235,7 @@
 {#if ui.quitting}<Quit />{/if}
 {#if screens.help}<Help />{/if}
 {#if screens.discard}<Discard />{/if}
+{#if screens.clearing}<ClearQueue />{/if}
 <Toast />
 {#if screens.secret}<Secret found={screens.secret} />{/if}
 <Console />

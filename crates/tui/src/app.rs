@@ -1617,17 +1617,7 @@ impl App {
         for refused in &added.rejected {
             self.apply(Msg::Log(format!("{}: {}", refused.text, refused.why)));
         }
-        let mut said = match (added.added, added.repeats) {
-            (0, 0) if added.rejected.is_empty() => "no links in that paste".to_string(),
-            (0, 0) => "nothing queued".to_string(),
-            (0, _) => "already queued".to_string(),
-            (n, 0) => format!("queued {n}  ·  Q shows them"),
-            (n, r) => format!("queued {n}  ·  {r} already there  ·  Q shows them"),
-        };
-        if !added.rejected.is_empty() {
-            said = format!("{said}  ·  {} refused  ·  l has which", added.rejected.len());
-        }
-        self.say(said);
+        self.say(added.said());
     }
 
     /// `q` on a screen with no run of its own: it quits, unless links are waiting, which quitting drops.

@@ -12,14 +12,14 @@ export const SHEETS: Record<View, [string, Group[]]> = {
     ["move", [...MOVE, ["n N", "next unconfirmed"], ["f", "follow the run"], ["w", "tiles or list"]]],
     ["narrow", [["/", "filter"], ["v", "only unconfirmed"], ["space", "mark"], ["m M", "mark status, artist"]]],
     ["fix", [["e", "edit tags"], ["T", "search again"], ["s A", "swap, set artist"], ["c", "cover art"], ["u", "undo"], ["*", "star the artist"]]],
-    ["run", [["r", "retry failed"], ["S", "sync this"], ["D", "delete departed"], ["p", "play in cliamp"], ["P", "add to a playlist"], ["l L", "log, taller"]]],
+    ["run", [["r", "retry failed"], ["S", "sync this"], ["D", "delete departed"], ["p", "play in cliamp"], ["P", "add to a playlist"], ["l L", "log, taller"], ["Q", "the queue"]]],
     ["leave", [["esc", "filter, marks, then the library"], ["q ^c", "quit"]]],
   ]],
   Library: ["library", [
     ["move", [...MOVE, ["w", "tiles or list"]]],
     ["narrow", [["/", "filter folders"], ["s", "sort"], ["a", "kind"], ["t", "find a track"], ["b", "artists"]]],
     ["folder", [["enter", "open"], ["e", "rename"], ["D", "remove"], ["O", "show folder"], ["E", "export"], ["p", "play"]]],
-    ["sync", [["S", "sync this"], ["R", "sync all"], ["n", "new link"], ["N", "new custom playlist"], ["space", "play/pause"]]],
+    ["sync", [["S", "sync this"], ["R", "sync all"], ["n", "new link, or paste several"], ["N", "new custom playlist"], ["Q", "the queue"], ["space", "play/pause"]]],
     ["leave", [[",", "settings"], ["l", "the log"], ["q ^c", "quit"]]],
   ]],
   Found: ["search", [
@@ -47,6 +47,11 @@ export const SHEETS: Record<View, [string, Group[]]> = {
     ["move", [...MOVE, ["tab", "releases, top tracks, related"], ["w", "tiles or list"]]],
     ["page", [["enter", "open a related artist"], ["a", "albums and EPs, or all"], ["o", "their folders"]]],
     ["leave", [["esc", "the page before"], ["l", "the log"], ["q ^c", "quit"]]],
+  ]],
+  Queue: ["queue", [
+    ["move", MOVE],
+    ["edit", [["⌘v ^v", "paste links, on any screen"], ["x", "take this one off"], ["X", "empty the queue"]]],
+    ["leave", [["esc Q", "the screen before"], ["l", "the log"], ["q ^c", "quit"]]],
   ]],
   Settings: ["settings", [
     ["move", MOVE],

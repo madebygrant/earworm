@@ -397,3 +397,10 @@ main.app.no-detail { grid-template-columns: minmax(0, 1fr); }
 .look .toolbar .go { display: none; padding: 7px 16px; border-radius: 999px; font-weight: 700; background: var(--accent); color: var(--ink); }
 .look .toolbar .go.plain { background: none; color: var(--text); border: 1px solid var(--line); }
 @media (max-width: 1100px) { .look .toolbar .go { display: inline-flex; gap: 8px; align-items: center; } }
+
+/* The queue: its Clear button shows at every width, unlike the pick gate's, which the sheet has when wide. */
+.look .toolbar .clear, .look .dialog .acts button { display: inline-flex; gap: 8px; align-items: center; padding: 7px 16px; border-radius: 999px; font-weight: 700; background: none; color: var(--text); border: 1px solid var(--line); }
+.look .dialog .acts { display: flex; gap: 10px; }
+.look .dialog .acts .yes { background: var(--accent); color: var(--ink); border: none; }
+.look td .unqueue { padding: 4px; border-radius: 8px; background: none; color: var(--muted); border: none; }
+.look td .unqueue:hover { color: var(--text); background: var(--card2); }
