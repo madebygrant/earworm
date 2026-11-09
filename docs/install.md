@@ -26,7 +26,7 @@ brew install yt-dlp ffmpeg chromaprint
 Then earworm itself:
 
 ```sh
-cargo install --git https://github.com/madebygrant/earworm --tag v1.0.0
+cargo install --git https://github.com/madebygrant/earworm --tag v1.1.0
 ```
 
 Drop the `--tag` to build from the newest code instead, and see

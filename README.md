@@ -48,7 +48,7 @@ track's tags and file path in a pane on the right, and the keys along the
 bottom](docs/images/earworm.png)
 
 ```sh
-cargo install --git https://github.com/madebygrant/earworm --tag v1.0.0
+cargo install --git https://github.com/madebygrant/earworm --tag v1.1.0
 
 earworm                                            # open the app
 earworm 'https://youtube.com/playlist?list=...'    # or go straight to a playlist
