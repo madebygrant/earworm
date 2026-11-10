@@ -188,9 +188,9 @@ fn song_ids(found: &str, want: &str) -> Vec<String> {
         .collect()
 }
 
-// A whole credited name, not containment: "Candlemass" is not Can's channel.
+// A whole credited name, not containment: "Candlemass" is not Can's channel. "Can - Topic" is.
 fn same_artist(by: &str, artist: &str) -> bool {
-    crate::lookup::credits(by, artist)
+    crate::lookup::credits(by.strip_suffix(" - Topic").unwrap_or(by), artist)
 }
 
 fn flat(bin: &str, args: &[&str]) -> Result<String, String> {
@@ -987,6 +987,15 @@ mod tests {
         assert_eq!(album_line("OLAK5uy_q\tAlbum - Greatest Hits\t17\tQueen", "Foo Fighters", "Greatest Hits"), None);
         assert!(album_line("OLAK5uy_f\tAlbum - Greatest Hits\t16\tFoo Fighters", "Foo Fighters", "Greatest Hits").is_some());
         assert!(album_line("OLAK5uy_n\tAlbum - Greatest Hits\t16\tNA", "Foo Fighters", "Greatest Hits").is_some());
+    }
+
+    // The line yt-dlp 2026.08.19 printed for Can's Tago Mago.
+    #[test]
+    fn a_topic_channel_is_its_artist() {
+        let line = "OLAK5uy_m\tAlbum - Tago Mago (40th Anniversary Edition)\t10\tCan - Topic";
+        assert_eq!(album_line(line, "Can", "Tago Mago").map(|h| h.by), Some("Can - Topic".to_string()));
+        assert_eq!(album_line("OLAK5uy_c\tAlbum - Tago Mago\t7\tCandlemass - Topic", "Can", "Tago Mago"), None);
+        assert!(same_artist("Can - Topic", "Can"));
     }
 
     // The search lists browse ids, each resolved in turn until one is the record asked for.
