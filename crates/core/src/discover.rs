@@ -15,7 +15,7 @@ const EDITION: [&str; 11] =
     ["deluxe", "remaster", "remastered", "edition", "expanded", "anniversary", "bonus", "reissue", "version", "special", "mono"];
 const MASTERING: [&str; 4] = ["remaster", "remastered", "mono", "stereo"];
 // And one that makes it another record whatever else the part says: "(Live Version)" is not the studio album.
-const OTHER: [&str; 4] = ["live", "acoustic", "instrumental", "demo"];
+pub(crate) const OTHER: [&str; 4] = ["live", "acoustic", "instrumental", "demo"];
 
 /// The Deezer artist a name resolved to.
 #[derive(Clone, Debug, PartialEq, Eq)]

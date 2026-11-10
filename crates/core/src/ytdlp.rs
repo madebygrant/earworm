@@ -179,11 +179,10 @@ pub(crate) fn find_song_with(bin: &str, artist: &str, title: &str) -> Result<Opt
 
 // Results whose title is the song asked for, in the search's order.
 fn song_ids(found: &str, want: &str) -> Vec<String> {
-    let want = crate::discover::song_key(want);
     found
         .lines()
         .filter_map(|line| line.split_once('\t'))
-        .filter(|(id, title)| !id.is_empty() && crate::discover::song_key(title) == want)
+        .filter(|(id, title)| !id.is_empty() && same_title(title, want, crate::discover::song_key))
         .map(|(id, _)| id.to_string())
         .collect()
 }
@@ -226,12 +225,44 @@ fn album_line(line: &str, artist: &str, want: &str) -> Option<AlbumHit> {
         return None;
     }
     let title = ["Album - ", "EP - ", "Single - "].iter().find_map(|p| shown.strip_prefix(p)).unwrap_or(shown);
-    (crate::discover::album_key(title) == crate::discover::album_key(want)).then(|| AlbumHit {
+    same_title(title, want, crate::discover::album_key).then(|| AlbumHit {
         url: format!("https://{}/playlist?list={id}", crate::worker::MUSIC_HOST),
         title: title.to_string(),
         tracks: count.trim().parse().unwrap_or(0),
         by: by.to_string(),
     })
+}
+
+// YouTube Music can show a title in two scripts where Deezer has one ("樂-STAR ROCK-STAR" for "ROCK-STAR").
+// Extra words count only when they are the other script, so "Can Delay" is still not "Can".
+fn same_title(shown: &str, want: &str, key: fn(&str) -> String) -> bool {
+    let target = key(want);
+    if key(shown) == target {
+        return true;
+    }
+    let latin = !non_latin(want);
+    let words: Vec<&str> = shown.split(|c: char| c.is_whitespace() || c == '/').filter(|w| !w.is_empty()).collect();
+    (1..words.len()).any(|cut| {
+        let (head, tail) = (words[..cut].join(" "), words[cut..].join(" "));
+        (key(&head) == target && translation(&tail, latin)) || (key(&tail) == target && translation(&head, latin))
+    })
+}
+
+// "Live" and the like in either script, since `album_key` only knows the English words.
+const OTHER_NATIVE: [&str; 8] = ["라이브", "ライブ", "現場", "现场", "인스트", "インスト", "어쿠스틱", "アコースティック"];
+
+fn translation(extra: &str, want_latin: bool) -> bool {
+    let lower = extra.to_lowercase();
+    let english = lower.split(|c: char| !c.is_alphanumeric()).any(|w| crate::discover::OTHER.contains(&w));
+    if english || OTHER_NATIVE.iter().any(|w| lower.contains(w)) {
+        return false;
+    }
+    if want_latin { non_latin(extra) } else { extra.chars().any(char::is_alphabetic) && !non_latin(extra) }
+}
+
+// Past Latin Extended-B, less Latin Extended Additional, so "Björk" and Vietnamese stay Latin.
+fn non_latin(text: &str) -> bool {
+    text.chars().any(|c| c.is_alphabetic() && c > '\u{024F}' && !('\u{1E00}'..='\u{1EFF}').contains(&c))
 }
 
 /// Resolves ids, titles and destination paths from the playlist listing alone.
@@ -996,6 +1027,29 @@ mod tests {
         assert_eq!(album_line(line, "Can", "Tago Mago").map(|h| h.by), Some("Can - Topic".to_string()));
         assert_eq!(album_line("OLAK5uy_c\tAlbum - Tago Mago\t7\tCandlemass - Topic", "Can", "Tago Mago"), None);
         assert!(same_artist("Can - Topic", "Can"));
+    }
+
+    // The line yt-dlp printed for Stray Kids' ROCK-STAR, which Deezer titles in Latin only.
+    #[test]
+    fn a_title_shown_in_two_scripts_is_the_record_and_extra_latin_words_are_not() {
+        let line = "OLAK5uy_n\tAlbum - 樂-STAR ROCK-STAR\t8\tStray Kids";
+        assert_eq!(album_line(line, "Stray Kids", "ROCK-STAR").map(|h| h.title), Some("樂-STAR ROCK-STAR".to_string()));
+        let album = |shown, want| same_title(shown, want, crate::discover::album_key);
+        assert!(album("ROCK-STAR (樂-STAR)", "ROCK-STAR"));
+        assert!(album("ROCK-STAR/樂-STAR", "ROCK-STAR"));
+        assert!(album("樂-STAR ROCK-STAR", "樂-STAR"), "Deezer's native title with YouTube's Latin one beside it");
+        assert!(!album("樂-STAR ROCK-STAR", "5-STAR"));
+        assert!(!album("Can Delay", "Can"));
+        assert!(!album("Björk Live", "Björk"));
+        assert!(!album("Chúng Ta Của Hiện Tại", "Chúng Ta"), "Vietnamese is Latin");
+        assert!(!album("ROCK-STAR (라이브)", "ROCK-STAR"), "a live record in Korean is not the studio album");
+        assert!(!album("樂-STAR Live", "樂-STAR"));
+    }
+
+    // The title yt-dlp printed for Stray Kids' LALALALA, which Deezer titles in Latin only.
+    #[test]
+    fn a_song_titled_in_two_scripts_is_the_song() {
+        assert_eq!(song_ids("HNcmCKTWd6w\t락 (樂) LALALALA\nVG4lpTHuytc\tMANIAC\n", "LALALALA"), ["HNcmCKTWd6w"]);
     }
 
     // The search lists browse ids, each resolved in turn until one is the record asked for.
