@@ -142,8 +142,22 @@
   has to match on `album_key`, and the channel has to credit the artist by a
   whole name (`lookup::credits`), or another act's "Greatest Hits" is
   downloaded. Containment let "Candlemass" stand for Can. A channel of `NA` is
-  not held against it. Measured hit rate and timing are in docs/history.md
+  not held against it, and an auto-generated `Can - Topic` channel is Can's:
+  yt-dlp reports Art Tracks that way, and comparing the whole channel turned
+  down every album. YouTube Music can title a record or a song in two scripts
+  where Deezer uses one ("樂-STAR ROCK-STAR" for "ROCK-STAR", "락 (樂)
+  LALALALA" for "LALALALA"), so words beside the title, split at spaces or
+  `/`, are allowed only when they are in the script the wanted title is not.
+  Extra words in the same script are another record, and Vietnamese
+  (Latin Extended Additional) counts as Latin. The extra words are never
+  read for meaning beyond "live", "acoustic", "instrumental" and "demo" and
+  a few Korean, Japanese and Chinese words for live, acoustic and
+  instrumental (`OTHER_NATIVE`), so another language's live album relies on
+  the confirm. Measured hit rate and timing are in docs/history.md
   (`an_album_line_matches_the_release_and_keeps_the_music_host`,
+  `a_topic_channel_is_its_artist`,
+  `a_title_shown_in_two_scripts_is_the_record_and_extra_latin_words_are_not`,
+  `a_song_titled_in_two_scripts_is_the_song`,
   `an_album_by_another_artist_is_not_the_one_asked_for`,
   `a_credit_is_a_whole_name_and_never_a_name_inside_another`,
   `the_album_search_resolves_candidates_until_one_is_the_record`).
